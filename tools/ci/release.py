@@ -12,15 +12,13 @@
                                              firmware upload
         Uses build-B/flasher_args.json and esptool's merge_bin.
 
-    tools/ci/release.py manifests --out DIR --version V [--check dist]
-        Writes the ESP Web Tools manifests for the flasher page:
-          DIR/manifests/<board>.json  one per board, pointing at
-                                      ../firmware/ghostlight-node-<board>-V-full.bin
-          DIR/boards.json             the board list the page shows
-        The copies in docs/flasher/ are made with --version unreleased; the
-        release workflow writes them again for the version it publishes.
-        --check fails if a full image a manifest points at is not in that
-        folder.
+    tools/ci/release.py flasher --dist dist --version V
+        Writes dist/flasher.json, the index the browser flasher on
+        https://defeatedwarrior.github.io/flasher.html reads to put this
+        release on the page:
+          {"version": V, "boards": [{"board", "chip_family", "description",
+                                     "full", "ota"}, ...]}
+        Fails if a file it lists is not in dist/.
 
 The board list always comes from boards/*/sdkconfig.defaults, so a new board
 folder is picked up without editing anything here.
@@ -135,46 +133,25 @@ def cmd_images(args):
         print(f"{p}: {os.path.getsize(p)} bytes")
 
 
-def cmd_manifests(args):
-    os.makedirs(os.path.join(args.out, "manifests"), exist_ok=True)
+def cmd_flasher(args):
     index = []
     for b in boards():
-        full = file_name(b["board"], args.version, "full")
-        if args.check and not os.path.isfile(os.path.join(args.check, full)):
-            fail(f"{full} is missing from {args.check}")
-        manifest = {
-            "name": f"Ghostlight Node firmware ({b['board']})",
-            "version": args.version,
-            # A new install always erases the whole flash first (ESP Web
-            # Tools' default): partition tables differ between boards and
-            # releases, so old settings are not kept.
-            "new_install_prompt_erase": False,
-            "builds": [
-                {
-                    "chipFamily": b["chip_family"],
-                    "parts": [
-                        {
-                            "path": "../firmware/" + full,
-                            "offset": 0,
-                        }
-                    ],
-                }
-            ],
-        }
-        rel = f"manifests/{b['board']}.json"
-        with open(os.path.join(args.out, rel), "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
-            f.write("\n")
-        index.append({
+        row = {
             "board": b["board"],
             "chip_family": b["chip_family"],
             "description": b["description"],
-            "manifest": rel,
-        })
-    with open(os.path.join(args.out, "boards.json"), "w", encoding="utf-8") as f:
+            "full": file_name(b["board"], args.version, "full"),
+            "ota": file_name(b["board"], args.version, "ota"),
+        }
+        for kind in ("full", "ota"):
+            if not os.path.isfile(os.path.join(args.dist, row[kind])):
+                fail(f"{row[kind]} is missing from {args.dist}")
+        index.append(row)
+    out = os.path.join(args.dist, "flasher.json")
+    with open(out, "w", encoding="utf-8") as f:
         json.dump({"version": args.version, "boards": index}, f, indent=2)
         f.write("\n")
-    print(f"wrote {len(index)} manifests to {args.out}")
+    print(f"wrote {out} ({len(index)} boards)")
 
 
 def main():
@@ -190,11 +167,10 @@ def main():
     s.add_argument("--version", required=True)
     s.set_defaults(func=cmd_images)
 
-    s = sub.add_parser("manifests")
-    s.add_argument("--out", required=True)
+    s = sub.add_parser("flasher")
+    s.add_argument("--dist", required=True, help="folder with the release files")
     s.add_argument("--version", required=True)
-    s.add_argument("--check", metavar="DIR", help="folder that must hold every full image")
-    s.set_defaults(func=cmd_manifests)
+    s.set_defaults(func=cmd_flasher)
 
     args = p.parse_args()
     args.func(args)

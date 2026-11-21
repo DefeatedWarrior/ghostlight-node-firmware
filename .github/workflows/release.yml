@@ -2,16 +2,21 @@
 # docs/DEVELOPING.md.
 #
 # Pushing a tag vX.Y.Z builds every board folder under boards/ (the same way
-# build.yml does), attaches two files per board to a GitHub Release, and
-# publishes the flasher page (docs/flasher/) with the merged images to
-# GitHub Pages:
+# build.yml does) and attaches these files to a GitHub Release:
 #   ghostlight-node-<board>-<version>-full.bin  everything, flash at 0x0
 #   ghostlight-node-<board>-<version>-ota.bin   the app, for the web UI upload
+#   flasher.json                                the board list for the flasher
+#   SHA256SUMS.txt
 # The tag must match PROJECT_VER in CMakeLists.txt (v1.2.0 <-> "1.2.0").
 #
-# Running it by hand (Actions > Release > Run workflow) is a dry run: it
-# builds everything and keeps the files as workflow artifacts, but creates no
-# release and deploys nothing.
+# The browser flasher lives on https://defeatedwarrior.github.io/flasher.html
+# (repository DefeatedWarrior/DefeatedWarrior.github.io). A workflow there
+# picks up the newest release within a few hours, or straight away when it is
+# run by hand, and copies the full images next to the page.
+#
+# Running this workflow by hand (Actions > Release > Run workflow) is a dry
+# run: it builds everything and keeps the files as a workflow artifact, but
+# creates no release.
 name: Release
 
 on:
@@ -97,7 +102,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Release files and flasher site
+    name: Release
     needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
@@ -120,27 +125,23 @@ jobs:
           sha256sum -- *.bin > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Assemble the flasher site
-        run: |
-          cp -r docs/flasher site
-          python3 tools/ci/release.py manifests --out site --version "$VERSION" --check dist
-          mkdir -p site/firmware
-          cp dist/*-full.bin site/firmware/
-          find site -type f | sort
+      - name: Flasher index
+        run: python3 tools/ci/release.py flasher --dist dist --version "$VERSION"
 
-      # On a dry run this is just a workflow artifact named github-pages.
-      - name: Upload the flasher site
-        uses: actions/upload-pages-artifact@v5
+      - name: Keep the files (dry run)
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v7
         with:
-          path: site
+          name: release-dry-run
+          path: dist/
 
       - name: Release notes
         if: github.event_name == 'push'
-        env:
-          FLASHER_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
         run: |
           {
-            echo "**Install from your browser:** $FLASHER_URL (Chrome or Edge, over USB)"
+            echo "**Install from your browser:** https://defeatedwarrior.github.io/flasher.html"
+            echo "(Chrome or Edge, over USB). The same page can set up the node's Wi-Fi"
+            echo "and ports over USB. New releases show up there within a few hours."
             echo
             echo "Two files per board:"
             echo
@@ -152,7 +153,8 @@ jobs:
             echo "  already runs this firmware. Upload it in the web UI under"
             echo "  Firmware Update. Settings are kept."
             echo
-            echo "\`SHA256SUMS.txt\` has the checksums."
+            echo "\`SHA256SUMS.txt\` has the checksums. \`flasher.json\` lists the boards for"
+            echo "the browser flasher."
           } > release-notes.md
 
       - name: Publish the GitHub Release
@@ -166,23 +168,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.bin
+            dist/flasher.json
             dist/SHA256SUMS.txt
-
-  pages:
-    name: Deploy the flasher
-    needs: release
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5

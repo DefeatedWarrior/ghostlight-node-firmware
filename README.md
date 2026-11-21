@@ -188,10 +188,15 @@ DIR is high to transmit. The pin headers are in
 ## 💻 Install from your browser
 
 You don't need ESP-IDF to put the firmware on a node. Open the
-**[web flasher](https://defeatedwarrior.github.io/ghostlight-node-firmware/)**
+**[web flasher](https://defeatedwarrior.github.io/flasher.html)**
 in Chrome or Edge on a desktop or laptop, pick your board, plug the node in
 over USB and click **Install**. Installing erases the node, including its
 settings and scenes.
+
+Then, on the same page, **Set up over USB** gives the node its name, admin
+password, Wi-Fi network and DMX universes while it is still plugged in, and
+shows the address to open its web UI at. No need to join the node's own
+Wi-Fi first.
 
 To update a node that already runs this firmware and keep its settings,
 download `ghostlight-node-<board>-<version>-ota.bin` from the
