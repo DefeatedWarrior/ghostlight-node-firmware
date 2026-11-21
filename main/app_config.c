@@ -68,6 +68,14 @@ void app_apply_config(void)
 
     for (int p = 1; p <= NPORTS; p++) {
         const port_config_t *pc = config_port(c, p);
+#if CONFIG_NODE_TESTER
+        port_config_t tester_pc;
+        if (g_app.tester) {
+            /* tester mode: the port's job and timing come from c->tester */
+            config_tester_port_settings(c, p, &tester_pc);
+            pc = &tester_pc;
+        }
+#endif
         route_t *r = &g_app.route[p - 1];
         const port_config_t *old = &g_app.applied[p - 1];
         bool hw_changed = !g_app.applied_valid || pc->mode != old->mode ||
@@ -100,10 +108,14 @@ void app_apply_config(void)
 #endif
             r->tx_started = false;
 
-            ESP_LOGI(TAG, "Port %d: %s, Art-Net %u (%u:%u:%u), sACN %u", p,
-                     dmx_mode_to_string(pc->mode), pc->universe_primary,
-                     (pc->universe_primary >> 8) & 0x7F, (pc->universe_primary >> 4) & 0xF,
-                     pc->universe_primary & 0xF, pc->sacn_universe);
+            if (g_app.tester) {
+                ESP_LOGI(TAG, "Port %d: tester, %s", p, dmx_mode_to_string(pc->mode));
+            } else {
+                ESP_LOGI(TAG, "Port %d: %s, Art-Net %u (%u:%u:%u), sACN %u", p,
+                         dmx_mode_to_string(pc->mode), pc->universe_primary,
+                         (pc->universe_primary >> 8) & 0x7F, (pc->universe_primary >> 4) & 0xF,
+                         pc->universe_primary & 0xF, pc->sacn_universe);
+            }
             esp_err_t err = dmx_handler_configure_port(p, pc);
             if (err == ESP_OK && pc->mode != DMX_MODE_DISABLED) {
                 err = dmx_handler_start_port(p);

@@ -31,6 +31,12 @@
  *   app_scenes.c     power-on scenes and the ArtAddress failsafe record
  *   app_indicator.c  status LED (locate / identify), port LEDs, reset button
  *
+ * DMX tester mode (g_app.tester, CONFIG_NODE_TESTER): chosen at start-up
+ * from config_t.tester. Art-Net, sACN, the RDM bridge and scenes are not
+ * started; the ports run the tester jobs (config_tester_port_settings()),
+ * send ports output the dmx_tester levels and receive ports feed the
+ * dmx_tester statistics instead of the network.
+ *
  * Callbacks from the network and DMX tasks only read g_app.route and set
  * event bits; everything that changes state runs on the main task.
  */
@@ -48,6 +54,7 @@
 #include "artnet_receiver.h"
 #include "sacn_receiver.h"
 #include "dmx_tools.h"
+#include "dmx_tester.h"
 
 #define NPORTS      CONFIG_DMX_PORTS
 
@@ -87,6 +94,7 @@ typedef struct {
     volatile bool identify[NPORTS];      /* RDM identify per port */
     volatile int64_t web_identify_until; /* web "Identify" button, 0 = off */
     volatile uint8_t startup_mask;       /* ports showing their power-on scene */
+    bool tester;                         /* started in DMX tester mode (no Art-Net / sACN) */
 } app_state_t;
 
 extern app_state_t g_app;

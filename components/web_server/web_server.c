@@ -62,6 +62,7 @@
 #include "merge_engine.h"
 #include "scene_manager.h"
 #include "dmx_tools.h"
+#include "dmx_tester.h"
 #include "web_internal.h"
 
 // Embedded web files
@@ -80,6 +81,14 @@ static const char *TAG = "web_server";
 #define MAX_WS_CLIENTS 4
 
 // DMX constants for validation
+#if CONFIG_IDF_TARGET_ESP32S3
+#define WEB_CHIP_NAME "ESP32-S3"
+#elif CONFIG_IDF_TARGET_ESP32
+#define WEB_CHIP_NAME "ESP32"
+#else
+#define WEB_CHIP_NAME CONFIG_IDF_TARGET
+#endif
+
 #define DMX_MAX_PORTS CONFIG_DMX_PORTS
 #define DMX_MAX_CHANNELS 512
 #define DMX_MAX_VALUE 255
@@ -279,7 +288,7 @@ esp_err_t web_server_start(void)
     // /api/network/wifi-scan + /api/ports/* x6 + /api/system/* x5 +
     // /api/rdm/discover + /api/rdm/identify + /api/scenes x3 (list/record/playback) +
     // /api/scenes/1..16 DELETE x16 + /ws = 43 routes → use 48 for headroom.
-    config.max_uri_handlers = 72 + 3 * CONFIG_DMX_PORTS;   /* ~62 registered with 2 ports */
+    config.max_uri_handlers = 72 + 3 * CONFIG_DMX_PORTS + WEB_TESTER_ROUTES;
 
     // Remove WebSocket clients whenever their socket closes (browser tab
     // closed, WiFi dropped, LRU purge) - not only on a CLOSE frame.
@@ -370,8 +379,9 @@ esp_err_t web_server_start(void)
         }
     }
 
-    /* Diagnostics and DMX tools (web_tools.c) */
+    /* Diagnostics and DMX tools (web_tools.c), DMX tester (web_tester.c) */
     web_tools_register(server_state.server);
+    web_tester_register(server_state.server);
 
     // System APIs
     httpd_uri_t system_info_uri = {
@@ -819,10 +829,12 @@ static esp_err_t api_config_get_handler(httpd_req_t *req)
     cJSON *net = cJSON_CreateObject();
     cJSON_AddNumberToObject(net, "mode", config->network.mode);
     cJSON_AddBoolToObject(net, "ap_always", config->network.ap_always);
+#if CONFIG_NODE_ETHERNET
     cJSON_AddBoolToObject(net, "eth_use_static_ip", config->network.eth_use_static_ip);
     cJSON_AddStringToObject(net, "eth_static_ip", config->network.eth_static_ip);
     cJSON_AddStringToObject(net, "eth_gateway", config->network.eth_gateway);
     cJSON_AddStringToObject(net, "eth_netmask", config->network.eth_netmask);
+#endif
     cJSON_AddStringToObject(net, "ap_ssid", config->network.ap_ssid);
     cJSON_AddNumberToObject(net, "ap_channel", config->network.ap_channel);
     cJSON_AddNumberToObject(net, "wifi_profile_count", config->network.wifi_profile_count);
@@ -855,6 +867,24 @@ static esp_err_t api_config_get_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(merge, "timeout_seconds", config->merge.timeout_seconds);
     cJSON_AddNumberToObject(merge, "loss_behavior", config->merge.loss_behavior);
     cJSON_AddItemToObject(json, "merge", merge);
+
+    // DMX tester (the same shape POST /api/config takes)
+    cJSON *tester = cJSON_AddObjectToObject(json, "tester");
+    if (tester) {
+        cJSON_AddBoolToObject(tester, "enabled", config->tester.enabled);
+        cJSON *tports = cJSON_AddArrayToObject(tester, "ports");
+        for (int p = 0; tports && p < CONFIG_DMX_PORTS; p++) {
+            const tester_port_config_t *t = &config->tester.ports[p];
+            cJSON *o = cJSON_CreateObject();
+            if (!o) break;
+            cJSON_AddStringToObject(o, "role", config_tester_role_name(t->role));
+            cJSON_AddNumberToObject(o, "rate_hz", t->rate_hz);
+            cJSON_AddNumberToObject(o, "break_us", t->break_us);
+            cJSON_AddNumberToObject(o, "mab_us", t->mab_us);
+            cJSON_AddNumberToObject(o, "slots", t->slots);
+            cJSON_AddItemToArray(tports, o);
+        }
+    }
 
     send_json_response(req, json, 200);
     cJSON_Delete(json);
@@ -990,7 +1020,11 @@ static esp_err_t api_network_status_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(json, "ap_always", sup.ap_always);
     cJSON_AddStringToObject(json, "hostname", network_get_hostname());
 
+#if CONFIG_NODE_ETHERNET
     cJSON *eth = cJSON_AddObjectToObject(json, "ethernet");
+#else
+    cJSON *eth = NULL;   /* not built in: no "ethernet" object at all */
+#endif
     if (eth) {
         cJSON_AddBoolToObject(eth, "enabled", sup.eth_wanted);
         cJSON_AddBoolToObject(eth, "present", sup.eth.present);
@@ -1164,6 +1198,9 @@ static esp_err_t api_ports_status_handler(httpd_req_t *req)
                                            sync == MERGE_SYNC_SACN ? "sacn" : "none");
         cJSON_AddNumberToObject(o, "scene", scene_active(p));
         cJSON_AddBoolToObject(o, "failsafe", merge_engine_in_failsafe(p));
+        if (dmx_tester_enabled()) {
+            cJSON_AddStringToObject(o, "tester_role", config_tester_role_name(cfg->tester.ports[p - 1].role));
+        }
         dmx_output_timing_t tm;
         if (dmx_handler_get_output_timing(p, &tm) == ESP_OK) {
             cJSON *t = cJSON_AddObjectToObject(o, "timing");
@@ -1252,6 +1289,9 @@ static esp_err_t api_port_blackout_handler(httpd_req_t *req)
     // data takes over again as soon as it arrives.
     scene_release(port, 0);
     esp_err_t ret = merge_engine_blackout(port);
+    if (dmx_tester_enabled()) {
+        dmx_tester_fill(port, 1, 512, 0);   /* tester: the levels it sends */
+    }
     
     cJSON *json = cJSON_CreateObject();
     if (ret == ESP_OK) {
@@ -1284,8 +1324,29 @@ static esp_err_t api_system_info_handler(httpd_req_t *req)
     cJSON_AddStringToObject(json, "project", app->project_name);
     cJSON_AddStringToObject(json, "build_date", app->date);
     cJSON_AddStringToObject(json, "build_time", app->time);
-    cJSON_AddStringToObject(json, "hardware", BOARD_NAME " (ESP32-S3)");
+    cJSON_AddStringToObject(json, "hardware", BOARD_NAME " (" WEB_CHIP_NAME ")");
+    cJSON_AddStringToObject(json, "board", BOARD_NAME);
+    cJSON_AddStringToObject(json, "chip", WEB_CHIP_NAME);
     cJSON_AddNumberToObject(json, "ports", CONFIG_DMX_PORTS);
+    /* What this firmware was built with (menuconfig: ESP-NODE > Features);
+     * the web UI hides what is missing */
+    cJSON *feat = cJSON_AddObjectToObject(json, "features");
+    if (feat) {
+        cJSON_AddBoolToObject(feat, "ethernet", WEB_HAS(CONFIG_NODE_ETHERNET));
+        cJSON_AddBoolToObject(feat, "sacn", WEB_HAS(CONFIG_NODE_SACN));
+        cJSON_AddBoolToObject(feat, "rdm", WEB_HAS(CONFIG_NODE_RDM));
+        cJSON_AddBoolToObject(feat, "scenes", WEB_HAS(CONFIG_NODE_SCENES));
+        cJSON_AddBoolToObject(feat, "dmx_tools", WEB_HAS(CONFIG_NODE_DMX_TOOLS));
+        cJSON_AddBoolToObject(feat, "web_log", WEB_HAS(CONFIG_NODE_WEB_LOG));
+        cJSON_AddBoolToObject(feat, "mdns", WEB_HAS(CONFIG_NODE_MDNS));
+        cJSON_AddBoolToObject(feat, "tester", WEB_HAS(CONFIG_NODE_TESTER));
+    }
+    cJSON *tst = cJSON_AddObjectToObject(json, "tester");
+    if (tst) {
+        cJSON_AddBoolToObject(tst, "available", WEB_HAS(CONFIG_NODE_TESTER));
+        cJSON_AddBoolToObject(tst, "enabled", dmx_tester_enabled());          /* running now */
+        cJSON_AddBoolToObject(tst, "next_boot", config_get()->tester.enabled);
+    }
     cJSON_AddStringToObject(json, "idf_version", esp_get_idf_version());
     cJSON_AddStringToObject(json, "partition", running ? running->label : "?");
     cJSON_AddNumberToObject(json, "free_heap", esp_get_free_heap_size());
@@ -1626,8 +1687,8 @@ static esp_err_t api_rdm_address_handler(httpd_req_t *req)
     uint16_t address = (uint16_t)jaddr->valueint;
     cJSON_Delete(body);
 
-    esp_err_t err = (port >= 1 && port <= 2) ? dmx_handler_rdm_set_address(port, uid, address)
-                                             : ESP_ERR_INVALID_ARG;
+    esp_err_t err = (port >= 1 && port <= CONFIG_DMX_PORTS) ? dmx_handler_rdm_set_address(port, uid, address)
+                                                           : ESP_ERR_INVALID_ARG;
     if (err == ESP_OK) {
         cJSON *resp = cJSON_CreateObject();
         cJSON_AddStringToObject(resp, "status", "ok");
@@ -1846,9 +1907,15 @@ static esp_err_t ws_handler(httpd_req_t *req)
                 ESP_LOGD(TAG, "WebSocket: set DMX port %d ch %d = %d",
                          port, channel, value);
 
-                /* Local layer: HTP on top of network data, held until
-                 * released, other channels untouched */
-                merge_engine_set_local_channel(port, (uint16_t)channel, (uint8_t)value);
+                if (dmx_tester_enabled()) {
+                    /* tester: the level the send port outputs */
+                    uint8_t v = (uint8_t)value;
+                    dmx_tester_set_levels((uint8_t)port, (uint16_t)channel, &v, 1);
+                } else {
+                    /* Local layer: HTP on top of network data, held until
+                     * released, other channels untouched */
+                    merge_engine_set_local_channel(port, (uint16_t)channel, (uint8_t)value);
+                }
                 
                 cJSON *resp = cJSON_CreateObject();
                 cJSON_AddStringToObject(resp, "status", "ok");
@@ -1869,6 +1936,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
                 ESP_LOGI(TAG, "WebSocket: blackout port %d", port);
                 scene_release(port, 0);
                 merge_engine_blackout(port);
+                if (dmx_tester_enabled()) dmx_tester_fill((uint8_t)port, 1, 512, 0);
                 
                 cJSON *resp = cJSON_CreateObject();
                 cJSON_AddStringToObject(resp, "status", "ok");
@@ -2290,8 +2358,8 @@ static uint8_t s_ws_last[sizeof(s_ws_frame)];
 static bool port_levels(int port, uint8_t data[512], bool *input)
 {
     dmx_port_status_t st;
-    if (dmx_handler_get_port_status(port, &st) == ESP_OK &&
-        (st.mode == DMX_MODE_INPUT || st.mode == DMX_MODE_RDM_RESPONDER)) {
+    bool ok = dmx_handler_get_port_status(port, &st) == ESP_OK;
+    if (ok && (st.mode == DMX_MODE_INPUT || st.mode == DMX_MODE_RDM_RESPONDER)) {
         *input = true;
         /* after a signal loss the last frame stays visible, marked not live */
         if (!st.is_active || dmx_handler_read_dmx(port, data, 0) != ESP_OK) {
@@ -2300,9 +2368,10 @@ static bool port_levels(int port, uint8_t data[512], bool *input)
         return st.is_active && st.stats.signal_present;
     }
     *input = false;
-    if (dmx_test_active_mask() & (1u << (port - 1))) {
-        dmx_handler_get_levels(port, data);   /* test pattern: what is on the wire */
-        return true;
+    if ((dmx_test_active_mask() & (1u << (port - 1))) || dmx_tester_enabled()) {
+        /* test pattern or tester: what is on the wire */
+        dmx_handler_get_levels(port, data);
+        return ok && st.is_active;
     }
     merge_engine_get_output(port, data);
     return merge_engine_is_output_active(port);
@@ -2372,6 +2441,11 @@ static void restart_later(uint32_t ms)
         }
     }
     esp_timer_start_once(t, (uint64_t)ms * 1000);
+}
+
+void web_restart_later(uint32_t ms)
+{
+    restart_later(ms);
 }
 
 /**

@@ -110,6 +110,15 @@ static void port_defaults(port_config_t *p, uint16_t artnet, uint16_t sacn)
 #define DEF_ARTNET(i) ((uint16_t)(i))
 #define DEF_SACN(i)   ((uint16_t)((i) + 1))
 
+static void tester_defaults(tester_port_config_t *t, int index)
+{
+    t->role = (index % 2 == 0) ? TESTER_ROLE_SEND : TESTER_ROLE_RECEIVE;
+    t->rate_hz = CONFIG_DMX_RATE_DEFAULT;
+    t->break_us = CONFIG_DMX_BREAK_DEFAULT;
+    t->mab_us = CONFIG_DMX_MAB_DEFAULT;
+    t->slots = CONFIG_DMX_SLOTS_MAX;
+}
+
 // Default configuration
 static void config_set_defaults_into(config_t *c)
 {
@@ -140,6 +149,13 @@ static void config_set_defaults_into(config_t *c)
              "ESP-NODE-2RDM Art-Net/sACN to DMX512/RDM Node");
     c->node_info.sacn_priority = 100;
     c->node_info.allow_ip_prog = true;
+
+    /* Tester: odd ports send, even ports receive, so a cable from port 1
+     * to port 2 is a loopback test straight away */
+    c->tester.enabled = false;
+    for (int i = 0; i < CONFIG_DMX_PORTS; i++) {
+        tester_defaults(&c->tester.ports[i], i);
+    }
 }
 
 #define CLAMP_FIELD(field, lo, hi, def) do {                              \
@@ -185,6 +201,54 @@ static bool sanitize_port(port_config_t *p, uint16_t def_artnet, uint16_t def_sa
     }
 #endif
     return changed;
+}
+
+static bool sanitize_tester_port(tester_port_config_t *t)
+{
+    bool changed = false;
+    CLAMP_FIELD(t->role, TESTER_ROLE_OFF, TESTER_ROLE_LAST, TESTER_ROLE_OFF);
+    CLAMP_FIELD(t->rate_hz, CONFIG_DMX_RATE_MIN, CONFIG_DMX_RATE_MAX, CONFIG_DMX_RATE_DEFAULT);
+    CLAMP_FIELD(t->break_us, CONFIG_DMX_BREAK_MIN, CONFIG_DMX_BREAK_MAX, CONFIG_DMX_BREAK_DEFAULT);
+    CLAMP_FIELD(t->mab_us, CONFIG_DMX_MAB_MIN, CONFIG_DMX_MAB_MAX, CONFIG_DMX_MAB_DEFAULT);
+    CLAMP_FIELD(t->slots, CONFIG_DMX_SLOTS_MIN, CONFIG_DMX_SLOTS_MAX, CONFIG_DMX_SLOTS_MAX);
+#if !CONFIG_NODE_RDM
+    if (t->role == TESTER_ROLE_RDM) { t->role = TESTER_ROLE_SEND; changed = true; }
+#endif
+    return changed;
+}
+
+static const char *const TESTER_ROLE_NAMES[] = {"off", "send", "receive", "rdm"};
+
+const char *config_tester_role_name(uint8_t role)
+{
+    return role <= TESTER_ROLE_LAST ? TESTER_ROLE_NAMES[role] : "off";
+}
+
+int config_tester_role_from_name(const char *name)
+{
+    for (int i = 0; name && i <= TESTER_ROLE_LAST; i++) {
+        if (strcmp(name, TESTER_ROLE_NAMES[i]) == 0) return i;
+    }
+    return -1;
+}
+
+void config_tester_port_settings(const config_t *c, int port, port_config_t *out)
+{
+    const tester_port_config_t *t = &c->tester.ports[port - 1];
+    *out = c->ports[port - 1];
+    switch (t->role) {
+    case TESTER_ROLE_SEND:    out->mode = DMX_MODE_OUTPUT;     break;
+    case TESTER_ROLE_RECEIVE: out->mode = DMX_MODE_INPUT;      break;
+    case TESTER_ROLE_RDM:     out->mode = DMX_MODE_RDM_MASTER; break;
+    default:                  out->mode = DMX_MODE_DISABLED;   break;
+    }
+    out->rdm_enabled = t->role == TESTER_ROLE_RDM;
+    out->out_rate_hz = t->rate_hz;
+    out->break_us = t->break_us;
+    out->mab_us = t->mab_us;
+    out->out_slots = t->slots;
+    out->startup_scene = 0;
+    out->failsafe_scene = 0;
 }
 
 static void terminate(char *s, size_t size)
@@ -238,6 +302,12 @@ bool config_sanitize(config_t *c)
     c->network.wifi_profile_count = n;
 
     CLAMP_FIELD(c->network.mode, NET_MODE_AUTO, NET_MODE_LAST, NET_MODE_AUTO);
+#if !CONFIG_NODE_ETHERNET
+    if (c->network.mode == NET_MODE_ETHERNET) {
+        c->network.mode = NET_MODE_AUTO;   /* no Ethernet built in: Wi-Fi, else own AP */
+        changed = true;
+    }
+#endif
     CLAMP_FIELD(c->network.ap_channel, 1, 13, 1);
     if (c->network.ap_ssid[0] == '\0') {
         default_names(c->network.ap_ssid, sizeof(c->network.ap_ssid), NULL, 0);
@@ -252,7 +322,14 @@ bool config_sanitize(config_t *c)
 
     for (int i = 0; i < CONFIG_DMX_PORTS; i++) {
         changed |= sanitize_port(&c->ports[i], DEF_ARTNET(i), DEF_SACN(i));
+        changed |= sanitize_tester_port(&c->tester.ports[i]);
     }
+#if !CONFIG_NODE_TESTER
+    if (c->tester.enabled) {
+        c->tester.enabled = false;   /* built without the tester */
+        changed = true;
+    }
+#endif
 
     CLAMP_FIELD(c->merge.timeout_seconds, 1, 60, 3);
     CLAMP_FIELD(c->merge.loss_behavior, LOSS_HOLD_LAST_LOOK, LOSS_LAST, LOSS_HOLD_LAST_LOOK);
@@ -529,6 +606,23 @@ esp_err_t config_to_json(char **json_str)
         cJSON_AddBoolToObject(node_info, "allow_ip_prog", g_config.node_info.allow_ip_prog);
     }
 
+    cJSON *tester = cJSON_AddObjectToObject(root, "tester");
+    if (tester) {
+        cJSON_AddBoolToObject(tester, "enabled", g_config.tester.enabled);
+        cJSON *tports = cJSON_AddArrayToObject(tester, "ports");
+        for (int i = 0; tports && i < CONFIG_DMX_PORTS; i++) {
+            const tester_port_config_t *t = &g_config.tester.ports[i];
+            cJSON *o = cJSON_CreateObject();
+            if (!o) break;
+            cJSON_AddStringToObject(o, "role", config_tester_role_name(t->role));
+            cJSON_AddNumberToObject(o, "rate_hz", t->rate_hz);
+            cJSON_AddNumberToObject(o, "break_us", t->break_us);
+            cJSON_AddNumberToObject(o, "mab_us", t->mab_us);
+            cJSON_AddNumberToObject(o, "slots", t->slots);
+            cJSON_AddItemToArray(tports, o);
+        }
+    }
+
     if (g_config.security.admin_hash[0] != '\0') {
         cJSON *security = cJSON_AddObjectToObject(root, "security");
         if (security) {
@@ -690,6 +784,28 @@ static esp_err_t parse_json(const char *json_str, bool from_file)
         json_get_str(node_info, "long_name", c->node_info.long_name, sizeof(c->node_info.long_name));
         if (json_get_int(node_info, "sacn_priority", 0, 200, &v)) c->node_info.sacn_priority = v;
         json_get_bool(node_info, "allow_ip_prog", &c->node_info.allow_ip_prog);
+    }
+
+    const cJSON *tester = cJSON_GetObjectItemCaseSensitive(root, "tester");
+    if (cJSON_IsObject(tester)) {
+        json_get_bool(tester, "enabled", &c->tester.enabled);
+        const cJSON *tports = cJSON_GetObjectItemCaseSensitive(tester, "ports");
+        int i = 0;
+        const cJSON *o;
+        if (cJSON_IsArray(tports)) {
+            cJSON_ArrayForEach(o, tports) {
+                if (i >= CONFIG_DMX_PORTS) break;
+                tester_port_config_t *t = &c->tester.ports[i++];
+                if (!cJSON_IsObject(o)) continue;
+                const cJSON *jr = cJSON_GetObjectItemCaseSensitive(o, "role");
+                int role = cJSON_IsString(jr) ? config_tester_role_from_name(jr->valuestring) : -1;
+                if (role >= 0) t->role = (uint8_t)role;
+                if (json_get_int(o, "rate_hz", CONFIG_DMX_RATE_MIN, CONFIG_DMX_RATE_MAX, &v)) t->rate_hz = v;
+                if (json_get_int(o, "break_us", CONFIG_DMX_BREAK_MIN, CONFIG_DMX_BREAK_MAX, &v)) t->break_us = v;
+                if (json_get_int(o, "mab_us", CONFIG_DMX_MAB_MIN, CONFIG_DMX_MAB_MAX, &v)) t->mab_us = v;
+                if (json_get_int(o, "slots", CONFIG_DMX_SLOTS_MIN, CONFIG_DMX_SLOTS_MAX, &v)) t->slots = v;
+            }
+        }
     }
 
     /* Credentials come from the config file only, never from the web API */

@@ -155,6 +155,14 @@ static ip_config_t eth_ip_config(const settings_t *t)
     return ic;
 }
 
+/* Ethernet is only ever wanted when it is built in (menuconfig: ESP-NODE >
+ * Features > Wired Ethernet); without it "automatic" is Wi-Fi, else own AP */
+#if CONFIG_NODE_ETHERNET
+#define ETH_BUILT_IN true
+#else
+#define ETH_BUILT_IN false
+#endif
+
 static const char *mode_name(uint8_t m)
 {
     switch (m) {
@@ -499,7 +507,8 @@ static void tick(int64_t now)
     network_get_eth_info(&eth);
 
     /* ---- Ethernet ---- */
-    bool eth_wanted = (t->mode == NET_MODE_AUTO || t->mode == NET_MODE_ETHERNET) && !s.eth_absent;
+    bool eth_wanted = ETH_BUILT_IN && (t->mode == NET_MODE_AUTO || t->mode == NET_MODE_ETHERNET) &&
+                      !s.eth_absent;
     if (eth_wanted && !eth.running) {
         ip_config_t ic = eth_ip_config(t);
         esp_err_t err = network_ethernet_connect(&ic);
@@ -583,7 +592,7 @@ static void tick(int64_t now)
     network_supervisor_status_t st = {0};
     st.mode = t->mode;
     st.ap_always = t->ap_always;
-    st.eth_wanted = (t->mode == NET_MODE_AUTO || t->mode == NET_MODE_ETHERNET);
+    st.eth_wanted = ETH_BUILT_IN && (t->mode == NET_MODE_AUTO || t->mode == NET_MODE_ETHERNET);
     st.eth = eth;
     st.sta_wanted = sta_wanted;
     network_get_sta_info(&st.sta);

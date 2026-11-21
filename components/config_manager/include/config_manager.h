@@ -104,6 +104,24 @@ typedef struct {
     uint8_t failsafe_scene;       // output when sources are lost and loss = LOSS_SCENE
 } port_config_t;
 
+/* DMX tester mode (CONFIG_NODE_TESTER). The node stops being an Art-Net /
+ * sACN node and each port does one tester job, driven from the web UI. */
+typedef enum {
+    TESTER_ROLE_OFF = 0,
+    TESTER_ROLE_SEND,      /* DMX output: levels, test patterns, output timing */
+    TESTER_ROLE_RECEIVE,   /* DMX input: levels, analyser, flicker watch */
+    TESTER_ROLE_RDM,       /* RDM controller: discovery, identify, addressing */
+} tester_role_t;
+#define TESTER_ROLE_LAST TESTER_ROLE_RDM
+
+typedef struct {
+    uint8_t role;          /* tester_role_t */
+    uint8_t rate_hz;       /* output timing of send / RDM ports */
+    uint16_t break_us;
+    uint16_t mab_us;
+    uint16_t slots;
+} tester_port_config_t;
+
 #define CONFIG_ARTNET_UNIVERSE_MAX 32767
 #define CONFIG_SACN_UNIVERSE_MIN   1
 #define CONFIG_SACN_UNIVERSE_MAX   63999
@@ -145,6 +163,13 @@ typedef struct {
         uint8_t sacn_priority;        // priority of sACN this node transmits (DMX input)
         bool allow_ip_prog;           // consoles may change the IP address (ArtIpProg)
     } node_info;
+
+    /* DMX tester mode. "enabled" is read at start-up only: changing it
+     * takes a restart. The port jobs and timing apply live. */
+    struct {
+        bool enabled;
+        tester_port_config_t ports[CONFIG_DMX_PORTS];
+    } tester;
 
     /* Web UI admin credentials. Only ever read from / written to the config
      * file: config_from_json() (the web API) cannot change them. An empty
@@ -211,6 +236,17 @@ esp_err_t config_from_json(const char *json_str);
 
 /** One port's settings as a cJSON object (the "portN" object of the config) */
 struct cJSON *config_port_to_json(const port_config_t *p);
+
+/** "off" / "send" / "receive" / "rdm" */
+const char *config_tester_role_name(uint8_t role);
+/** Parse a tester role name; -1 if unknown */
+int config_tester_role_from_name(const char *name);
+
+/**
+ * Settings DMX port @p port runs with in tester mode: the port's normal
+ * settings with the mode, RDM and output timing taken from the tester.
+ */
+void config_tester_port_settings(const config_t *c, int port, port_config_t *out);
 
 /**
  * @brief Clamp every field of @p cfg to a valid value and make sure all

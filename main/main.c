@@ -27,6 +27,7 @@
 #include "scene_manager.h"
 #include "rdm_bridge.h"
 #include "dmx_tools.h"
+#include "dmx_tester.h"
 #include "diag.h"
 #include "board.h"
 #include "app.h"
@@ -150,6 +151,18 @@ void app_main(void)
     config_load();   /* falls back to defaults by itself */
     config_t *config = config_get();
     ESP_LOGI(TAG, "Node \"%s\"", config->node_info.short_name);
+#if CONFIG_NODE_TESTER
+    /* DMX tester mode is chosen once, here: the web UI saves it and restarts */
+    g_app.tester = config->tester.enabled;
+    if (dmx_tester_init(g_app.tester) != ESP_OK) {
+        ESP_LOGE(TAG, "Not enough memory for DMX tester mode, starting as a node");
+        g_app.tester = false;
+        dmx_tester_init(false);
+    }
+    if (g_app.tester) {
+        ESP_LOGW(TAG, "DMX TESTER MODE: Art-Net, sACN, RDM bridge and scenes are off");
+    }
+#endif
 
     ESP_ERROR_CHECK(led_manager_init());
     led_manager_set_state(LED_STATE_BOOT);
@@ -178,10 +191,12 @@ void app_main(void)
     make_hostname(config->node_info.short_name, hostname, sizeof(hostname));
     ESP_ERROR_CHECK(network_init());   /* starts lwIP: no socket() before this */
 
-    ESP_ERROR_CHECK(artnet_transmitter_init());
+    if (!g_app.tester) {
+        ESP_ERROR_CHECK(artnet_transmitter_init());
 #if CONFIG_NODE_SACN
-    ESP_ERROR_CHECK(sacn_transmitter_init(config->node_info.short_name));
+        ESP_ERROR_CHECK(sacn_transmitter_init(config->node_info.short_name));
 #endif
+    }
 
     network_set_hostname(hostname);
     network_register_state_callback(app_network_state_changed, NULL);
@@ -190,36 +205,41 @@ void app_main(void)
     start_mdns(config, hostname);
 #endif
 
-    ESP_ERROR_CHECK(artnet_receiver_init());
-    ESP_ERROR_CHECK(artnet_receiver_set_callback(app_on_artnet_dmx, NULL));
-    ESP_ERROR_CHECK(artnet_receiver_set_status_callback(app_artnet_status, NULL));
-    ESP_ERROR_CHECK(artnet_receiver_set_address_callback(app_artnet_address, NULL));
-    ESP_ERROR_CHECK(artnet_receiver_set_sync_callback(app_on_artnet_sync, NULL));
-    ESP_ERROR_CHECK(artnet_receiver_set_ipprog_callback(app_on_artnet_ipprog, NULL));
-    ESP_ERROR_CHECK(artnet_receiver_start());
-    /* ArtDmx we send uses UDP source port 6454, as the spec requires */
-    artnet_transmitter_use_socket(artnet_receiver_get_socket());
+    /* Tester mode is not a node: no Art-Net / sACN socket at all, so
+     * nothing is received and controllers don't see it (no ArtPollReply) */
+    if (!g_app.tester) {
+        ESP_ERROR_CHECK(artnet_receiver_init());
+        ESP_ERROR_CHECK(artnet_receiver_set_callback(app_on_artnet_dmx, NULL));
+        ESP_ERROR_CHECK(artnet_receiver_set_status_callback(app_artnet_status, NULL));
+        ESP_ERROR_CHECK(artnet_receiver_set_address_callback(app_artnet_address, NULL));
+        ESP_ERROR_CHECK(artnet_receiver_set_sync_callback(app_on_artnet_sync, NULL));
+        ESP_ERROR_CHECK(artnet_receiver_set_ipprog_callback(app_on_artnet_ipprog, NULL));
+        ESP_ERROR_CHECK(artnet_receiver_start());
+        /* ArtDmx we send uses UDP source port 6454, as the spec requires */
+        artnet_transmitter_use_socket(artnet_receiver_get_socket());
 
 #if CONFIG_NODE_SACN
-    ESP_ERROR_CHECK(sacn_receiver_init());
-    sacn_receiver_set_local_cid(sacn_transmitter_get_cid());
-    ESP_ERROR_CHECK(sacn_receiver_set_callback(app_on_sacn_dmx, NULL));
-    ESP_ERROR_CHECK(sacn_receiver_set_sync_callback(app_on_sacn_sync, NULL));
-    ESP_ERROR_CHECK(sacn_receiver_start());
+        ESP_ERROR_CHECK(sacn_receiver_init());
+        sacn_receiver_set_local_cid(sacn_transmitter_get_cid());
+        ESP_ERROR_CHECK(sacn_receiver_set_callback(app_on_sacn_dmx, NULL));
+        ESP_ERROR_CHECK(sacn_receiver_set_sync_callback(app_on_sacn_sync, NULL));
+        ESP_ERROR_CHECK(sacn_receiver_start());
 #endif
+    }
 
     /* DMX ports, merge settings and sACN subscriptions */
     app_apply_config();
+    if (!g_app.tester) {
 #if CONFIG_NODE_SCENES
-    app_start_power_on_scenes();
+        app_start_power_on_scenes();
 #endif
-
 #if CONFIG_NODE_RDM
-    /* RDM over Art-Net: discovers RDM ports once they are running */
-    if (rdm_bridge_start() != ESP_OK) {
-        ESP_LOGE(TAG, "RDM bridge failed to start");
-    }
+        /* RDM over Art-Net: discovers RDM ports once they are running */
+        if (rdm_bridge_start() != ESP_OK) {
+            ESP_LOGE(TAG, "RDM bridge failed to start");
+        }
 #endif
+    }
 
     config_register_change_callback(app_config_changed, NULL);
     static const web_server_hooks_t hooks = {

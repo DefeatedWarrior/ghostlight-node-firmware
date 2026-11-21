@@ -10,6 +10,8 @@
 #
 # Usage:  tools/check_compile.sh [file.c ...]     (default: all sources)
 # Env:    ARDUINO_ESP32=~/Library/Arduino15/packages/esp32/tools
+#         BOARD=esp32s3-devkitc   check the Wi-Fi-only board (default: esp-node-2rdm)
+#         FEATURES=none           every feature switch off (like tools/ci/minimal.defaults)
 
 T=${ARDUINO_ESP32:-$HOME/Library/Arduino15/packages/esp32/tools}
 L=$(ls -d "$T"/esp32s3-libs/* 2>/dev/null | sort -V | tail -1)
@@ -34,18 +36,26 @@ cat > "$CFG/sdkconfig.h" <<CFGEOF
 #define CONFIG_RDM_MANUFACTURER_LABEL "ESP-NODE-2RDM"
 #undef CONFIG_LWIP_MAX_SOCKETS
 #define CONFIG_LWIP_MAX_SOCKETS 20
-/* main/Kconfig.projbuild: the ESP-NODE-2RDM board, every feature on */
-#define CONFIG_BOARD_ESP_NODE_2RDM 1
-#define CONFIG_BOARD_HAS_W5500 1
-#define CONFIG_NODE_ETHERNET 1
+CFGEOF
+# main/Kconfig.projbuild: the board and the feature switches
+case "$BOARD" in
+    esp32s3-devkitc) echo "#define CONFIG_BOARD_ESP32S3_DEVKITC 1" >> "$CFG/sdkconfig.h" ;;
+    *)  echo "#define CONFIG_BOARD_ESP_NODE_2RDM 1" >> "$CFG/sdkconfig.h"
+        echo "#define CONFIG_BOARD_HAS_W5500 1" >> "$CFG/sdkconfig.h"
+        [ "$FEATURES" != none ] && echo "#define CONFIG_NODE_ETHERNET 1" >> "$CFG/sdkconfig.h" ;;
+esac
+if [ "$FEATURES" != none ]; then
+    cat >> "$CFG/sdkconfig.h" <<CFGEOF
 #define CONFIG_NODE_SACN 1
 #define CONFIG_NODE_RDM 1
 #define CONFIG_NODE_SCENES 1
 #define CONFIG_NODE_DMX_TOOLS 1
+#define CONFIG_NODE_TESTER 1
 #define CONFIG_NODE_WEB_LOG 1
 #define CONFIG_NODE_WEB_LOG_KB 32
 #define CONFIG_NODE_MDNS 1
 CFGEOF
+fi
 
 cd "$ROOT" || exit 2
 INC=""

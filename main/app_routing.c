@@ -35,9 +35,13 @@ void app_on_network_up(void)
         return;
     }
     struct in_addr ip = {.s_addr = ni.ip};
-    ESP_LOGI(TAG, "Network up on %s (%s)", inet_ntoa(ip),
+    ESP_LOGI(TAG, "Network up on %s (%s)%s", inet_ntoa(ip),
              ni.state == NETWORK_ETHERNET_CONNECTED ? "Ethernet" :
-             ni.state == NETWORK_WIFI_STA_CONNECTED ? "WiFi" : "AP");
+             ni.state == NETWORK_WIFI_STA_CONNECTED ? "WiFi" : "AP",
+             g_app.tester ? ", DMX tester mode: web UI only" : "");
+    if (g_app.tester) {
+        return;   /* no Art-Net / sACN to point at the new interface */
+    }
 
     /* lwIP only joins multicast groups on interfaces that exist at join
      * time, so every new interface needs the sACN groups joined again */
@@ -207,6 +211,12 @@ void app_dmx_frame_source(uint8_t port, uint8_t *data, void *user_data)
 #if CONFIG_NODE_DMX_TOOLS
     if (dmx_test_fill(port, data)) return;
 #endif
+#if CONFIG_NODE_TESTER
+    if (g_app.tester) {
+        dmx_tester_get_levels(port, data);
+        return;
+    }
+#endif
     merge_engine_get_output(port, data);
 }
 
@@ -218,6 +228,12 @@ void app_on_dmx_input(uint8_t port, const uint8_t *data, size_t size, void *user
 {
     route_t *r = &g_app.route[port - 1];
     (void)size;   /* always a full 512-slot buffer (short frames are zero-filled) */
+#if CONFIG_NODE_TESTER
+    if (g_app.tester) {
+        if (!app_selftest_running()) dmx_tester_on_frame(port, data);
+        return;   /* tester: nothing goes to the network */
+    }
+#endif
     if (!app_mode_is_input(r->mode) || !network_is_connected() || app_selftest_running()) {
         return;   /* (self-test data stays off the network) */
     }
@@ -252,6 +268,13 @@ void app_on_dmx_input(uint8_t port, const uint8_t *data, size_t size, void *user
 void app_on_dmx_loss(uint8_t port, void *user_data)
 {
     route_t *r = &g_app.route[port - 1];
+#if CONFIG_NODE_TESTER
+    if (g_app.tester) {
+        ESP_LOGW(TAG, "Port %u: DMX input lost", port);
+        dmx_tester_on_loss(port);
+        return;
+    }
+#endif
     ESP_LOGW(TAG, "Port %u: DMX input lost, stopping network stream", port);
 #if CONFIG_NODE_SACN
     if (r->tx_sacn_universe) {

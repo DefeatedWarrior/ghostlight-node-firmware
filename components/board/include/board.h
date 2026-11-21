@@ -18,6 +18,7 @@
  * and if it has a W5500 (CONFIG_BOARD_HAS_W5500):
  *   BOARD_ETH_SPI_HOST, BOARD_ETH_SCK_GPIO, BOARD_ETH_MOSI_GPIO,
  *   BOARD_ETH_MISO_GPIO, BOARD_ETH_CS_GPIO, BOARD_ETH_INT_GPIO
+ * A board without a W5500 leaves all BOARD_ETH_* out and builds Wi-Fi only.
  * Everything else is optional; -1 means "not fitted".
  */
 
@@ -33,12 +34,21 @@
 #include "boards/ghostlight_rev1.h"
 #elif CONFIG_BOARD_ESP32_DEVKITC
 #include "boards/esp32_devkitc.h"
+#elif CONFIG_BOARD_ESP32S3_DEVKITC
+#include "boards/esp32s3_devkitc.h"
 #else
 #error "No board selected: idf.py menuconfig > ESP-NODE > Board (or use tools/build.sh <board>)"
 #endif
 
 #if BOARD_DMX_PORTS < 1 || BOARD_DMX_PORTS > 4
 #error "BOARD_DMX_PORTS must be 1..4"
+#endif
+
+#if CONFIG_BOARD_HAS_W5500 && !defined(BOARD_ETH_CS_GPIO)
+#error "The board selects BOARD_HAS_W5500 but its header has no BOARD_ETH_* pins"
+#endif
+#if !CONFIG_BOARD_HAS_W5500 && defined(BOARD_ETH_CS_GPIO)
+#error "The board header has BOARD_ETH_* pins: add select BOARD_HAS_W5500 to its Kconfig entry"
 #endif
 
 /* ---- Optional fields: defaults ---------------------------------------- */

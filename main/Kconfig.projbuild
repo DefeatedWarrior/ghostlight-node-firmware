@@ -25,10 +25,17 @@ menu "ESP-NODE"
             bool "ESP32 DevKitC (WROOM-32) with a W5500 and 2 RS-485 transceivers"
             depends on IDF_TARGET_ESP32
             select BOARD_HAS_W5500
+
+        config BOARD_ESP32S3_DEVKITC
+            bool "ESP32-S3 DevKitC-1 with 2 RS-485 transceivers (Wi-Fi only, no W5500)"
+            depends on IDF_TARGET_ESP32S3
     endchoice
 
     config BOARD_HAS_W5500
         bool
+        help
+            Selected by boards that have a W5500 Ethernet chip. A board
+            without one has no BOARD_ETH_* pins and builds Wi-Fi only.
 
     menu "Features"
 
@@ -37,8 +44,11 @@ menu "ESP-NODE"
             depends on BOARD_HAS_W5500
             default y
             help
-                Without it the node uses Wi-Fi only and the Ethernet settings
-                are hidden in the web UI.
+                Without it the node uses Wi-Fi only: the W5500 driver is not
+                started, its SPI pins stay free, the Ethernet network mode
+                is gone (saved "Ethernet only" settings become automatic) and
+                the web UI and API show no Ethernet. Boards without a W5500
+                never have it.
 
         config NODE_SACN
             bool "sACN (E1.31)"
@@ -68,6 +78,21 @@ menu "ESP-NODE"
             help
                 Test patterns and the loopback self-test in the web UI. The
                 input analyser on the dashboard is always included.
+
+        config NODE_TESTER
+            bool "DMX tester mode"
+            depends on NODE_DMX_TOOLS
+            default y
+            help
+                A switch in the web UI (kept across restarts) that turns the
+                node into a DMX tester. It then stops being an Art-Net / sACN
+                node: nothing is received from or sent to the network, and
+                the network stays up only for the web UI. Each port gets one
+                job: send (levels, test patterns, output timing), receive
+                (live levels, refresh rate, slots, break/MAB, errors, frame
+                jitter, flicker watch, signal-loss alarms) or RDM
+                (discovery, identify, addressing). A cable from one port to
+                another runs the loopback test.
 
         config NODE_WEB_LOG
             bool "Web log"

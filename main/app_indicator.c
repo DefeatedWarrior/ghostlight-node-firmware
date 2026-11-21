@@ -31,6 +31,16 @@ static const char *TAG = "main";
 
 static void network_led(network_state_t state)
 {
+#if CONFIG_NODE_TESTER
+    if (g_app.tester) {
+        /* DMX tester: amber, blinking until the web UI can be reached */
+        bool up = state == NETWORK_ETHERNET_CONNECTED || state == NETWORK_WIFI_STA_CONNECTED ||
+                  state == NETWORK_WIFI_AP_ACTIVE;
+        led_manager_set_custom((rgb_color_t){255, 110, 0},
+                               up ? LED_BEHAVIOR_STATIC : LED_BEHAVIOR_SLOW_BLINK, 0, 3);
+        return;
+    }
+#endif
     switch (state) {
         case NETWORK_ETHERNET_CONNECTED: led_manager_set_state(LED_STATE_ETHERNET_OK); break;
         case NETWORK_WIFI_STA_CONNECTED: led_manager_set_state(LED_STATE_WIFI_STA_OK); break;
@@ -138,7 +148,7 @@ static void port_led_task(void *arg)
             bool on = false;
             if (dmx_handler_get_port_status(p + 1, &ds) == ESP_OK && ds.is_active) {
                 bool data = app_mode_is_input(ds.mode) ? ds.stats.signal_present
-                                                   : merge_engine_is_output_active(p + 1);
+                                                   : (g_app.tester || merge_engine_is_output_active(p + 1));
                 if (ident || g_app.identify[p] || (tests & (1u << p))) {
                     on = tick & 1;                 /* 5 Hz */
                 } else {

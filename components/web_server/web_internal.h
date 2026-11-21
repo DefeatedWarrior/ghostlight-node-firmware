@@ -26,6 +26,18 @@ void web_tools_register(httpd_handle_t server);
 /** Number of routes web_tools_register() adds */
 #define WEB_TOOLS_ROUTES 12
 
+/** Register the DMX tester routes (web_tester.c) */
+void web_tester_register(httpd_handle_t server);
+/** Number of routes web_tester_register() adds */
+#define WEB_TESTER_ROUTES 6
+
+/** Restart the node after @p ms, once the HTTP response has gone out */
+void web_restart_later(uint32_t ms);
+
+/** 1 if a menuconfig bool is set, else 0 (a switched-off bool is undefined) */
+#define WEB_HAS_(x) (#x[0] == '1' && #x[1] == '\0')
+#define WEB_HAS(x)  WEB_HAS_(x)
+
 void web_test_to_json(cJSON *o, const dmx_test_t *t);
 void web_analysis_to_json(cJSON *o, const dmx_input_analysis_t *a);
 

@@ -78,6 +78,15 @@ with a W5500 and two RS485 transceivers, and other boards can be added. See
 - ✅ **RDM Control Panel** - Device discovery and parameter management
 - ✅ **Network Statistics** - Connection status and performance metrics
 - ✅ **Firmware OTA Update** - Over-the-air firmware updates
+
+### DMX Tester Mode
+- ✅ **One switch in the web UI** - turns the node into a DMX tester; it stays one after a restart until you switch back
+- ✅ **Receive** - live levels, refresh rate, slot count, break / MAB, line errors, start codes, frame-interval jitter with a histogram, signal-loss alarm
+- ✅ **Flicker watch** - channels that change while they should hold still, with min / max and change counts
+- ✅ **Send** - faders, set ranges, test patterns, adjustable refresh / break / MAB / slots
+- ✅ **Cable test** - port 1 out to port 2 in, checks every value arrives
+- ✅ **RDM** - discover fixtures, set their DMX address, make them identify
+- While it is a tester the node ignores Art-Net and sACN; the network is only up for the web page
 - ✅ **Responsive Design** - Works on desktop and mobile devices
 
 ### Status Indication
@@ -140,6 +149,7 @@ file) picked at build time with `tools/build.sh <board>`:
 | `esp-node-2rdm` | ESP32-S3 dev board (N16R8) + W5500 + 2 RS485 transceivers | 16 MB / 8 MB | the prototype; runs |
 | `ghostlight-rev1` | [Ghostlight Node](https://github.com/DefeatedWarrior/ghostlight-node) rev1 PCB (ESP32-S3-WROOM-1-N8) | 8 MB / none | builds; not run on a board yet |
 | `esp32-devkitc` | ESP32 DevKitC (WROOM-32) + W5500 + 2 RS485 transceivers | 4 MB / none | builds; never run on hardware |
+| `esp32s3-devkitc` | ESP32-S3 DevKitC-1 + 2 RS485 transceivers (Wi-Fi only, no W5500) | 8 MB / none | builds; never run on hardware |
 
 **Your own board** needs:
 - an ESP32-S3 or ESP32 with at least 4 MB of flash (PSRAM is optional);
@@ -226,7 +236,7 @@ DIR is high to transmit. The pin headers are in
 
 4. **Build the Firmware**
    ```bash
-   tools/build.sh list            # esp-node-2rdm, esp32-devkitc, ghostlight-rev1
+   tools/build.sh list            # esp-node-2rdm, esp32-devkitc, esp32s3-devkitc, ghostlight-rev1
    tools/build.sh esp-node-2rdm
    ```
 

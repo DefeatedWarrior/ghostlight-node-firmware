@@ -38,7 +38,9 @@ to always know which board you are building, use `tools/build.sh`.
 
 `tools/check_compile.sh` is a quick compile-only check that works without
 ESP-IDF installed. It uses the Arduino-ESP32 toolchain. It doesn't link, so it
-can't replace a real build.
+can't replace a real build. `BOARD=<board>` checks another board's pin
+header (for example `BOARD=esp32s3-devkitc tools/check_compile.sh` for the
+Wi-Fi-only board), and `FEATURES=none` checks with every feature switch off.
 
 ## Boards
 
@@ -47,6 +49,7 @@ can't replace a real build.
 | `esp-node-2rdm` | ESP32-S3 | 16 MB / 8 MB octal | `partitions_16mb.csv` | `boards/esp_node_2rdm.h` | prototype, in use |
 | `ghostlight-rev1` | ESP32-S3 (WROOM-1-N8) | 8 MB / none | `partitions_8mb.csv` | `boards/ghostlight_rev1.h` | PCB in [ghostlight-node](https://github.com/DefeatedWarrior/ghostlight-node), not run yet |
 | `esp32-devkitc` | ESP32 (WROOM-32) | 4 MB / none | `partitions_4mb.csv` | `boards/esp32_devkitc.h` | builds, **never run on hardware** |
+| `esp32s3-devkitc` | ESP32-S3 (DevKitC-1) | 8 MB / none | `partitions_8mb.csv` | `boards/esp32s3_devkitc.h` | Wi-Fi only (no W5500), builds, **never run on hardware** |
 
 Pin headers live in `components/board/include/`. Settings files live in
 `boards/<board>/sdkconfig.defaults` at the top of the repository.
@@ -75,6 +78,7 @@ are on by default.
 | `CONFIG_NODE_DMX_TOOLS` | No test patterns and no loopback self-test. |
 | `CONFIG_NODE_WEB_LOG` | The web UI can't show the log. `CONFIG_NODE_WEB_LOG_KB` sets the log size when the switch is on. |
 | `CONFIG_NODE_MDNS` | No `http://<name>.local/`. |
+| `CONFIG_NODE_TESTER` | No DMX tester mode (needs `CONFIG_NODE_DMX_TOOLS`). |
 
 To switch features for one board, run `tools/build.sh <board> menuconfig`.
 That changes only `build-<board>/sdkconfig`. To make the change the default
@@ -133,13 +137,16 @@ components/
   rdm_bridge          RDM over Art-Net (ArtTod*, ArtRdm)
   scene_manager       scenes stored in LittleFS, fades
   dmx_tools           test patterns, loopback self-test
+  dmx_tester          tester mode: levels to send, receive statistics, flicker watch
   network_manager     Ethernet / Wi-Fi / AP with automatic fallback
-  web_server          HTTP API and the web UI (web_ui/, built into web_files.h)
+  web_server          HTTP API and the web UI (web_ui/, built into web_files.h);
+                      web_tools.c = diagnostics and tools, web_tester.c = /api/tester
   led_manager         WS2812 status LED
   diag                log ring buffer, reset reason, core dump
   storage_manager     LittleFS mount
 boards/<board>/       per-board sdkconfig.defaults
-tools/                build.sh, idf_env.sh, check_compile.sh, gen_web_files.py
+tools/                build.sh, idf_env.sh, check_compile.sh, gen_web_files.py,
+                      ui_mock.py (the web UI against a fake node, no hardware)
 ```
 
 Callbacks from the network and DMX tasks only read the routing table
@@ -148,6 +155,30 @@ main task (`app_main`'s loop in `main.c`).
 
 After you edit anything in `components/web_server/web_ui/`, regenerate the
 embedded copy with `python3 tools/gen_web_files.py`.
+
+### Working on the web UI without hardware
+
+`python3 tools/ui_mock.py` serves `web_ui/` at http://localhost:8090/ and
+fakes every API endpoint and the level WebSocket, with simulated DMX (a
+console on the inputs, one flickering channel, a signal loss every 45 s), RDM
+fixtures and a log. `--tester` starts in tester mode, `--no-ethernet`,
+`--ports N` and `--off rdm,scenes,...` mimic other builds, and `--setup`
+shows the first-run setup. It needs nothing beyond Python 3.
+
+## DMX tester mode
+
+With `CONFIG_NODE_TESTER` built in, the web UI (Tools, or `POST
+/api/tester/mode`) switches the node into a DMX tester. The choice is stored in
+the settings, so it survives restarts, and switching restarts the node. In
+tester mode `main.c` does not start the Art-Net and sACN receivers and
+transmitters, power-on scenes or the RDM bridge: the network is up only for
+the web UI. Each port gets one job (`config_t.tester.ports[]`): off, send,
+receive or RDM controller, with its own output timing.
+`config_tester_port_settings()` turns that into the port settings the DMX
+handler runs with. `dmx_tester` holds the levels sent ports output and the
+statistics of receive ports (frame intervals and jitter, histogram, signal
+losses, per-channel min / max / change counts and the "changing now" mask);
+it allocates its buffers only in tester mode. The API is in `web_tester.c`.
 
 ## Adding a board
 

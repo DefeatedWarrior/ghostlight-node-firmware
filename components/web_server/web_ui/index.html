@@ -1,2071 +1,868 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP-NODE-2RDM Controller</title>
-    <style>
-/* === CSS EMBEDDED === */
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
-
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>ESP-NODE</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23f5b301'/%3E%3Cpath d='M18 5 8 18h7l-1 9 10-13h-7z' fill='%231a1203'/%3E%3C/svg%3E">
+<style>
+/* ===== Tokens ======================================================== */
 :root {
-    --bg-primary: #0f172a;
-    --bg-secondary: #1e293b;
-    --bg-tertiary: #334155;
-    --bg-card: #1e293b;
-    --border-color: #334155;
-    --text-primary: #f1f5f9;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
-    --accent-primary: #3b82f6;
-    --accent-hover: #2563eb;
-    --dmx-input: #ea580c;      /* levels a port receives (DMX input) */
-    --success: #10b981;
-    --warning: #f59e0b;
-    --danger: #ef4444;
-    --info: #06b6d4;
+    --bg: #0d0f12;
+    --bg-2: #111418;
+    --surface: #171a1f;
+    --surface-2: #1d2127;
+    --surface-3: #252a31;
+    --border: #2a3038;
+    --border-2: #38404a;
+    --text: #e9ecef;
+    --text-2: #aab1ba;
+    --text-3: #77808b;
+    --accent: #f5b301;
+    --accent-2: #ffc933;
+    --accent-ink: #1a1203;
+    --accent-soft: rgba(245, 179, 1, .13);
+    --ok: #34d399;
+    --ok-soft: rgba(52, 211, 153, .14);
+    --warn: #fbbf24;
+    --warn-soft: rgba(251, 191, 36, .15);
+    --bad: #f87171;
+    --bad-soft: rgba(248, 113, 113, .15);
+    --info: #60a5fa;
+    --info-soft: rgba(96, 165, 250, .14);
+    --lv-out: #38bdf8;          /* levels a port sends */
+    --lv-in: #fb923c;           /* levels a port receives */
+    --lv-text: #e9ecef;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.25);
+    --radius: 12px;
+    --radius-sm: 7px;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --nav-w: 216px;
+    --top-h: 56px;
+}
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+        --bg: #f3f4f6; --bg-2: #eceef1; --surface: #ffffff; --surface-2: #f5f6f8; --surface-3: #e9ecf0;
+        --border: #dde1e6; --border-2: #c7cdd4; --text: #14171b; --text-2: #4b535d; --text-3: #7b838d;
+        --accent: #c98a00; --accent-2: #a87300; --accent-ink: #ffffff; --accent-soft: rgba(201, 138, 0, .12);
+        --ok: #0f9f6e; --ok-soft: rgba(15, 159, 110, .12); --warn: #b7791f; --warn-soft: rgba(183, 121, 31, .14);
+        --bad: #dc2626; --bad-soft: rgba(220, 38, 38, .1); --info: #2563eb; --info-soft: rgba(37, 99, 235, .1);
+        --lv-out: #0284c7; --lv-in: #ea580c; --lv-text: #14171b;
+        --shadow: 0 1px 2px rgba(16,24,40,.06), 0 4px 14px rgba(16,24,40,.06);
+    }
+}
+:root[data-theme="light"] {
+    --bg: #f3f4f6; --bg-2: #eceef1; --surface: #ffffff; --surface-2: #f5f6f8; --surface-3: #e9ecf0;
+    --border: #dde1e6; --border-2: #c7cdd4; --text: #14171b; --text-2: #4b535d; --text-3: #7b838d;
+    --accent: #c98a00; --accent-2: #a87300; --accent-ink: #ffffff; --accent-soft: rgba(201, 138, 0, .12);
+    --ok: #0f9f6e; --ok-soft: rgba(15, 159, 110, .12); --warn: #b7791f; --warn-soft: rgba(183, 121, 31, .14);
+    --bad: #dc2626; --bad-soft: rgba(220, 38, 38, .1); --info: #2563eb; --info-soft: rgba(37, 99, 235, .1);
+    --lv-out: #0284c7; --lv-in: #ea580c; --lv-text: #14171b;
+    --shadow: 0 1px 2px rgba(16,24,40,.06), 0 4px 14px rgba(16,24,40,.06);
 }
 
+/* ===== Base ========================================================== */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    line-height: 1.6;
-    overflow-x: hidden;
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased;
 }
+[hidden] { display: none !important; }
+a { color: var(--accent); }
+h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -.01em; }
+h1 { font-size: 22px; }
+h2 { font-size: 15px; }
+h3 { font-size: 13px; color: var(--text-2); text-transform: uppercase; letter-spacing: .06em; margin: 18px 0 8px; }
+p { margin: 0 0 10px; }
+code, .mono { font-family: var(--mono); font-size: 12.5px; }
+small, .help { color: var(--text-3); font-size: 12.5px; }
+.help { display: block; margin-top: 4px; }
+svg.i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-.app {
+/* ===== Shell ========================================================= */
+.shell {
     min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-}
-
-/* Header */
-.header {
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-color);
-    padding: 1rem 2rem;
-}
-
-.header-content {
-    max-width: 1400px;
-    margin: 0 auto;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 1rem;
-}
-
-.header h1 {
-    font-size: 1.5rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.logo {
-    width: 2rem;
-    height: 2rem;
-    color: var(--accent-primary);
-}
-
-.connection-status {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.875rem;
-}
-
-.status-indicator {
-    width: 0.75rem;
-    height: 0.75rem;
-    border-radius: 50%;
-    background: var(--text-muted);
-    animation: pulse 2s infinite;
-}
-
-.status-indicator.connected {
-    background: var(--success);
-}
-
-.status-indicator.disconnected {
-    background: var(--danger);
-    animation: none;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
-
-/* Tabs Navigation */
-.tabs {
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-color);
-    padding: 0 2rem;
-    overflow-x: auto;
-    white-space: nowrap;
-}
-
-.tabs::-webkit-scrollbar {
-    height: 4px;
-}
-
-.tabs::-webkit-scrollbar-track {
-    background: var(--bg-secondary);
-}
-
-.tabs::-webkit-scrollbar-thumb {
-    background: var(--border-color);
-    border-radius: 2px;
-}
-
-.tab {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    padding: 1rem 1.5rem;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    transition: all 0.2s;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.875rem;
-}
-
-.tab svg {
-    width: 1.25rem;
-    height: 1.25rem;
-}
-
-.tab:hover {
-    color: var(--text-primary);
-    background: var(--bg-tertiary);
-}
-
-.tab.active {
-    color: var(--accent-primary);
-    border-bottom-color: var(--accent-primary);
-}
-
-/* Content Area */
-.content {
-    flex: 1;
-    padding: 2rem;
-    max-width: 1400px;
-    width: 100%;
-    margin: 0 auto;
-}
-
-.tab-content {
-    display: none;
-    animation: fadeIn 0.3s;
-}
-
-.tab-content.active {
-    display: block;
-}
-
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-/* Grid Layout */
-.grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 1.5rem;
-}
-
-.grid-2 {
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-}
-
-/* Cards */
-.card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 0.5rem;
-    padding: 1.5rem;
-    transition: transform 0.2s;
-}
-
-.card:hover {
-    transform: translateY(-2px);
-}
-
-.card.wide {
-    grid-column: 1 / -1;
-}
-
-.card h2 {
-    font-size: 1.25rem;
-    margin-bottom: 1rem;
-    color: var(--text-primary);
-}
-
-.card h3 {
-    font-size: 1rem;
-    margin-bottom: 0.75rem;
-    color: var(--text-secondary);
-}
-
-.card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 1rem;
-    flex-wrap: wrap;
-    gap: 1rem;
-}
-
-/* Stats */
-.stat-row {
-    display: flex;
-    justify-content: space-between;
-    padding: 0.75rem 0;
-    border-bottom: 1px solid var(--border-color);
-}
-
-.stat-row:last-child {
-    border-bottom: none;
-}
-
-.stat-label {
-    color: var(--text-secondary);
-    font-size: 0.875rem;
-}
-
-.stat-value {
-    color: var(--text-primary);
-    font-weight: 600;
-    font-size: 0.875rem;
-}
-
-.proto-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1.5rem;
-}
-
-.proto-stat {
-    padding: 1rem;
-    background: var(--bg-tertiary);
-    border-radius: 0.375rem;
-}
-
-/* Forms */
-.form-group {
-    margin-bottom: 1.25rem;
-}
-
-.form-group label {
-    display: block;
-    margin-bottom: 0.5rem;
-    color: var(--text-secondary);
-    font-size: 0.875rem;
-    font-weight: 500;
-}
-
-.form-group input[type="text"],
-.form-group input[type="password"],
-.form-group input[type="number"],
-.form-group select {
-    width: 100%;
-    padding: 0.75rem;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    border-radius: 0.375rem;
-    color: var(--text-primary);
-    font-size: 0.875rem;
-    transition: border-color 0.2s;
-}
-
-.form-group input[type="text"]:focus,
-.form-group input[type="password"]:focus,
-.form-group input[type="number"]:focus,
-.form-group select:focus {
-    outline: none;
-    border-color: var(--accent-primary);
-}
-
-.form-group input[type="checkbox"] {
-    margin-right: 0.5rem;
-}
-
-.form-group input[type="file"] {
-    width: 100%;
-    padding: 0.75rem;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    border-radius: 0.375rem;
-    color: var(--text-primary);
-    font-size: 0.875rem;
-}
-
-.help-text {
-    display: block;
-    margin-top: 0.375rem;
-    color: var(--text-muted);
-    font-size: 0.75rem;
-}
-
-.form-section {
-    margin-top: 1.5rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid var(--border-color);
-}
-
-.form-actions {
-    display: flex;
-    gap: 0.75rem;
-    margin-top: 1.5rem;
-    flex-wrap: wrap;
-}
-
-/* Buttons */
-.btn {
-    padding: 0.75rem 1.5rem;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    border-radius: 0.375rem;
-    color: var(--text-primary);
-    font-size: 0.875rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.btn:hover {
-    background: var(--border-color);
-}
-
-.btn svg {
-    width: 1rem;
-    height: 1rem;
-}
-
-.btn-primary {
-    background: var(--accent-primary);
-    border-color: var(--accent-primary);
-}
-
-.btn-primary:hover {
-    background: var(--accent-hover);
-    border-color: var(--accent-hover);
-}
-
-.btn-success {
-    background: var(--success);
-    border-color: var(--success);
-}
-
-.btn-warning {
-    background: var(--warning);
-    border-color: var(--warning);
-    color: #000;
-}
-
-.btn-danger {
-    background: var(--danger);
-    border-color: var(--danger);
-}
-
-.action-buttons {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-}
-
-/* Table */
-.table-responsive {
-    overflow-x: auto;
-    margin-top: 1rem;
-}
-
-.data-table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-.data-table th,
-.data-table td {
-    padding: 0.75rem;
-    text-align: left;
-    border-bottom: 1px solid var(--border-color);
-}
-
-.data-table th {
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    font-weight: 600;
-    font-size: 0.875rem;
-}
-
-.data-table td {
-    color: var(--text-primary);
-    font-size: 0.875rem;
-}
-
-.data-table .no-data {
-    text-align: center;
-    color: var(--text-muted);
-    padding: 2rem;
-}
-
-/* Status Message */
-.status-message {
-    padding: 1rem;
-    background: var(--bg-tertiary);
-    border-radius: 0.375rem;
-    margin-bottom: 1rem;
-    color: var(--text-secondary);
-    font-size: 0.875rem;
-}
-
-/* Alert */
-.alert {
-    padding: 1rem;
-    border-radius: 0.375rem;
-    margin-top: 1rem;
-    font-size: 0.875rem;
-}
-
-.alert-warning {
-    background: rgba(245, 158, 11, 0.1);
-    border: 1px solid var(--warning);
-    color: var(--warning);
-}
-
-/* Progress Bar */
-.progress {
-    width: 100%;
-    height: 2.5rem;
-    background: var(--bg-tertiary);
-    border-radius: 0.375rem;
-    overflow: hidden;
-    position: relative;
-    margin: 1rem 0;
-}
-
-.progress-bar {
-    height: 100%;
-    background: var(--accent-primary);
-    transition: width 0.3s;
-    width: 0%;
-}
-
-.progress-text {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    font-weight: 600;
-    font-size: 0.875rem;
-}
-
-/* The hidden attribute must win over display rules below */
-[hidden] {
-    display: none !important;
-}
-
-.card-header h2 {
-    margin-bottom: 0;
-}
-
-.btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-}
-
-.form-group input[type="radio"] {
-    margin-right: 0.5rem;
-}
-
-.form-group label:has(input[type="radio"]),
-.form-group label:has(input[type="checkbox"]) {
-    color: var(--text-primary);
-    cursor: pointer;
-}
-
-.input-row .btn {
-    padding: 0.5rem 1rem;
-}
-
-/* DMX levels: 512 cells per port */
-.dmx-port {
-    margin-top: 1rem;
-}
-
-.dmx-port-head {
-    display: flex;
-    align-items: baseline;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-    margin-bottom: 0.5rem;
-}
-
-.dmx-port-name {
-    font-weight: 600;
-}
-
-.dmx-port-uni {
-    color: var(--text-secondary);
-    font-size: 0.85rem;
-}
-
-.dmx-live {
-    margin-left: auto;
-    font-size: 0.75rem;
-    padding: 0.1rem 0.6rem;
-    border-radius: 999px;
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-}
-
-.dmx-live.on {
-    background: rgba(16, 185, 129, 0.15);
-    color: var(--success);
-}
-
-.dmx-live.in {
-    background: rgba(234, 88, 12, 0.18);
-    color: #fb923c;
-}
-
-.dmx-grid {
-    display: grid;
-    grid-template-columns: 2.4rem repeat(var(--dmx-cols, 32), minmax(0, 1fr));
-    gap: 2px;
-    font-variant-numeric: tabular-nums;
-}
-
-.dmx-row-label {
-    font-size: 0.65rem;
-    color: var(--text-muted);
-    text-align: right;
-    padding-right: 0.35rem;
-    line-height: 20px;
-}
-
-.dmx-cell {
-    --p: 0%;
-    height: 20px;
-    line-height: 20px;
-    border-radius: 2px;
-    text-align: center;
-    font-size: 0.62rem;
-    color: var(--text-primary);
-    background: linear-gradient(to top, var(--accent-primary) var(--p), var(--bg-tertiary) var(--p));
-    overflow: hidden;
-    white-space: nowrap;
-    cursor: default;
-}
-
-.dmx-cell.zero {
-    color: var(--text-muted);
-}
-
-/* Input port: what arrives on the wire, in orange */
-.dmx-grid.input .dmx-cell {
-    background: linear-gradient(to top, var(--dmx-input) var(--p), var(--bg-tertiary) var(--p));
-}
-
-.seg {
-    display: inline-flex;
-    border: 1px solid var(--border-color);
-    border-radius: 0.375rem;
-    overflow: hidden;
-}
-
-.seg-btn {
-    background: transparent;
-    color: var(--text-secondary);
-    border: 0;
-    padding: 0.25rem 0.7rem;
-    font: inherit;
-    font-size: 0.8rem;
-    cursor: pointer;
-}
-
-.seg-btn.active {
-    background: var(--accent-primary);
-    color: #fff;
-}
-
-.dmx-grid.dense .dmx-cell {
-    font-size: 0.55rem;
-    letter-spacing: -0.02em;
-}
-
-@media (max-width: 700px) {
-    .dmx-grid { grid-template-columns: 2rem repeat(var(--dmx-cols, 16), minmax(0, 1fr)); }
-}
-
-/* Network tab */
-.net-banner {
-    padding: 0.75rem 1rem;
-    border-radius: 0.5rem;
-    margin-bottom: 1rem;
-    background: rgba(59, 130, 246, 0.12);
-    border: 1px solid rgba(59, 130, 246, 0.35);
-    overflow-wrap: anywhere;
-}
-
-.net-banner.ok {
-    background: rgba(16, 185, 129, 0.12);
-    border-color: rgba(16, 185, 129, 0.35);
-}
-
-.net-banner.bad {
-    background: rgba(239, 68, 68, 0.12);
-    border-color: rgba(239, 68, 68, 0.35);
-}
-
-.net-banner a {
-    color: var(--text-primary);
-}
-
-.net-banner-actions {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    margin-top: 0.6rem;
-}
-
-.net-ifaces {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 0.75rem;
-    margin-bottom: 0.75rem;
-}
-
-.net-iface {
-    display: flex;
-    gap: 0.6rem;
-    align-items: flex-start;
-    padding: 0.75rem;
-    border: 1px solid var(--border-color);
-    border-radius: 0.5rem;
-    background: var(--bg-primary);
-    min-width: 0;
-}
-
-.net-iface .dot {
-    width: 0.6rem;
-    height: 0.6rem;
-    border-radius: 50%;
-    margin-top: 0.45rem;
-    background: var(--text-muted);
-    flex: none;
-}
-
-.net-iface.ok .dot { background: var(--success); }
-.net-iface.busy .dot { background: var(--warning); }
-.net-iface.bad .dot { background: var(--danger); }
-
-.net-iface-name {
-    font-weight: 600;
-}
-
-.net-iface-detail {
-    font-size: 0.85rem;
-    color: var(--text-secondary);
-    overflow-wrap: anywhere;
-}
-
-.mode-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-}
-
-.mode-opt {
-    display: flex;
-    gap: 0.6rem;
-    align-items: flex-start;
-    padding: 0.6rem 0.75rem;
-    border: 1px solid var(--border-color);
-    border-radius: 0.5rem;
-    cursor: pointer;
-}
-
-.mode-opt:has(input:checked) {
-    border-color: var(--accent-primary);
-    background: rgba(59, 130, 246, 0.08);
-}
-
-.mode-opt input {
-    margin-top: 0.35rem;
-}
-
-.mode-opt small {
-    display: block;
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-}
-
-.wifi-list {
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    margin: 0.75rem 0;
-}
-
-.wifi-item {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    padding: 0.6rem 0.75rem;
-    border: 1px solid var(--border-color);
-    border-radius: 0.5rem;
-    flex-wrap: wrap;
-}
-
-.wifi-item-main {
-    flex: 1;
-    min-width: 10rem;
-}
-
-.wifi-item-name {
-    font-weight: 600;
-    overflow-wrap: anywhere;
-}
-
-.wifi-item-state {
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-}
-
-.wifi-item-state.ok { color: var(--success); }
-.wifi-item-state.busy { color: var(--warning); }
-.wifi-item-state.bad { color: var(--danger); }
-
-.wifi-item-flags {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-}
-
-.wifi-item-actions {
-    display: flex;
-    gap: 0.3rem;
-    flex-wrap: wrap;
-}
-
-.wifi-empty {
-    color: var(--text-muted);
-    font-size: 0.9rem;
-    padding: 0.25rem 0;
-}
-
-.wifi-form {
-    border-top: 1px solid var(--border-color);
-    padding-top: 1rem;
-    margin-top: 0.5rem;
-}
-
-.btn-sm {
-    padding: 0.25rem 0.55rem;
-    font-size: 0.8rem;
-}
-
-.input-row {
-    display: flex;
-    gap: 0.5rem;
-}
-
-.input-row input {
-    flex: 1;
-    min-width: 0;
-}
-
-.scan-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    margin-top: 0.5rem;
-    max-height: 15rem;
-    overflow-y: auto;
-    border: 1px solid var(--border-color);
-    border-radius: 0.375rem;
-    background: var(--border-color);
-}
-
-.scan-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.45rem 0.6rem;
-    background: var(--bg-primary);
-    border: 0;
-    color: var(--text-primary);
-    text-align: left;
-    cursor: pointer;
-    font: inherit;
-    font-size: 0.85rem;
-}
-
-.scan-item:hover { background: var(--bg-tertiary); }
-.scan-item[disabled] { opacity: 0.5; cursor: not-allowed; }
-
-.scan-name {
-    overflow-wrap: anywhere;
-}
-
-.scan-meta {
-    color: var(--text-secondary);
-    white-space: nowrap;
-    font-size: 0.8rem;
-}
-
-.scan-note {
-    padding: 0.45rem 0.6rem;
-    background: var(--bg-primary);
-    color: var(--text-muted);
-    font-size: 0.85rem;
-}
-
-.bars {
-    display: inline-flex;
-    gap: 1px;
-    align-items: flex-end;
-    height: 0.75rem;
-    vertical-align: -1px;
-    margin-left: 0.35rem;
-}
-
-.bars i {
-    width: 3px;
-    display: block;
-    background: var(--text-secondary);
-    opacity: 0.3;
-}
-
-.bars i:nth-child(1) { height: 25%; }
-.bars i:nth-child(2) { height: 50%; }
-.bars i:nth-child(3) { height: 75%; }
-.bars i:nth-child(4) { height: 100%; }
-.bars i.on { opacity: 1; }
-
-/* Toast Notifications */
-.toast-container {
-    position: fixed;
-    top: 1rem;
-    right: 1rem;
-    z-index: 1000;
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-}
-
-.toast {
-    min-width: 300px;
-    padding: 1rem;
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 0.5rem;
-    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
-    animation: slideIn 0.3s;
-}
-
-@keyframes slideIn {
-    from {
-        transform: translateX(400px);
-        opacity: 0;
-    }
-    to {
-        transform: translateX(0);
-        opacity: 1;
-    }
-}
-
-.toast.success {
-    border-left: 4px solid var(--success);
-}
-
-.toast.error {
-    border-left: 4px solid var(--danger);
-}
-
-.toast.warning {
-    border-left: 4px solid var(--warning);
-}
-
-.toast.info {
-    border-left: 4px solid var(--info);
-}
-
-.toast-header {
-    font-weight: 600;
-    margin-bottom: 0.25rem;
-}
-
-.toast-body {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-}
-
-/* First-run setup overlay */
-.overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 1000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 1rem;
-    background: rgba(15, 23, 42, 0.92);
-}
-
-.overlay[hidden] {
-    display: none;
-}
-
-.overlay-panel {
-    width: 100%;
-    max-width: 30rem;
-    max-height: 100%;
-    overflow-y: auto;
-    padding: 1.5rem;
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 0.75rem;
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
-}
-
-.overlay-panel h2 {
-    margin-bottom: 0.5rem;
-}
-
-.overlay-panel p {
-    color: var(--text-secondary);
-    font-size: 0.875rem;
-    margin-bottom: 1rem;
-}
-
-.form-error {
-    color: var(--danger);
-    font-size: 0.875rem;
-    min-height: 1.25rem;
-    margin-bottom: 0.5rem;
-}
-
-/* Responsive */
-@media (max-width: 768px) {
-    .header {
-        padding: 1rem;
-    }
-
-    .header h1 {
-        font-size: 1.25rem;
-    }
-
-    .tabs {
-        padding: 0 0.5rem;
-    }
-
-    .tab {
-        padding: 0.75rem 1rem;
-        font-size: 0.8125rem;
-    }
-
-    .content {
-        padding: 1rem;
-    }
-
-    .grid {
-        grid-template-columns: 1fr;
-    }
-
-    .form-actions {
-        flex-direction: column;
-    }
-
-    .form-actions .btn {
-        width: 100%;
-        justify-content: center;
-    }
-
-    .toast-container {
-        left: 1rem;
-        right: 1rem;
-    }
-
-    .toast {
-        min-width: auto;
-        width: 100%;
-    }
-}
-/* Diagnostics and DMX tools */
-.toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    align-items: center;
-    margin-bottom: 0.75rem;
-}
+    grid-template-columns: var(--nav-w) minmax(0, 1fr);
+    grid-template-rows: var(--top-h) minmax(0, 1fr);
+    grid-template-areas: "top top" "nav main";
+}
+.topbar {
+    grid-area: top; position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 16px; padding: 0 20px;
+    background: color-mix(in srgb, var(--bg-2) 88%, transparent);
+    backdrop-filter: saturate(1.4) blur(10px); -webkit-backdrop-filter: saturate(1.4) blur(10px);
+    border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand-logo { width: 30px; height: 30px; border-radius: 8px; background: var(--accent); color: var(--accent-ink);
+    display: grid; place-items: center; flex: none; }
+.brand-logo svg { width: 18px; height: 18px; fill: currentColor; }
+.brand-text { min-width: 0; line-height: 1.2; }
+.brand-name { font-weight: 650; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brand-sub { color: var(--text-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.conn { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-2);
+    padding: 5px 10px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--border); white-space: nowrap; }
+.conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.conn.ok i { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.conn.bad i { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+
+.sidenav {
+    grid-area: nav; position: sticky; top: var(--top-h); align-self: start;
+    height: calc(100vh - var(--top-h)); overflow-y: auto;
+    padding: 16px 12px; border-right: 1px solid var(--border); background: var(--bg-2);
+    display: flex; flex-direction: column; gap: 2px;
+}
+.nav-btn {
+    display: flex; align-items: center; gap: 11px; width: 100%;
+    padding: 9px 12px; border: 0; border-radius: 8px; background: none; color: var(--text-2);
+    font: inherit; font-weight: 500; text-align: left; cursor: pointer;
+}
+.nav-btn:hover { background: var(--surface-2); color: var(--text); }
+.nav-btn.active { background: var(--accent-soft); color: var(--accent); }
+.nav-btn .badge { margin-left: auto; }
+.nav-sep { height: 1px; background: var(--border); margin: 10px 6px; }
+.nav-foot { margin-top: auto; padding: 12px; color: var(--text-3); font-size: 12px; line-height: 1.4; }
+
+.main { grid-area: main; min-width: 0; padding: 24px 28px 64px; }
+.page { display: none; max-width: 1280px; margin: 0 auto; }
+.page.active { display: block; }
+.page-head { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+.page-head p { margin: 4px 0 0; color: var(--text-3); }
+.page-head .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+
+@media (max-width: 860px) {
+    .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--top-h) auto minmax(0, 1fr);
+        grid-template-areas: "top" "nav" "main"; }
+    .sidenav { position: sticky; top: var(--top-h); z-index: 15; height: auto; flex-direction: row; overflow-x: auto;
+        padding: 6px 10px; border-right: 0; border-bottom: 1px solid var(--border); scrollbar-width: none; }
+    .sidenav::-webkit-scrollbar { display: none; }
+    .nav-btn { width: auto; white-space: nowrap; padding: 7px 11px; }
+    .nav-sep, .nav-foot { display: none; }
+    .main { padding: 18px 16px 56px; }
+    .topbar { padding: 0 16px; gap: 10px; }
+    .brand-sub, .conn span { display: none; }
+    .conn { padding: 7px; }
+}
+
+/* ===== Banner ======================================================== */
+.banner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 12px 16px; margin: 0 auto 18px; max-width: 1280px;
+    border-radius: var(--radius); border: 1px solid; }
+.banner.tester { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.banner .b-icon { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: var(--accent); color: var(--accent-ink); flex: none; }
+.banner .b-text { flex: 1; min-width: 220px; }
+.banner strong { display: block; }
+.banner small { color: var(--text-2); }
+
+/* ===== Cards, grids =================================================== */
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); align-items: start; }
+.grid > .wide { grid-column: 1 / -1; }
+.stack { display: grid; gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow); min-width: 0; }
+.card + .card { margin-top: 0; }
+.card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.card-head .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.card-head h2 { display: flex; align-items: center; gap: 8px; }
+.card-foot { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.section { margin-top: 16px; }
+.split { display: grid; gap: 16px; grid-template-columns: minmax(0, 1.65fr) minmax(300px, 1fr); align-items: start; }
+@media (max-width: 1100px) { .split { grid-template-columns: minmax(0, 1fr); } }
+
+/* ===== Key / value rows ============================================== */
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 16px; }
+.kv dt { color: var(--text-3); }
+.kv dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.kv dd.l { text-align: left; }
+
+/* ===== Metric tiles ================================================== */
+.tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr)); margin-bottom: 16px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px 15px; min-width: 0; box-shadow: var(--shadow); }
+.tile-label { color: var(--text-3); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.tile-value { font-size: 22px; font-weight: 650; letter-spacing: -.02em; margin-top: 3px; font-variant-numeric: tabular-nums;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile-value small { font-size: 13px; font-weight: 500; color: var(--text-3); margin-left: 3px; }
+.tile-sub { color: var(--text-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile.ok { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.tile.ok .tile-value { color: var(--ok); }
+.tile.bad { border-color: var(--bad); background: var(--bad-soft); }
+.tile.bad .tile-value { color: var(--bad); }
+.tile.warn .tile-value { color: var(--warn); }
+.tile.alarm { animation: alarm 1s steps(2, start) infinite; }
+@keyframes alarm { 50% { background: var(--surface); } }
+
+/* ===== Chips ========================================================= */
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 99px; font-size: 11.5px; font-weight: 600;
+    background: var(--surface-3); color: var(--text-2); white-space: nowrap; letter-spacing: .01em; }
+.chip.accent { background: var(--accent); color: var(--accent-ink); }
+.chip.ok { background: var(--ok-soft); color: var(--ok); }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
+.chip.bad { background: var(--bad-soft); color: var(--bad); }
+.chip.info { background: var(--info-soft); color: var(--info); }
+.chip.out { background: color-mix(in srgb, var(--lv-out) 16%, transparent); color: var(--lv-out); }
+.chip.in { background: color-mix(in srgb, var(--lv-in) 16%, transparent); color: var(--lv-in); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); display: inline-block; flex: none; }
+.dot.ok { background: var(--ok); } .dot.busy { background: var(--warn); } .dot.bad { background: var(--bad); }
+
+/* ===== Buttons ======================================================= */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 14px; min-height: 36px;
+    border-radius: var(--radius-sm); border: 1px solid var(--border-2); background: var(--surface-2); color: var(--text);
+    font: inherit; font-weight: 550; cursor: pointer; white-space: nowrap; text-decoration: none; }
+.btn:hover:not(:disabled) { background: var(--surface-3); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover:not(:disabled) { background: var(--accent-2); }
+.btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--border-2)); }
+.btn.danger:hover:not(:disabled) { background: var(--bad-soft); }
+.btn.ghost { background: none; border-color: transparent; color: var(--text-2); }
+.btn.ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.btn.sm { padding: 4px 10px; min-height: 30px; font-size: 13px; }
+.btn.xs { padding: 2px 8px; min-height: 26px; font-size: 12px; }
+.btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.icon-btn { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--text-2); cursor: pointer; }
+.icon-btn:hover { color: var(--text); background: var(--surface-3); }
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* ===== Segmented control ============================================ */
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); flex-wrap: wrap; }
+.seg button { border: 0; background: none; color: var(--text-2); font: inherit; font-size: 13px; font-weight: 550; padding: 5px 12px;
+    border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.seg button:hover { color: var(--text); }
+.seg button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.seg.big button { padding: 8px 16px; font-size: 14px; }
+.seg button[data-role="send"].active { color: var(--lv-out); }
+.seg button[data-role="receive"].active { color: var(--lv-in); }
+.seg button[data-role="rdm"].active { color: var(--info); }
+
+/* ===== Forms ========================================================= */
+.field { display: block; margin-bottom: 14px; min-width: 0; }
+.field > label, .field > .label { display: block; font-weight: 550; margin-bottom: 6px; font-size: 13px; color: var(--text-2); }
+.fields { display: grid; gap: 0 14px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 130px), 1fr)); }
+.fields.two { grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); }
+input[type=text], input[type=password], input[type=number], input[type=file], select, textarea {
+    width: 100%; padding: 8px 10px; min-height: 36px; border-radius: var(--radius-sm); border: 1px solid var(--border-2);
+    background: var(--bg-2); color: var(--text); font: inherit; }
+input[type=number] { font-variant-numeric: tabular-nums; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px; }
+input[type=file] { padding: 6px; }
+.check { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; margin-bottom: 10px; }
+.check input { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--accent); flex: none; }
+.check span { min-width: 0; }
+.check strong { display: block; font-weight: 550; }
+.check small { display: block; }
+.input-row { display: flex; gap: 8px; }
+.input-row > input { flex: 1; min-width: 0; }
+.form-error { color: var(--bad); min-height: 0; margin: 4px 0 10px; font-size: 13px; }
+.form-error:empty { display: none; }
+.options { display: grid; gap: 8px; margin-bottom: 14px; }
+.option { display: flex; gap: 11px; align-items: flex-start; padding: 11px 13px; border-radius: 9px; border: 1px solid var(--border); cursor: pointer; background: var(--bg-2); }
+.option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.option input { margin-top: 3px; accent-color: var(--accent); }
+.option strong { display: block; font-weight: 600; }
+.option small { display: block; }
+input[type=range] { accent-color: var(--accent); width: 100%; }
+.subcard { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--bg-2); margin-top: 14px; }
+
+/* ===== Switch ======================================================== */
+.switch { position: relative; display: inline-block; width: 40px; height: 22px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; border-radius: 99px; background: var(--surface-3); border: 1px solid var(--border-2); transition: .15s; cursor: pointer; }
+.switch span::after { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; border-radius: 50%; background: var(--text-2); transition: .15s; }
+.switch input:checked + span { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + span::after { transform: translateX(18px); background: var(--accent-ink); }
+
+/* ===== Tables ======================================================== */
+.table-wrap { overflow-x: auto; margin: 0 -4px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 600; color: var(--text-3); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; padding: 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 9px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.empty { color: var(--text-3); text-align: center; padding: 22px 8px; }
+td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
+
+/* ===== Alerts ======================================================== */
+.note { padding: 11px 13px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); font-size: 13px; }
+.note.ok { background: var(--ok-soft); border-color: transparent; color: var(--text); }
+.note.bad { background: var(--bad-soft); border-color: transparent; color: var(--text); }
+.note.warn { background: var(--warn-soft); border-color: transparent; color: var(--text); }
+.note.info { background: var(--info-soft); border-color: transparent; color: var(--text); }
+.note .btn-row { margin-top: 10px; }
+
+/* ===== Network ======================================================= */
+.ifaces { display: grid; gap: 10px; }
+.iface { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-radius: 10px; background: var(--bg-2); border: 1px solid var(--border); }
+.iface .dot { margin-top: 6px; }
+.iface-name { font-weight: 600; }
+.iface-detail { color: var(--text-2); font-size: 13px; overflow-wrap: anywhere; }
+.iface.ok .dot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.iface.busy .dot { background: var(--warn); }
+.iface.bad .dot { background: var(--bad); }
+.iface.bad .iface-detail { color: var(--bad); }
+.net-banner { margin-bottom: 14px; }
+.wifi-list { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; }
+.wifi-item { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 11px 13px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-2); }
+.wifi-main { flex: 1; min-width: 160px; }
+.wifi-name { font-weight: 600; display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+.wifi-state { font-size: 13px; color: var(--text-2); }
+.wifi-state.ok { color: var(--ok); } .wifi-state.busy { color: var(--warn); } .wifi-state.bad { color: var(--bad); }
+.wifi-flags { font-size: 12px; color: var(--text-3); }
+.wifi-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.wifi-empty { padding: 14px; color: var(--text-3); text-align: center; border: 1px dashed var(--border-2); border-radius: 10px; }
+.bars { display: inline-flex; gap: 2px; align-items: flex-end; height: 12px; }
+.bars i { width: 3px; background: var(--border-2); border-radius: 1px; }
+.bars i:nth-child(1) { height: 4px; } .bars i:nth-child(2) { height: 6px; } .bars i:nth-child(3) { height: 9px; } .bars i:nth-child(4) { height: 12px; }
+.bars i.on { background: var(--ok); }
+.scan-list { margin-top: 8px; border: 1px solid var(--border); border-radius: 9px; max-height: 240px; overflow-y: auto; background: var(--bg-2); }
+.scan-item { display: flex; width: 100%; gap: 8px; justify-content: space-between; align-items: center; padding: 9px 12px; border: 0; border-bottom: 1px solid var(--border);
+    background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.scan-item:last-child { border-bottom: 0; }
+.scan-item:hover:not(:disabled) { background: var(--surface-2); }
+.scan-item:disabled { color: var(--text-3); cursor: not-allowed; }
+.scan-meta { display: flex; gap: 8px; align-items: center; color: var(--text-3); font-size: 12px; }
+.scan-note { padding: 12px; color: var(--text-3); }
+
+/* ===== DMX level grid ================================================ */
+.levels { display: grid; gap: 2px; grid-template-columns: 34px repeat(var(--cols, 32), minmax(0, 1fr)); font-family: var(--mono);
+    user-select: none; -webkit-user-select: none; }
+.lv-row { font-size: 10.5px; color: var(--text-3); text-align: right; padding-right: 5px; align-self: center; font-variant-numeric: tabular-nums; }
+.lv { position: relative; height: 26px; border-radius: 3px; background: var(--surface-2); overflow: hidden; display: grid; place-items: center;
+    font-size: 11px; font-variant-numeric: tabular-nums; color: var(--lv-text); --p: 0%; }
+.lv::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: var(--p); background: var(--lv-out); opacity: .55; }
+.levels.in .lv::before { background: var(--lv-in); }
+.levels.stale .lv::before { opacity: .22; }
+.lv > b { position: relative; font-weight: 550; }
+.lv.z > b { color: transparent; }
+.levels.dense .lv { height: 22px; font-size: 9.5px; }
+.levels.tight .lv > b { display: none; }
+.lv.flick { box-shadow: inset 0 0 0 2px var(--warn); }
+.lv.sel { box-shadow: inset 0 0 0 2px var(--accent); }
+.lv.dim { opacity: .35; }
+.levels.click .lv { cursor: pointer; }
+.lv-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 16px 0 8px; }
+.lv-head:first-child { margin-top: 0; }
+.lv-head h3 { margin: 0; text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--text); }
+.lv-legend { display: flex; gap: 12px; flex-wrap: wrap; color: var(--text-3); font-size: 12px; margin-top: 10px; }
+.lv-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+/* ===== Faders ======================================================== */
+.faders { display: grid; grid-template-columns: repeat(16, minmax(0, 1fr)); gap: 6px; }
+@media (max-width: 700px) { .faders { grid-template-columns: repeat(8, minmax(0, 1fr)); row-gap: 14px; } }
+.fader { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+.fader input[type=range] { writing-mode: vertical-lr; direction: rtl; width: 28px; height: 150px; margin: 0; }
+.fader .fv { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; min-height: 18px; }
+.fader .fc { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+.fader .fz { font-size: 10px; padding: 0 5px; min-height: 20px; }
+.bank-nav { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.bank-nav input { width: 84px; }
+
+/* ===== Histogram ===================================================== */
+.hist { display: grid; gap: 5px; }
+.hist-row { display: grid; grid-template-columns: 78px minmax(0, 1fr) 64px; gap: 8px; align-items: center; font-size: 12px; }
+.hist-row span:first-child { color: var(--text-3); font-family: var(--mono); text-align: right; }
+.hist-row span:last-child { font-family: var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+.hist-bar { height: 12px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.hist-bar i { display: block; height: 100%; background: var(--lv-in); border-radius: 3px; min-width: 0; }
+.hist-row.peak .hist-bar i { background: var(--ok); }
+
+/* ===== Tester ======================================================== */
+.port-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.port-tab { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 16px; min-width: 130px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; font: inherit; text-align: left; }
+.port-tab:hover { border-color: var(--border-2); }
+.port-tab.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.port-tab .pt-name { font-weight: 650; display: flex; gap: 8px; align-items: center; }
+.port-tab .pt-sub { font-size: 12px; color: var(--text-3); }
+.role-card { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.role-card .role-help { color: var(--text-3); font-size: 13px; flex: 1; min-width: 200px; }
+.watch-ch { font-family: var(--mono); }
+.meter { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; min-width: 60px; }
+.meter i { display: block; height: 100%; background: var(--lv-in); }
+.steps { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 6px; }
+.steps li { display: flex; justify-content: space-between; gap: 10px; padding: 9px 12px; border-radius: 8px; background: var(--bg-2); border: 1px solid var(--border); flex-wrap: wrap; }
+.presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.cable { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: center; padding: 16px; border-radius: 10px; background: var(--bg-2); border: 1px dashed var(--border-2); margin-bottom: 16px; }
+.cable .end { text-align: center; }
+.cable .end strong { display: block; font-size: 15px; }
+.cable .wire { flex: 1; min-width: 60px; max-width: 220px; height: 3px; border-radius: 2px; background: linear-gradient(90deg, var(--lv-out), var(--lv-in)); }
+
+/* ===== Log =========================================================== */
+.log-view { font-family: var(--mono); font-size: 12px; line-height: 1.45; background: var(--bg); border: 1px solid var(--border); border-radius: 9px;
+    padding: 10px 12px; height: 380px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.log-view .le { color: var(--bad); } .log-view .lw { color: var(--warn); } .log-view .li { color: var(--ok); }
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
 .toolbar .spacer { flex: 1; }
-.log-view {
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 0.375rem;
-    padding: 0.75rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.75rem;
-    line-height: 1.45;
-    height: 24rem;
-    overflow: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: var(--text-secondary);
-}
-.log-view .le { color: var(--danger); }
-.log-view .lw { color: var(--warning); }
-.log-view .li { color: var(--text-primary); }
-.mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.8rem;
-}
-.tag {
-    display: inline-block;
-    padding: 0 0.4rem;
-    border-radius: 0.25rem;
-    font-size: 0.7rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    vertical-align: middle;
-    line-height: 1.5;
-}
-.tag.test { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
-.tag.bad  { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
-.tag.ok   { background: rgba(16, 185, 129, 0.15); color: var(--success); }
-.analysis {
-    margin: 0.5rem 0 1rem;
-    padding-top: 0.5rem;
-    border-top: 1px solid var(--border-color);
-}
-.analysis h3 { font-size: 0.85rem; margin-bottom: 0.25rem; color: var(--text-secondary); }
-.analysis .stat-row { font-size: 0.85rem; }
-.analysis .btn { margin-top: 0.5rem; }
-.st-steps { list-style: none; margin-top: 0.75rem; }
-.st-steps li {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.35rem 0;
-    border-bottom: 1px solid var(--border-color);
-    font-size: 0.875rem;
-}
-.st-steps li:last-child { border-bottom: 0; }
-.alert-danger {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid var(--danger);
-    color: var(--danger);
-}
-.alert-info {
-    background: rgba(6, 182, 212, 0.08);
-    border: 1px solid var(--info);
-    color: var(--text-secondary);
-}
-.alert-ok {
-    background: rgba(16, 185, 129, 0.08);
-    border: 1px solid var(--success);
-    color: var(--success);
-}
-.form-section h3 { font-size: 0.95rem; margin-bottom: 0.75rem; }
-.field-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-    gap: 0.75rem;
-}
-    </style>
+
+/* ===== Progress ====================================================== */
+.progress { position: relative; height: 22px; border-radius: 6px; background: var(--surface-2); overflow: hidden; margin: 10px 0; }
+.progress > i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); transition: width .2s; }
+.progress > span { position: relative; display: block; text-align: center; font-size: 12px; line-height: 22px; font-weight: 600; }
+
+/* ===== Overlays, toasts ============================================== */
+.overlay { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 16px; background: rgba(5, 7, 9, .72); backdrop-filter: blur(3px); }
+.dialog { width: min(460px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px; box-shadow: var(--shadow); }
+.dialog h2 { font-size: 18px; margin-bottom: 8px; }
+.dialog p { color: var(--text-2); }
+.spinner { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--surface-3); border-top-color: var(--accent); animation: spin .9s linear infinite; margin-bottom: 16px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 60; display: grid; gap: 8px; width: min(380px, calc(100vw - 32px)); }
+.toast { padding: 11px 14px; border-radius: 10px; background: var(--surface-3); border: 1px solid var(--border-2); border-left: 4px solid var(--info);
+    box-shadow: var(--shadow); font-size: 13px; transition: opacity .3s, transform .3s; }
+.toast.success { border-left-color: var(--ok); } .toast.warning { border-left-color: var(--warn); } .toast.error { border-left-color: var(--bad); }
+.toast.out { opacity: 0; transform: translateY(6px); }
+@media (prefers-reduced-motion: reduce) { .tile.alarm, .spinner { animation: none; } }
+</style>
 </head>
 <body>
-    <div class="app">
-        <!-- Header -->
-        <header class="header">
-            <div class="header-content">
-                <h1>
-                    <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-                    </svg>
-                    ESP-NODE-2RDM
-                </h1>
-                <div class="connection-status">
-                    <span class="status-indicator" id="connectionStatus"></span>
-                    <span id="connectionText">Connecting...</span>
-                </div>
+<div class="shell">
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13.5 2 4 14h7l-1.5 8L19 10h-7z"/></svg></div>
+            <div class="brand-text">
+                <div class="brand-name" id="brandName">ESP-NODE</div>
+                <div class="brand-sub" id="brandSub">Art-Net / sACN node</div>
             </div>
-        </header>
-
-        <!-- Navigation Tabs -->
-        <nav class="tabs">
-            <button class="tab active" data-tab="dashboard">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <rect x="3" y="3" width="7" height="7"/>
-                    <rect x="14" y="3" width="7" height="7"/>
-                    <rect x="14" y="14" width="7" height="7"/>
-                    <rect x="3" y="14" width="7" height="7"/>
-                </svg>
-                Dashboard
+            <span class="chip" id="modeChip" hidden>TESTER</span>
+        </div>
+        <div class="topbar-actions">
+            <span class="conn" id="conn" title="Connection to the node"><i></i><span id="connText">Connecting…</span></span>
+            <button type="button" class="btn sm" id="identifyBtn" onclick="app.identify()" title="Flash the status LED for 30 s">
+                <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>
+                <span>Identify</span>
             </button>
-            <button class="tab" data-tab="network">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="2"/>
-                    <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/>
-                </svg>
-                Network
+            <button type="button" class="icon-btn" onclick="app.toggleTheme()" title="Light / dark" aria-label="Switch between light and dark">
+                <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg>
             </button>
-            <button class="tab" data-tab="dmx">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                    <line x1="16" y1="13" x2="8" y2="13"/>
-                    <line x1="16" y1="17" x2="8" y2="17"/>
-                    <polyline points="10 9 9 9 8 9"/>
-                </svg>
-                DMX/RDM
-            </button>
-            <button class="tab" data-tab="rdm">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
-                    <line x1="12" y1="22.08" x2="12" y2="12"/>
-                </svg>
-                RDM Discovery
-            </button>
-            <button class="tab" data-tab="scenes">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M15 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V7z"/>
-                    <polyline points="15 3 15 7 19 7"/>
-                    <line x1="9" y1="12" x2="15" y2="12"/>
-                    <line x1="9" y1="16" x2="13" y2="16"/>
-                </svg>
-                Scenes
-            </button>
-            <button class="tab" data-tab="system">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="3"/>
-                    <path d="M12 1v6m0 6v6M5.64 5.64l4.24 4.24m4.24 4.24l4.24 4.24M1 12h6m6 0h6M5.64 18.36l4.24-4.24m4.24-4.24l4.24-4.24"/>
-                </svg>
-                System
-            </button>
-        </nav>
+        </div>
+    </header>
 
-        <!-- Tab Content -->
-        <main class="content">
-            <!-- Dashboard Tab -->
-            <div class="tab-content active" id="dashboard">
-                <div class="grid">
-                    <!-- System Status Card -->
-                    <div class="card">
-                        <h2>System Status</h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Uptime:</span>
-                            <span class="stat-value" id="uptime">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Free RAM:</span>
-                            <span class="stat-value" id="freeHeap">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Firmware:</span>
-                            <span class="stat-value" id="firmware">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Hardware:</span>
-                            <span class="stat-value" id="hardware">--</span>
-                        </div>
-                    </div>
+    <nav class="sidenav" id="nav" aria-label="Pages"></nav>
 
-                    <!-- Network Status Card -->
-                    <div class="card">
-                        <h2>Network Status</h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Connection:</span>
-                            <span class="stat-value" id="netMode">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">IP Address:</span>
-                            <span class="stat-value" id="ipAddress">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Status:</span>
-                            <span class="stat-value" id="netStatus">--</span>
-                        </div>
-                    </div>
-
-                    <!-- Port 1 Status -->
-                    <div class="card">
-                        <h2>Port 1 <span class="tag test" id="port1Tag" hidden></span></h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Mode:</span>
-                            <span class="stat-value" id="port1Mode">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Universe:</span>
-                            <span class="stat-value" id="port1Universe">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Sources:</span>
-                            <span class="stat-value" id="port1Sources">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label" id="port1FramesLabel">Frames Sent:</span>
-                            <span class="stat-value" id="port1Frames">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Refresh Rate:</span>
-                            <span class="stat-value" id="port1Rate">-- Hz</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Output Sync:</span>
-                            <span class="stat-value" id="port1Sync">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">RDM:</span>
-                            <span class="stat-value" id="port1Rdm">--</span>
-                        </div>
-                        <div class="analysis" id="port1Analysis" hidden></div>
-                        <button class="btn btn-warning" onclick="app.blackoutPort(1)">Blackout</button>
-                    </div>
-
-                    <!-- Port 2 Status -->
-                    <div class="card">
-                        <h2>Port 2 <span class="tag test" id="port2Tag" hidden></span></h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Mode:</span>
-                            <span class="stat-value" id="port2Mode">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Universe:</span>
-                            <span class="stat-value" id="port2Universe">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Sources:</span>
-                            <span class="stat-value" id="port2Sources">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label" id="port2FramesLabel">Frames Sent:</span>
-                            <span class="stat-value" id="port2Frames">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Refresh Rate:</span>
-                            <span class="stat-value" id="port2Rate">-- Hz</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Output Sync:</span>
-                            <span class="stat-value" id="port2Sync">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">RDM:</span>
-                            <span class="stat-value" id="port2Rdm">--</span>
-                        </div>
-                        <div class="analysis" id="port2Analysis" hidden></div>
-                        <button class="btn btn-warning" onclick="app.blackoutPort(2)">Blackout</button>
-                    </div>
-
-                    <!-- Protocol Statistics -->
-                    <div class="card wide">
-                        <h2>Protocol Statistics</h2>
-                        <div class="proto-stats">
-                            <div class="proto-stat">
-                                <h3>Art-Net</h3>
-                                <div class="stat-row">
-                                    <span class="stat-label">Total Packets:</span>
-                                    <span class="stat-value" id="artnetPackets">--</span>
-                                </div>
-                                <div class="stat-row">
-                                    <span class="stat-label">DMX Packets:</span>
-                                    <span class="stat-value" id="artnetDmx">--</span>
-                                </div>
-                            </div>
-                            <div class="proto-stat">
-                                <h3>sACN</h3>
-                                <div class="stat-row">
-                                    <span class="stat-label">Total Packets:</span>
-                                    <span class="stat-value" id="sacnPackets">--</span>
-                                </div>
-                                <div class="stat-row">
-                                    <span class="stat-label">Data Packets:</span>
-                                    <span class="stat-value" id="sacnData">--</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- DMX levels: all 512 channels of each port -->
-                    <div class="card wide">
-                        <div class="card-header">
-                            <h2>DMX Levels</h2>
-                            <div class="seg" role="group" aria-label="Level display">
-                                <button type="button" class="seg-btn" data-dmx-fmt="dec" onclick="app.setDmxFormat('dec')">0&ndash;255</button>
-                                <button type="button" class="seg-btn" data-dmx-fmt="pct" onclick="app.setDmxFormat('pct')">%</button>
-                            </div>
-                        </div>
-                        <div class="dmx-port">
-                            <div class="dmx-port-head">
-                                <span class="dmx-port-name">Port 1</span>
-                                <span class="dmx-port-uni" id="dmxPort1Universe">--</span>
-                                <span class="dmx-live" id="dmxPort1Live">No data</span>
-                            </div>
-                            <div class="dmx-grid" id="dmxGrid1"></div>
-                        </div>
-                        <div class="dmx-port">
-                            <div class="dmx-port-head">
-                                <span class="dmx-port-name">Port 2</span>
-                                <span class="dmx-port-uni" id="dmxPort2Universe">--</span>
-                                <span class="dmx-live" id="dmxPort2Live">No data</span>
-                            </div>
-                            <div class="dmx-grid" id="dmxGrid2"></div>
-                        </div>
-                    </div>
-                </div>
+    <main class="main">
+        <div class="banner tester" id="testerBanner" hidden>
+            <div class="b-icon"><svg class="i" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6L4.5 18.5A1.7 1.7 0 0 0 6 21h12a1.7 1.7 0 0 0 1.5-2.5L14 9V3"/><path d="M7 15h10"/></svg></div>
+            <div class="b-text">
+                <strong>DMX tester mode</strong>
+                <small>The node ignores Art-Net and sACN and does not show up on consoles. The network is up only for this page.</small>
             </div>
-
-            <!-- Network Settings Tab -->
-            <div class="tab-content" id="network">
-                <div class="grid">
-                    <!-- Live connection status -->
-                    <div class="card wide">
-                        <h2>Connection</h2>
-                        <div id="netBanner" class="net-banner" hidden></div>
-                        <div class="net-ifaces">
-                            <div class="net-iface" id="ifEth">
-                                <span class="dot"></span>
-                                <div>
-                                    <div class="net-iface-name">Ethernet</div>
-                                    <div class="net-iface-detail" id="ifEthText">--</div>
-                                </div>
-                            </div>
-                            <div class="net-iface" id="ifWifi">
-                                <span class="dot"></span>
-                                <div>
-                                    <div class="net-iface-name">Wi-Fi</div>
-                                    <div class="net-iface-detail" id="ifWifiText">--</div>
-                                </div>
-                            </div>
-                            <div class="net-iface" id="ifAp">
-                                <span class="dot"></span>
-                                <div>
-                                    <div class="net-iface-name">Access point</div>
-                                    <div class="net-iface-detail" id="ifApText">--</div>
-                                </div>
-                            </div>
-                        </div>
-                        <small class="help-text" id="netHostname"></small>
-                    </div>
-
-                    <!-- Mode -->
-                    <div class="card">
-                        <h2>Connection Mode</h2>
-                        <form id="netModeForm" onsubmit="return app.saveNetMode(event)">
-                            <div class="mode-list">
-                                <label class="mode-opt">
-                                    <input type="radio" name="mode" value="0">
-                                    <span><strong>Automatic</strong>
-                                        <small>Ethernet when a cable is plugged in, otherwise your saved Wi-Fi networks, otherwise the node's own access point.</small></span>
-                                </label>
-                                <label class="mode-opt">
-                                    <input type="radio" name="mode" value="1">
-                                    <span><strong>Ethernet only</strong>
-                                        <small>Wi-Fi stays off.</small></span>
-                                </label>
-                                <label class="mode-opt">
-                                    <input type="radio" name="mode" value="2">
-                                    <span><strong>Wi-Fi only</strong>
-                                        <small>Joins your saved Wi-Fi networks. Ethernet is off.</small></span>
-                                </label>
-                                <label class="mode-opt">
-                                    <input type="radio" name="mode" value="3">
-                                    <span><strong>Access point only</strong>
-                                        <small>The node is its own network: join it from your console, laptop or tablet.</small></span>
-                                </label>
-                            </div>
-                            <div class="form-group">
-                                <label><input type="checkbox" name="ap_always"> Keep the access point on as well</label>
-                                <small class="help-text">For a direct connection next to Ethernet or Wi-Fi. Without this, the access point only comes on when the node has no other connection, so you can always reach it.</small>
-                            </div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Apply</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <!-- Wi-Fi networks -->
-                    <div class="card">
-                        <div class="card-header">
-                            <h2>Wi-Fi Networks</h2>
-                            <button type="button" class="btn" id="wifiAddBtn" onclick="app.openWifiForm()">Add network</button>
-                        </div>
-                        <small class="help-text">2.4 GHz networks only, up to 5. Networks in range are tried first, then in this order.</small>
-                        <ul class="wifi-list" id="wifiList"></ul>
-                        <form id="wifiForm" class="wifi-form" hidden onsubmit="return app.submitWifiForm(event)">
-                            <input type="hidden" name="orig_ssid">
-                            <div class="form-group">
-                                <label>Network name (SSID)</label>
-                                <div class="input-row">
-                                    <input type="text" name="ssid" maxlength="32" required autocomplete="off" autocapitalize="off" spellcheck="false">
-                                    <button type="button" class="btn" id="wifiScanBtn" onclick="app.scanWifi()">Scan</button>
-                                </div>
-                                <div id="wifiScanResults" class="scan-list" hidden></div>
-                            </div>
-                            <div class="form-group">
-                                <label>Password</label>
-                                <div class="input-row">
-                                    <input type="password" name="password" maxlength="64" autocomplete="new-password" autocapitalize="off" spellcheck="false">
-                                    <button type="button" class="btn" onclick="app.togglePw(this)">Show</button>
-                                </div>
-                                <small class="help-text" id="wifiPwHelp">Leave empty for an open network.</small>
-                            </div>
-                            <div class="form-group">
-                                <label><input type="checkbox" name="use_static_ip" onchange="app.toggleWifiStatic(this)"> Static IP address</label>
-                            </div>
-                            <div id="wifiStaticFields" hidden>
-                                <div class="form-group">
-                                    <label>IP address</label>
-                                    <input type="text" name="static_ip" placeholder="10.0.0.50" inputmode="decimal" autocomplete="off">
-                                </div>
-                                <div class="form-group">
-                                    <label>Subnet mask</label>
-                                    <input type="text" name="netmask" placeholder="255.255.255.0" inputmode="decimal" autocomplete="off">
-                                </div>
-                                <div class="form-group">
-                                    <label>Gateway (optional)</label>
-                                    <input type="text" name="gateway" placeholder="Leave empty if there is none" inputmode="decimal" autocomplete="off">
-                                </div>
-                            </div>
-                            <div class="form-error" id="wifiFormError"></div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary" data-connect="1">Save &amp; connect</button>
-                                <button type="submit" class="btn" data-connect="0">Save only</button>
-                                <button type="button" class="btn" onclick="app.closeWifiForm()">Cancel</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <!-- Ethernet -->
-                    <div class="card">
-                        <h2>Ethernet</h2>
-                        <form id="ethForm" onsubmit="return app.saveEthernet(event)">
-                            <div class="form-group">
-                                <label><input type="radio" name="eth_addr" value="dhcp"> Automatic (DHCP)</label>
-                                <label><input type="radio" name="eth_addr" value="static"> Static IP address</label>
-                            </div>
-                            <div id="ethStaticFields" hidden>
-                                <div class="form-group">
-                                    <label>IP address</label>
-                                    <input type="text" name="eth_static_ip" placeholder="2.0.0.10" inputmode="decimal" autocomplete="off">
-                                </div>
-                                <div class="form-group">
-                                    <label>Subnet mask</label>
-                                    <input type="text" name="eth_netmask" placeholder="255.0.0.0" inputmode="decimal" autocomplete="off">
-                                </div>
-                                <div class="form-group">
-                                    <label>Gateway (optional)</label>
-                                    <input type="text" name="eth_gateway" placeholder="Leave empty if there is none" inputmode="decimal" autocomplete="off">
-                                </div>
-                            </div>
-                            <small class="help-text">Lighting networks often have no DHCP server; use a static address there, for example 2.0.0.10 / 255.0.0.0 or 10.0.0.10 / 255.255.255.0.</small>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Apply</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <!-- Access point -->
-                    <div class="card">
-                        <h2>Access Point</h2>
-                        <form id="apForm" onsubmit="return app.saveAp(event)">
-                            <div class="form-group">
-                                <label>Network name</label>
-                                <input type="text" name="ap_ssid" maxlength="31" placeholder="ESP-NODE-0000" autocomplete="off">
-                            </div>
-                            <div class="form-group">
-                                <label>Password</label>
-                                <div class="input-row">
-                                    <input type="password" name="ap_password" minlength="8" maxlength="63" autocomplete="new-password" placeholder="Leave empty to keep the current one">
-                                    <button type="button" class="btn" onclick="app.togglePw(this)">Show</button>
-                                </div>
-                                <small class="help-text">8&ndash;63 characters. The factory default (12345678) is not accepted.</small>
-                            </div>
-                            <div class="form-group">
-                                <label>Channel (1&ndash;13)</label>
-                                <input type="number" name="ap_channel" min="1" max="13" value="1">
-                                <small class="help-text">While the node is also on Wi-Fi, the access point uses that network's channel.</small>
-                            </div>
-                            <small class="help-text">The access point is at http://192.168.4.1/.</small>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Apply</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <!-- Identity -->
-                    <div class="card">
-                        <h2>Node Name</h2>
-                        <form id="identityForm" onsubmit="return app.saveIdentity(event)">
-                            <div class="form-group">
-                                <label>Short name (max 17 characters)</label>
-                                <input type="text" name="short_name" maxlength="17" placeholder="ESP-NODE-0000">
-                                <small class="help-text">Shown in Art-Net controllers and as the sACN source name. The http://&hellip;.local/ address follows it after a restart.</small>
-                            </div>
-                            <div class="form-group">
-                                <label>Long name (max 63 characters)</label>
-                                <input type="text" name="long_name" maxlength="63">
-                            </div>
-                            <div class="form-group">
-                                <label>
-                                    <input type="checkbox" name="allow_ip_prog"> Consoles may change the IP address (ArtIpProg)
-                                </label>
-                                <small class="help-text">Lets an Art-Net console or tool set this node's IP address, mask, gateway or DHCP remotely. It changes the settings of the interface the console reached it on.</small>
-                            </div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Save</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            </div>
-
-            <!-- DMX/RDM Configuration Tab -->
-            <div class="tab-content" id="dmx">
-                <div class="grid">
-                    <!-- Port 1 Configuration -->
-                    <div class="card">
-                        <h2>Port 1 Configuration</h2>
-                        <form id="port1Form" onsubmit="return app.savePortConfig(event, 1)">
-                            <div class="form-group">
-                                <label>Art-Net Port-Address</label>
-                                <input type="number" name="universe" min="0" max="32767" value="0" oninput="app.showNetSubUni(this)">
-                                <small class="help-text" data-netsubuni>Net 0 : Sub 0 : Universe 0</small>
-                            </div>
-                            <div class="form-group">
-                                <label>sACN Universe</label>
-                                <input type="number" name="sacn_universe" min="1" max="63999" value="1">
-                                <small class="help-text">E1.31 universe (1-63999), independent of the Art-Net address</small>
-                            </div>
-                            <div class="form-group">
-                                <label>Backup Art-Net Port-Address</label>
-                                <input type="number" name="universe_secondary" min="0" max="32767" placeholder="none">
-                                <small class="help-text">Only used by the BACKUP merge mode (leave empty for none)</small>
-                            </div>
-                            <div class="form-group">
-                                <label>Port Mode</label>
-                                <select name="mode">
-                                    <option value="0">Disabled</option>
-                                    <option value="1" selected>DMX Output</option>
-                                    <option value="2">DMX Input</option>
-                                    <option value="3">RDM Master</option>
-                                    <option value="4">RDM Responder</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>Protocol Mode</label>
-                                <select name="protocol_mode">
-                                    <option value="0">Art-Net Only</option>
-                                    <option value="1">sACN Only</option>
-                                    <option value="2">Art-Net Priority</option>
-                                    <option value="3">sACN Priority</option>
-                                    <option value="4" selected>Merge Both</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>
-                                    <input type="checkbox" name="rdm_enabled" checked> Enable RDM
-                                </label>
-                            </div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Apply</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <!-- Port 2 Configuration -->
-                    <div class="card">
-                        <h2>Port 2 Configuration</h2>
-                        <form id="port2Form" onsubmit="return app.savePortConfig(event, 2)">
-                            <div class="form-group">
-                                <label>Art-Net Port-Address</label>
-                                <input type="number" name="universe" min="0" max="32767" value="1" oninput="app.showNetSubUni(this)">
-                                <small class="help-text" data-netsubuni>Net 0 : Sub 0 : Universe 1</small>
-                            </div>
-                            <div class="form-group">
-                                <label>sACN Universe</label>
-                                <input type="number" name="sacn_universe" min="1" max="63999" value="2">
-                                <small class="help-text">E1.31 universe (1-63999), independent of the Art-Net address</small>
-                            </div>
-                            <div class="form-group">
-                                <label>Backup Art-Net Port-Address</label>
-                                <input type="number" name="universe_secondary" min="0" max="32767" placeholder="none">
-                                <small class="help-text">Only used by the BACKUP merge mode (leave empty for none)</small>
-                            </div>
-                            <div class="form-group">
-                                <label>Port Mode</label>
-                                <select name="mode">
-                                    <option value="0">Disabled</option>
-                                    <option value="1" selected>DMX Output</option>
-                                    <option value="2">DMX Input</option>
-                                    <option value="3">RDM Master</option>
-                                    <option value="4">RDM Responder</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>Protocol Mode</label>
-                                <select name="protocol_mode">
-                                    <option value="0">Art-Net Only</option>
-                                    <option value="1">sACN Only</option>
-                                    <option value="2">Art-Net Priority</option>
-                                    <option value="3">sACN Priority</option>
-                                    <option value="4" selected>Merge Both</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>
-                                    <input type="checkbox" name="rdm_enabled" checked> Enable RDM
-                                </label>
-                            </div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Apply</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <!-- Merge Engine Settings -->
-                    <div class="card wide">
-                        <h2>Merge Engine Configuration</h2>
-                        <div class="grid grid-2">
-                            <div class="form-group">
-                                <label>Port 1 Merge Mode</label>
-                                <select id="port1MergeMode" onchange="app.saveMergeMode(1, this.value)">
-                                    <option value="0">HTP (Highest Takes Precedence)</option>
-                                    <option value="1">LTP (Latest Takes Precedence)</option>
-                                    <option value="2">LAST (Most Recent Source Wins)</option>
-                                    <option value="3">BACKUP (Primary + Failover)</option>
-                                    <option value="4">DISABLE (No Merge)</option>
-                                </select>
-                                <small class="help-text">How to merge multiple sources for Port 1</small>
-                            </div>
-                            <div class="form-group">
-                                <label>Port 2 Merge Mode</label>
-                                <select id="port2MergeMode" onchange="app.saveMergeMode(2, this.value)">
-                                    <option value="0">HTP (Highest Takes Precedence)</option>
-                                    <option value="1">LTP (Latest Takes Precedence)</option>
-                                    <option value="2">LAST (Most Recent Source Wins)</option>
-                                    <option value="3">BACKUP (Primary + Failover)</option>
-                                    <option value="4">DISABLE (No Merge)</option>
-                                </select>
-                                <small class="help-text">How to merge multiple sources for Port 2</small>
-                            </div>
-                        </div>
-                        <form id="mergeSettingsForm" onsubmit="return app.saveMergeSettings(event)">
-                            <div class="grid grid-2">
-                                <div class="form-group">
-                                    <label>Source Timeout (seconds)</label>
-                                    <input type="number" name="timeout_seconds" min="1" max="60" value="3">
-                                    <small class="help-text">A source that stops sending is dropped after this time (sACN standard: 2.5 s)</small>
-                                </div>
-                                <div class="form-group">
-                                    <label>When All Sources Are Lost</label>
-                                    <select name="loss_behavior">
-                                        <option value="0">Hold last look</option>
-                                        <option value="1">Blackout (zero)</option>
-                                        <option value="2">Full (every channel at 255)</option>
-                                        <option value="3">Failsafe scene (set per port)</option>
-                                    </select>
-                                    <small class="help-text">What the DMX outputs do when every source is lost (Art-Net failsafe). Not applied at power-on before any data arrived.</small>
-                                </div>
-                                <div class="form-group">
-                                    <label>sACN Transmit Priority</label>
-                                    <input type="number" name="sacn_priority" min="0" max="200" value="100">
-                                    <small class="help-text">Priority of the sACN this node sends from a DMX input port</small>
-                                </div>
-                            </div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Save Merge Settings</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <!-- DMX Tools -->
-                    <div class="card wide" id="dmxToolsCard">
-                        <h2>DMX Tools</h2>
-                        <form id="testForm" onsubmit="return app.startTest(event)">
-                            <h3>Test pattern</h3>
-                            <p class="help-text">Replaces everything on the output (consoles, scenes) until you stop it. Use it to check cabling and fixtures without a console.</p>
-                            <div class="field-row">
-                                <div class="form-group">
-                                    <label>Port</label>
-                                    <select name="port">
-                                        <option value="1">Port 1</option>
-                                        <option value="2">Port 2</option>
-                                    </select>
-                                </div>
-                                <div class="form-group">
-                                    <label>Pattern</label>
-                                    <select name="mode" onchange="app.testModeChanged()">
-                                        <option value="static">Level</option>
-                                        <option value="full">Full</option>
-                                        <option value="chase">Chase</option>
-                                        <option value="ramp">Ramp</option>
-                                    </select>
-                                </div>
-                                <div class="form-group">
-                                    <label>First channel</label>
-                                    <input type="number" name="first" min="1" max="512" value="1">
-                                </div>
-                                <div class="form-group">
-                                    <label>Last channel</label>
-                                    <input type="number" name="last" min="1" max="512" value="512">
-                                </div>
-                                <div class="form-group" data-test="level">
-                                    <label>Level (0-255)</label>
-                                    <input type="number" name="level" min="0" max="255" value="255">
-                                </div>
-                                <div class="form-group" data-test="speed">
-                                    <label>Step / fade (ms)</label>
-                                    <input type="number" name="speed_ms" min="20" max="60000" value="500">
-                                </div>
-                            </div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Start test</button>
-                                <button type="button" class="btn btn-warning" onclick="app.stopTest()">Stop all tests</button>
-                            </div>
-                            <div class="status-message" id="testStatus" hidden></div>
-                        </form>
-
-                        <div class="form-section">
-                            <h3>Loopback self-test</h3>
-                            <p class="help-text">Connect a DMX cable from the output port to the input port, then run the test. It sends five patterns and checks every channel comes back unchanged. Both ports are borrowed for about 6 seconds and their settings are put back afterwards.</p>
-                            <div class="field-row">
-                                <div class="form-group">
-                                    <label>Send on</label>
-                                    <select id="stOut"><option value="1">Port 1</option><option value="2">Port 2</option></select>
-                                </div>
-                                <div class="form-group">
-                                    <label>Receive on</label>
-                                    <select id="stIn"><option value="2">Port 2</option><option value="1">Port 1</option></select>
-                                </div>
-                            </div>
-                            <div class="form-actions">
-                                <button type="button" class="btn btn-primary" id="stRun" onclick="app.runSelfTest()">Run self-test</button>
-                            </div>
-                            <div id="stResult"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- RDM Discovery Tab -->
-            <div class="tab-content" id="rdm">
-                <div class="card">
-                    <div class="card-header">
-                        <h2>RDM Device Discovery</h2>
-                        <button class="btn btn-primary" onclick="app.startRDMDiscovery()">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-                            </svg>
-                            Scan Devices
-                        </button>
-                    </div>
-                    
-                    <div id="rdmStatus" class="status-message">
-                        Click "Scan Devices" to discover RDM devices on the network
-                    </div>
-
-                    <div class="table-responsive">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Port</th>
-                                    <th>UID</th>
-                                    <th>Device Label</th>
-                                    <th>DMX Address</th>
-                                    <th>Manufacturer</th>
-                                    <th>Model</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="rdmDevicesTable">
-                                <tr>
-                                    <td colspan="7" class="no-data">No devices discovered</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Scenes Tab -->
-            <div class="tab-content" id="scenes">
-                <div class="grid">
-                    <!-- Record Scene -->
-                    <div class="card">
-                        <h2>Record Scene</h2>
-                        <p style="color:var(--text-secondary);margin-bottom:1rem;">Capture the current DMX output as a named scene (up to 16 scenes).</p>
-                        <div class="form-group">
-                            <label>Scene Name</label>
-                            <input type="text" id="sceneRecordName" placeholder="e.g. Stage Wash" maxlength="31" class="form-control">
-                        </div>
-                        <div class="form-group">
-                            <label>Port</label>
-                            <select id="sceneRecordPort" class="form-control">
-                                <option value="1">Port 1</option>
-                                <option value="2">Port 2</option>
-                            </select>
-                        </div>
-                        <div class="form-actions">
-                            <button class="btn btn-primary" onclick="app.recordScene()">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:1rem;height:1rem">
-                                    <circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="3" fill="currentColor"/>
-                                </svg>
-                                Record Current DMX
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- Playback Settings -->
-                    <div class="card">
-                        <h2>Playback Settings</h2>
-                        <div class="form-group">
-                            <label>Fade Time (ms)</label>
-                            <input type="number" id="sceneFadeMs" value="500" min="0" max="30000" step="100" class="form-control">
-                        </div>
-                        <p style="color:var(--text-secondary);font-size:0.85rem;">Set fade time to 0 for an instant scene change. A playing scene stays on until it is released.</p>
-                        <div class="form-actions">
-                            <button class="btn btn-secondary" onclick="app.releaseScenes()">Release Scenes (back to live input)</button>
-                        </div>
-                    </div>
-
-                    <!-- Scene List -->
-                    <div class="card wide">
-                        <div class="card-header">
-                            <h2>Saved Scenes</h2>
-                            <button class="btn btn-secondary" onclick="app.loadScenes()">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:1rem;height:1rem">
-                                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-                                </svg>
-                                Refresh
-                            </button>
-                        </div>
-                        <div class="table-responsive">
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>#</th>
-                                        <th>Name</th>
-                                        <th>Port</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="scenesTable">
-                                    <tr><td colspan="4" class="no-data">No scenes saved</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- System Tab -->
-            <div class="tab-content" id="system">
-                <div class="grid">
-                    <!-- System Information -->
-                    <div class="card">
-                        <h2>System Information</h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Firmware Version:</span>
-                            <span class="stat-value" id="sysFirmware">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Hardware:</span>
-                            <span class="stat-value" id="sysHardware">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">IDF Version:</span>
-                            <span class="stat-value" id="sysIDF">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Free Heap:</span>
-                            <span class="stat-value" id="sysFreeHeap">--</span>
-                        </div>
-                        <div class="stat-row">
-                            <span class="stat-label">Uptime:</span>
-                            <span class="stat-value" id="sysUptime">--</span>
-                        </div>
-                    </div>
-
-                    <!-- System Actions -->
-                    <div class="card">
-                        <h2>System Actions</h2>
-                        <div class="action-buttons">
-                            <button class="btn btn-primary" id="identifyBtn" onclick="app.identify()">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <circle cx="12" cy="12" r="4"/>
-                                    <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/>
-                                </svg>
-                                <span>Identify (flash LED)</span>
-                            </button>
-                            <button class="btn btn-warning" onclick="app.rebootDevice()">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-                                </svg>
-                                Reboot Device
-                            </button>
-                            <button class="btn btn-danger" onclick="app.factoryReset()">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <polyline points="3 6 5 6 21 6"/>
-                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                                </svg>
-                                Factory Reset
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- Admin Password -->
-                    <div class="card">
-                        <h2>Admin Password</h2>
-                        <form id="passwordForm" onsubmit="return app.changePassword(event)">
-                            <input type="text" name="username" value="admin" autocomplete="username" hidden>
-                            <div class="form-group">
-                                <label>Current Password</label>
-                                <input type="password" name="current_password" required autocomplete="current-password">
-                            </div>
-                            <div class="form-group">
-                                <label>New Password</label>
-                                <input type="password" name="new_password" required minlength="8" maxlength="63" autocomplete="new-password">
-                            </div>
-                            <div class="form-group">
-                                <label>Confirm New Password</label>
-                                <input type="password" name="confirm_password" required minlength="8" maxlength="63" autocomplete="new-password">
-                                <small class="help-text">Username is <strong>admin</strong>. Your browser will ask you to sign in again.</small>
-                            </div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Change Password</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <!-- Backup / restore -->
-                    <div class="card">
-                        <h2>Backup &amp; Restore</h2>
-                        <p class="help-text">Saves every setting to a file: ports, merge, network, node name. Passwords are never included.</p>
-                        <div class="form-actions">
-                            <button type="button" class="btn btn-primary" onclick="app.downloadBackup()">Download backup</button>
-                        </div>
-                        <form id="restoreForm" class="form-section" onsubmit="return app.restoreBackup(event)">
-                            <div class="form-group">
-                                <label>Restore from a backup file (.json)</label>
-                                <input type="file" name="file" accept=".json,application/json">
-                            </div>
-                            <div class="form-group">
-                                <label>
-                                    <input type="checkbox" name="network" checked> Include network settings
-                                </label>
-                                <small class="help-text">Untick when copying settings to a second node, so both don't end up on the same static IP. Wi-Fi networks this node doesn't know yet need their password entered again.</small>
-                            </div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-warning">Restore</button>
-                            </div>
-                        </form>
-                    </div>
-
-                    <!-- Crash report -->
-                    <div class="card">
-                        <h2>Crash Report</h2>
-                        <div class="stat-row">
-                            <span class="stat-label">Last restart:</span>
-                            <span class="stat-value" id="crashReset">--</span>
-                        </div>
-                        <div id="crashBody"><p class="help-text">Loading&hellip;</p></div>
-                    </div>
-
-                    <!-- Log -->
-                    <div class="card wide">
-                        <h2>Log</h2>
-                        <div class="toolbar">
-                            <button type="button" class="btn btn-sm" id="logPauseBtn" onclick="app.toggleLogPause()">Pause</button>
-                            <button type="button" class="btn btn-sm" onclick="app.clearLogView()">Clear view</button>
-                            <label class="help-text" style="margin:0"><input type="checkbox" id="logFollow" checked> Follow</label>
-                            <span class="spacer"></span>
-                            <span class="help-text" id="logInfo"></span>
-                            <button type="button" class="btn btn-sm btn-primary" onclick="app.downloadLog()">Download</button>
-                        </div>
-                        <div class="log-view" id="logView" aria-live="off"></div>
-                    </div>
-
-                    <!-- Firmware Update -->
-                    <div class="card wide">
-                        <h2>Firmware Update (OTA)</h2>
-                        <form id="otaForm" onsubmit="return app.uploadFirmware(event)">
-                            <div class="form-group">
-                                <label>Select Firmware File (.bin)</label>
-                                <input type="file" name="firmware" accept=".bin" id="firmwareFile">
-                            </div>
-                            <div id="uploadProgress" class="progress" style="display: none;">
-                                <div class="progress-bar" id="uploadProgressBar"></div>
-                                <span class="progress-text" id="uploadProgressText">0%</span>
-                            </div>
-                            <div class="form-actions">
-                                <button type="submit" class="btn btn-primary">Upload Firmware</button>
-                                <button type="button" class="btn btn-warning" onclick="app.firmwareRollback()">Roll Back to Previous</button>
-                            </div>
-                            <div class="alert alert-warning">
-                                <strong>Warning:</strong> Do not power off the device during firmware update!
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            </div>
-        </main>
-
-        <!-- First-run setup -->
-        <div class="overlay" id="setupOverlay" hidden>
-            <div class="overlay-panel" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
-                <h2 id="setupTitle">Welcome &mdash; secure this node</h2>
-                <p>Set a password for this web page (username <strong>admin</strong>) and replace the
-                   factory Wi-Fi access point password. The node restarts when you save.</p>
-                <form id="setupForm" onsubmit="return app.submitSetup(event)">
-                    <input type="text" name="username" value="admin" autocomplete="username" hidden>
-                    <div class="form-group">
-                        <label>Admin Password</label>
-                        <input type="password" name="password" required minlength="8" maxlength="63" autocomplete="new-password">
-                    </div>
-                    <div class="form-group">
-                        <label>Confirm Admin Password</label>
-                        <input type="password" name="password_confirm" required minlength="8" maxlength="63" autocomplete="new-password">
-                    </div>
-                    <div class="form-group">
-                        <label>Access Point Password (<span id="setupApSsid">fallback AP</span>)</label>
-                        <input type="password" name="ap_password" required minlength="8" maxlength="63" autocomplete="off">
-                        <small class="help-text">8&ndash;63 characters, not 12345678. If you are connected to
-                            the node's own Wi-Fi, reconnect with this password after the restart.</small>
-                    </div>
-                    <div class="form-error" id="setupError"></div>
-                    <div class="form-actions">
-                        <button type="submit" class="btn btn-primary" id="setupSubmit">Save and Restart</button>
-                    </div>
-                </form>
-            </div>
+            <button type="button" class="btn" onclick="app.setTesterMode(false)">Back to node mode</button>
         </div>
 
-        <!-- Toast Notifications -->
-        <div class="toast-container" id="toastContainer"></div>
-    </div>
+        <!-- ================= Overview ================= -->
+        <section class="page" id="page-overview">
+            <div class="page-head">
+                <div><h1>Overview</h1><p id="ovSub">Live status of the node and its ports.</p></div>
+            </div>
+            <div class="tiles">
+                <div class="tile"><div class="tile-label">Network</div><div class="tile-value" id="ovNet">--</div><div class="tile-sub" id="ovIp">--</div></div>
+                <div class="tile"><div class="tile-label">Uptime</div><div class="tile-value" id="ovUptime">--</div><div class="tile-sub" id="ovHeap">--</div></div>
+                <div class="tile" data-node-only><div class="tile-label">Art-Net received</div><div class="tile-value" id="ovArtnet">0</div><div class="tile-sub" id="ovArtnetDmx">0 ArtDmx</div></div>
+                <div class="tile" data-node-only data-feature="sacn"><div class="tile-label">sACN received</div><div class="tile-value" id="ovSacn">0</div><div class="tile-sub" id="ovSacnData">0 data</div></div>
+                <div class="tile"><div class="tile-label">Firmware</div><div class="tile-value" id="ovFw">--</div><div class="tile-sub" id="ovHw">--</div></div>
+            </div>
+            <div class="grid" id="ovPorts"></div>
+            <div class="card section">
+                <div class="card-head">
+                    <h2>DMX levels</h2>
+                    <div class="actions">
+                        <div class="seg" role="group" aria-label="Level format">
+                            <button type="button" data-fmt="dec" onclick="app.setFormat('dec')">0–255</button>
+                            <button type="button" data-fmt="pct" onclick="app.setFormat('pct')">%</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="ovLevels"></div>
+                <div class="lv-legend"><span><i style="background:var(--lv-out)"></i>sent by an output</span><span><i style="background:var(--lv-in)"></i>received by an input</span><span>Faded = no live source</span></div>
+            </div>
+        </section>
 
-    <script src="main.js"></script>
+        <!-- ================= Ports ================= -->
+        <section class="page" id="page-ports">
+            <div class="page-head"><div><h1>Ports</h1><p>What each DMX port does, which universe it uses and how it merges sources.</p></div></div>
+            <div class="grid" id="portForms"></div>
+            <div class="card section">
+                <div class="card-head"><h2>Merging and failsafe</h2></div>
+                <form id="mergeForm" onsubmit="return app.saveMerge(event)">
+                    <div class="fields two">
+                        <div class="field">
+                            <label for="mfTimeout">Source timeout (seconds)</label>
+                            <input id="mfTimeout" type="number" name="timeout_seconds" min="1" max="60" value="3">
+                            <small class="help">A source that stops sending is dropped after this long (sACN uses 2.5 s).</small>
+                        </div>
+                        <div class="field">
+                            <label for="mfLoss">When every source is lost</label>
+                            <select id="mfLoss" name="loss_behavior">
+                                <option value="0">Hold the last look</option>
+                                <option value="1">Blackout (zero)</option>
+                                <option value="2">Full (every channel at 255)</option>
+                                <option value="3" data-feature="scenes">Failsafe scene (set per port)</option>
+                            </select>
+                            <small class="help">The Art-Net failsafe. Not used at power-on, before any data arrived.</small>
+                        </div>
+                        <div class="field" data-feature="sacn">
+                            <label for="mfPrio">sACN send priority</label>
+                            <input id="mfPrio" type="number" name="sacn_priority" min="0" max="200" value="100">
+                            <small class="help">Priority of the sACN a DMX input port sends.</small>
+                        </div>
+                    </div>
+                    <div class="btn-row"><button type="submit" class="btn primary">Save</button></div>
+                </form>
+            </div>
+        </section>
+
+        <!-- ================= Network ================= -->
+        <section class="page" id="page-network">
+            <div class="page-head"><div><h1>Network</h1><p>How the node joins a network, and its own access point.</p></div></div>
+            <div class="grid">
+                <div class="card wide">
+                    <div class="card-head"><h2>Connection</h2></div>
+                    <div id="netBanner" class="note net-banner" hidden></div>
+                    <div class="ifaces">
+                        <div class="iface" id="ifEth" data-feature="ethernet"><span class="dot"></span><div><div class="iface-name">Ethernet</div><div class="iface-detail" id="ifEthText">--</div></div></div>
+                        <div class="iface" id="ifWifi"><span class="dot"></span><div><div class="iface-name">Wi-Fi</div><div class="iface-detail" id="ifWifiText">--</div></div></div>
+                        <div class="iface" id="ifAp"><span class="dot"></span><div><div class="iface-name">Access point</div><div class="iface-detail" id="ifApText">--</div></div></div>
+                    </div>
+                    <small class="help" id="netHostname"></small>
+                </div>
+
+                <div class="card">
+                    <div class="card-head"><h2>Connection mode</h2></div>
+                    <form id="netModeForm" onsubmit="return app.saveNetMode(event)">
+                        <div class="options">
+                            <label class="option"><input type="radio" name="mode" value="0"><span><strong>Automatic</strong>
+                                <small id="modeAutoHelp">Ethernet when a cable is plugged in, otherwise your saved Wi-Fi networks, otherwise the node's own access point.</small></span></label>
+                            <label class="option" data-feature="ethernet"><input type="radio" name="mode" value="1"><span><strong>Ethernet only</strong><small>Wi-Fi stays off.</small></span></label>
+                            <label class="option"><input type="radio" name="mode" value="2"><span><strong>Wi-Fi only</strong><small id="modeWifiHelp">Joins your saved Wi-Fi networks. Ethernet is off.</small></span></label>
+                            <label class="option"><input type="radio" name="mode" value="3"><span><strong>Access point only</strong><small>The node is its own network: join it from your console, laptop or tablet.</small></span></label>
+                        </div>
+                        <label class="check"><input type="checkbox" name="ap_always"><span><strong>Keep the access point on as well</strong>
+                            <small>For a direct connection next to <span data-feature="ethernet">Ethernet or </span>Wi-Fi. Without this the access point only comes on when the node has no other connection, so you can always reach it.</small></span></label>
+                        <div class="btn-row"><button type="submit" class="btn primary">Apply</button></div>
+                    </form>
+                </div>
+
+                <div class="card">
+                    <div class="card-head"><h2>Wi-Fi networks</h2><div class="actions"><button type="button" class="btn sm" id="wifiAddBtn" onclick="app.openWifiForm()">Add network</button></div></div>
+                    <small class="help">2.4 GHz only, up to 5. Networks in range are tried first, then in this order.</small>
+                    <ul class="wifi-list" id="wifiList"></ul>
+                    <form id="wifiForm" class="subcard" hidden onsubmit="return app.submitWifiForm(event)">
+                        <input type="hidden" name="orig_ssid">
+                        <div class="field">
+                            <label>Network name (SSID)</label>
+                            <div class="input-row">
+                                <input type="text" name="ssid" maxlength="32" required autocomplete="off" autocapitalize="off" spellcheck="false">
+                                <button type="button" class="btn" id="wifiScanBtn" onclick="app.scanWifi()">Scan</button>
+                            </div>
+                            <div id="wifiScanResults" class="scan-list" hidden></div>
+                        </div>
+                        <div class="field">
+                            <label>Password</label>
+                            <div class="input-row">
+                                <input type="password" name="password" maxlength="64" autocomplete="new-password" autocapitalize="off" spellcheck="false">
+                                <button type="button" class="btn" onclick="app.togglePw(this)">Show</button>
+                            </div>
+                            <small class="help" id="wifiPwHelp">Leave empty for an open network.</small>
+                        </div>
+                        <label class="check"><input type="checkbox" name="use_static_ip" onchange="app.toggleWifiStatic(this)"><span><strong>Static IP address</strong></span></label>
+                        <div id="wifiStaticFields" class="fields two" hidden>
+                            <div class="field"><label>IP address</label><input type="text" name="static_ip" placeholder="10.0.0.50" inputmode="decimal" autocomplete="off"></div>
+                            <div class="field"><label>Subnet mask</label><input type="text" name="netmask" placeholder="255.255.255.0" inputmode="decimal" autocomplete="off"></div>
+                            <div class="field"><label>Gateway (optional)</label><input type="text" name="gateway" placeholder="none" inputmode="decimal" autocomplete="off"></div>
+                        </div>
+                        <div class="form-error" id="wifiFormError"></div>
+                        <div class="btn-row">
+                            <button type="submit" class="btn primary" data-connect="1">Save &amp; connect</button>
+                            <button type="submit" class="btn" data-connect="0">Save only</button>
+                            <button type="button" class="btn ghost" onclick="app.closeWifiForm()">Cancel</button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="card" data-feature="ethernet">
+                    <div class="card-head"><h2>Ethernet</h2></div>
+                    <form id="ethForm" onsubmit="return app.saveEthernet(event)">
+                        <div class="options">
+                            <label class="option"><input type="radio" name="eth_addr" value="dhcp"><span><strong>Automatic (DHCP)</strong></span></label>
+                            <label class="option"><input type="radio" name="eth_addr" value="static"><span><strong>Static IP address</strong></span></label>
+                        </div>
+                        <div id="ethStaticFields" class="fields two" hidden>
+                            <div class="field"><label>IP address</label><input type="text" name="eth_static_ip" placeholder="2.0.0.10" inputmode="decimal" autocomplete="off"></div>
+                            <div class="field"><label>Subnet mask</label><input type="text" name="eth_netmask" placeholder="255.0.0.0" inputmode="decimal" autocomplete="off"></div>
+                            <div class="field"><label>Gateway (optional)</label><input type="text" name="eth_gateway" placeholder="none" inputmode="decimal" autocomplete="off"></div>
+                        </div>
+                        <small class="help" style="margin-bottom:14px">Lighting networks often have no DHCP server. Use a static address there, for example 2.0.0.10 / 255.0.0.0 or 10.0.0.10 / 255.255.255.0.</small>
+                        <div class="btn-row"><button type="submit" class="btn primary">Apply</button></div>
+                    </form>
+                </div>
+
+                <div class="card">
+                    <div class="card-head"><h2>Access point</h2></div>
+                    <form id="apForm" onsubmit="return app.saveAp(event)">
+                        <div class="field"><label>Name (SSID)</label><input type="text" name="ap_ssid" maxlength="31" required autocomplete="off"></div>
+                        <div class="field">
+                            <label>Password</label>
+                            <div class="input-row">
+                                <input type="password" name="ap_password" maxlength="63" placeholder="unchanged" autocomplete="new-password">
+                                <button type="button" class="btn" onclick="app.togglePw(this)">Show</button>
+                            </div>
+                            <small class="help">8–63 characters. Leave empty to keep the current one.</small>
+                        </div>
+                        <div class="field"><label>Channel</label><input type="number" name="ap_channel" min="1" max="13" value="1"></div>
+                        <div class="btn-row"><button type="submit" class="btn primary">Apply</button></div>
+                    </form>
+                </div>
+
+                <div class="card">
+                    <div class="card-head"><h2>Node name</h2></div>
+                    <form id="identityForm" onsubmit="return app.saveIdentity(event)">
+                        <div class="field"><label>Short name</label><input type="text" name="short_name" maxlength="17" required><small class="help">Shown on consoles (Art-Net short name, sACN source name) and used for the .local address.</small></div>
+                        <div class="field"><label>Long name</label><input type="text" name="long_name" maxlength="63"></div>
+                        <label class="check"><input type="checkbox" name="allow_ip_prog"><span><strong>Let consoles change the IP address</strong><small>Art-Net ArtIpProg. Turn off to keep the address set here.</small></span></label>
+                        <div class="btn-row"><button type="submit" class="btn primary">Save</button></div>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================= RDM ================= -->
+        <section class="page" id="page-rdm">
+            <div class="page-head">
+                <div><h1>RDM</h1><p>Find fixtures on the RDM ports, set their DMX address and make them identify.</p></div>
+                <div class="actions"><button type="button" class="btn primary" id="rdmScanBtn" onclick="app.rdmDiscover()">
+                    <svg class="i" viewBox="0 0 24 24"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>Discover</button></div>
+            </div>
+            <div class="card">
+                <div class="note" id="rdmStatus">RDM needs a port set to RDM controller, or a DMX output with RDM on.</div>
+                <div class="table-wrap section"><table>
+                    <thead><tr><th>Port</th><th>Device</th><th>UID</th><th>Manufacturer</th><th>DMX address</th><th>Identify</th></tr></thead>
+                    <tbody id="rdmTable"><tr><td colspan="6" class="empty">No devices found yet</td></tr></tbody>
+                </table></div>
+            </div>
+        </section>
+
+        <!-- ================= Scenes ================= -->
+        <section class="page" id="page-scenes">
+            <div class="page-head"><div><h1>Scenes</h1><p>Snapshots of a port's output, to play back, show at power-on or use as failsafe.</p></div></div>
+            <div class="grid">
+                <div class="card">
+                    <div class="card-head"><h2>Record</h2></div>
+                    <div class="field"><label for="sceneName">Name</label><input type="text" id="sceneName" maxlength="31" placeholder="Scene"></div>
+                    <div class="field"><label for="scenePort">Port</label><select id="scenePort" data-port-select></select></div>
+                    <div class="btn-row"><button type="button" class="btn primary" onclick="app.recordScene()">Record what the port outputs now</button></div>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>Playback</h2></div>
+                    <div class="field"><label for="sceneFade">Fade time (ms)</label><input type="number" id="sceneFade" min="0" max="60000" value="0" step="100"></div>
+                    <div class="btn-row"><button type="button" class="btn" onclick="app.releaseScenes()">Release all scenes</button></div>
+                    <small class="help">Released ports follow the live network data again.</small>
+                </div>
+                <div class="card wide">
+                    <div class="card-head"><h2>Saved scenes</h2><div class="actions"><button type="button" class="btn sm" onclick="app.loadScenes()">Refresh</button></div></div>
+                    <div class="table-wrap"><table>
+                        <thead><tr><th class="num">#</th><th>Name</th><th>Port</th><th></th></tr></thead>
+                        <tbody id="scenesTable"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+                    </table></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================= Tools ================= -->
+        <section class="page" id="page-tools">
+            <div class="page-head"><div><h1>Tools</h1><p>Test patterns, the cable loopback test and DMX tester mode.</p></div></div>
+            <div class="grid">
+                <div class="card wide" data-feature="tester">
+                    <div class="role-card">
+                        <div class="b-icon" style="width:42px;height:42px;border-radius:11px;display:grid;place-items:center;background:var(--accent);color:var(--accent-ink)">
+                            <svg class="i" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6L4.5 18.5A1.7 1.7 0 0 0 6 21h12a1.7 1.7 0 0 0 1.5-2.5L14 9V3"/><path d="M7 15h10"/></svg></div>
+                        <div class="role-help" style="color:var(--text-2)">
+                            <strong style="color:var(--text);font-size:15px">DMX tester mode</strong><br>
+                            Turns the node into a DMX tester: send levels and test patterns with adjustable timing, analyse incoming DMX
+                            (refresh, slots, break / MAB, errors, frame jitter, flicker, signal loss), test cables and work with RDM fixtures.
+                            Art-Net and sACN stop while it is on. The setting survives a restart.
+                        </div>
+                        <button type="button" class="btn primary" onclick="app.setTesterMode(true)">Switch to tester mode</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>Test pattern</h2></div>
+                    <form id="testForm" onsubmit="return app.startTest(event)">
+                        <div class="fields">
+                            <div class="field"><label>Port</label><select name="port" data-port-select></select></div>
+                            <div class="field"><label>Pattern</label><select name="mode" onchange="app.testModeChanged(this.form)">
+                                <option value="static">Level</option><option value="full">Full</option><option value="chase">Chase</option><option value="ramp">Ramp</option></select></div>
+                            <div class="field"><label>First channel</label><input type="number" name="first" min="1" max="512" value="1"></div>
+                            <div class="field"><label>Last channel</label><input type="number" name="last" min="1" max="512" value="512"></div>
+                            <div class="field" data-test="level"><label>Level</label><input type="number" name="level" min="0" max="255" value="255"></div>
+                            <div class="field" data-test="speed" hidden><label>Step / half period (ms)</label><input type="number" name="speed_ms" min="20" max="60000" value="500"></div>
+                        </div>
+                        <small class="help" style="margin:-4px 0 14px">A test pattern replaces everything the port outputs (network data and scenes) until you stop it.</small>
+                        <div class="btn-row"><button type="submit" class="btn primary">Start</button><button type="button" class="btn" onclick="app.stopTest(0)">Stop all</button></div>
+                    </form>
+                    <div id="testStatus" class="section" hidden></div>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>Cable loopback test</h2></div>
+                    <p class="help" style="margin:0 0 14px">Connect a DMX cable from one port to another. The test sends five patterns and checks they arrive unchanged, then reports refresh rate, break / MAB and line errors. About 6 seconds.</p>
+                    <div class="fields two">
+                        <div class="field"><label>Send on</label><select id="stOut" data-port-select></select></div>
+                        <div class="field"><label>Receive on</label><select id="stIn" data-port-select data-second></select></div>
+                    </div>
+                    <div class="btn-row"><button type="button" class="btn primary" id="stRun" onclick="app.runSelfTest('stOut','stIn','stResult','stRun')">Run test</button></div>
+                    <div id="stResult" class="section"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================= Tester ================= -->
+        <section class="page" id="page-tester">
+            <div class="page-head"><div><h1>DMX tester</h1><p>Pick a port, choose its job, then send, analyse or talk RDM.</p></div>
+                <div class="actions">
+                    <div class="seg" role="group" aria-label="Level format">
+                        <button type="button" data-fmt="dec" onclick="app.setFormat('dec')">0–255</button>
+                        <button type="button" data-fmt="pct" onclick="app.setFormat('pct')">%</button>
+                    </div>
+                </div>
+            </div>
+            <div class="port-tabs" id="tsTabs"></div>
+            <div id="tsPanels"></div>
+            <div id="tsCable" hidden>
+                <div class="grid">
+                    <div class="card wide">
+                        <div class="card-head"><h2>Cable loopback test</h2></div>
+                        <div class="cable">
+                            <div class="end"><small>sends</small><strong id="tcOutName">Port 1</strong></div>
+                            <div class="wire"></div>
+                            <div class="end"><small>receives</small><strong id="tcInName">Port 2</strong></div>
+                        </div>
+                        <p class="help" style="margin:0 0 14px">Plug a DMX cable (or the cable under test) from the sending port to the receiving port. Five patterns go out and must come back unchanged;
+                            the test also measures refresh rate, break / MAB and line errors. The ports go back to their jobs afterwards.</p>
+                        <div class="fields two">
+                            <div class="field"><label>Send on</label><select id="tcOut" data-port-select onchange="app.cableNames()"></select></div>
+                            <div class="field"><label>Receive on</label><select id="tcIn" data-port-select data-second onchange="app.cableNames()"></select></div>
+                        </div>
+                        <div class="btn-row"><button type="button" class="btn primary" id="tcRun" onclick="app.runSelfTest('tcOut','tcIn','tcResult','tcRun')">Run cable test</button></div>
+                        <div id="tcResult" class="section"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================= System ================= -->
+        <section class="page" id="page-system">
+            <div class="page-head"><div><h1>System</h1><p>Firmware, restarts, password, backups and diagnostics.</p></div></div>
+            <div class="grid">
+                <div class="card">
+                    <div class="card-head"><h2>About this node</h2></div>
+                    <dl class="kv">
+                        <dt>Firmware</dt><dd id="sysFw">--</dd>
+                        <dt>Built</dt><dd id="sysBuilt">--</dd>
+                        <dt>Board</dt><dd id="sysBoard">--</dd>
+                        <dt>Chip</dt><dd id="sysChip">--</dd>
+                        <dt>DMX ports</dt><dd id="sysPorts">--</dd>
+                        <dt>ESP-IDF</dt><dd id="sysIdf">--</dd>
+                        <dt>App slot</dt><dd id="sysPart">--</dd>
+                        <dt>Free memory</dt><dd id="sysHeap">--</dd>
+                        <dt>Uptime</dt><dd id="sysUptime">--</dd>
+                        <dt>Mode</dt><dd id="sysMode">--</dd>
+                    </dl>
+                    <h3>Built with</h3>
+                    <div class="btn-row" id="sysFeatures"></div>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>Actions</h2></div>
+                    <div class="stack">
+                        <div class="btn-row"><button type="button" class="btn" onclick="app.reboot()">Restart</button><small>Takes about 10 seconds.</small></div>
+                        <div class="btn-row"><button type="button" class="btn" onclick="app.firmwareRollback()">Roll back firmware</button><small>Back to the version before the last update.</small></div>
+                        <div class="btn-row"><button type="button" class="btn danger" onclick="app.factoryReset()">Factory reset</button><small>Erases every setting, the password and the Wi-Fi networks.</small></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>Admin password</h2></div>
+                    <form id="passwordForm" onsubmit="return app.changePassword(event)">
+                        <input type="text" name="username" value="admin" autocomplete="username" hidden>
+                        <div class="field"><label>Current password</label><input type="password" name="current_password" required autocomplete="current-password"></div>
+                        <div class="field"><label>New password</label><input type="password" name="new_password" required minlength="8" maxlength="63" autocomplete="new-password"></div>
+                        <div class="field"><label>Confirm new password</label><input type="password" name="confirm_password" required minlength="8" maxlength="63" autocomplete="new-password">
+                            <small class="help">The username is <strong>admin</strong>. Your browser asks you to sign in again.</small></div>
+                        <div class="btn-row"><button type="submit" class="btn primary">Change password</button></div>
+                    </form>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>Backup and restore</h2></div>
+                    <p class="help" style="margin:0 0 12px">Saves every setting to a file: ports, merging, network, node name, tester. Passwords are never included.</p>
+                    <div class="btn-row"><button type="button" class="btn primary" onclick="app.downloadBackup()">Download backup</button></div>
+                    <form id="restoreForm" class="subcard" onsubmit="return app.restoreBackup(event)">
+                        <div class="field"><label>Restore from a backup file (.json)</label><input type="file" name="file" accept=".json,application/json"></div>
+                        <label class="check"><input type="checkbox" name="network" checked><span><strong>Include network settings</strong>
+                            <small>Untick when copying settings to a second node, so both don't end up on the same static IP. Wi-Fi networks this node doesn't know need their password entered again.</small></span></label>
+                        <div class="btn-row"><button type="submit" class="btn">Restore</button></div>
+                    </form>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>Crash report</h2></div>
+                    <dl class="kv"><dt>Last restart</dt><dd id="crashReset">--</dd></dl>
+                    <div id="crashBody" class="section"><small>Loading…</small></div>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>Firmware update</h2></div>
+                    <form id="otaForm" onsubmit="return app.uploadFirmware(event)">
+                        <div class="field"><label>Firmware file (.bin)</label><input type="file" name="firmware" accept=".bin" id="firmwareFile">
+                            <small class="help">Use the .bin built for this board. Don't switch the node off while it updates.</small></div>
+                        <div id="uploadProgress" class="progress" hidden><i id="uploadBar"></i><span id="uploadText">0%</span></div>
+                        <div class="btn-row"><button type="submit" class="btn primary">Upload and install</button></div>
+                    </form>
+                </div>
+                <div class="card wide" data-feature="web_log">
+                    <div class="card-head"><h2>Log</h2></div>
+                    <div class="toolbar">
+                        <button type="button" class="btn sm" id="logPauseBtn" onclick="app.toggleLogPause()">Pause</button>
+                        <button type="button" class="btn sm" onclick="app.clearLogView()">Clear view</button>
+                        <label class="check" style="margin:0"><input type="checkbox" id="logFollow" checked><span>Follow</span></label>
+                        <span class="spacer"></span>
+                        <small id="logInfo"></small>
+                        <button type="button" class="btn sm primary" onclick="app.downloadLog()">Download</button>
+                    </div>
+                    <div class="log-view" id="logView" aria-live="off"></div>
+                </div>
+            </div>
+        </section>
+    </main>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- First-run setup -->
+<div class="overlay" id="setupOverlay" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
+        <h2 id="setupTitle">Welcome. Secure this node first.</h2>
+        <p id="setupText">Set a password for this page (username <strong>admin</strong>) and replace the factory Wi-Fi access point password. The node restarts when you save.</p>
+        <form id="setupForm" onsubmit="return app.submitSetup(event)">
+            <input type="text" name="username" value="admin" autocomplete="username" hidden>
+            <div class="field"><label>Admin password</label><input type="password" name="password" required minlength="8" maxlength="63" autocomplete="new-password"></div>
+            <div class="field"><label>Confirm admin password</label><input type="password" name="password_confirm" required minlength="8" maxlength="63" autocomplete="new-password"></div>
+            <div class="field"><label>Access point password (<span id="setupApSsid">the node's own Wi-Fi</span>)</label>
+                <input type="password" name="ap_password" required minlength="8" maxlength="63" autocomplete="off">
+                <small class="help">8–63 characters, not 12345678. If you are on the node's own Wi-Fi, join it again with this password after the restart.</small></div>
+            <div class="form-error" id="setupError"></div>
+            <div class="btn-row"><button type="submit" class="btn primary" id="setupSubmit">Save and restart</button></div>
+        </form>
+    </div>
+</div>
+
+<!-- Restart wait -->
+<div class="overlay" id="restartOverlay" hidden>
+    <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="restartTitle">
+        <div class="spinner"></div>
+        <h2 id="restartTitle">Restarting…</h2>
+        <p id="restartText">This page reloads by itself when the node is back.</p>
+    </div>
+</div>
+
+<script src="main.js"></script>
 </body>
 </html>
