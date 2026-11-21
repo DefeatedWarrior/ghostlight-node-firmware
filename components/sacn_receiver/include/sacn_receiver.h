@@ -10,233 +10,131 @@ extern "C" {
 #endif
 
 /**
- * @brief sACN (E1.31) Receiver Module
- * 
- * This module receives and processes sACN (Streaming ACN / E1.31) protocol packets over UDP.
- * It handles multicast DMX data with priority and sequence number validation.
- * 
- * Protocol: ANSI E1.31 (sACN)
- * Port: UDP 5568
- * Multicast: 239.255.0.0 - 239.255.255.255
- * 
- * Features:
- * - Receives sACN DMX data packets
- * - Multicast universe subscription
- * - Priority handling (0-200)
- * - Sequence number validation
- * - Preview data detection
- * - Source name tracking
+ * @brief sACN (ANSI E1.31) receiver
+ *
+ * Receives E1.31 data packets on UDP 5568 (multicast 239.255.hi.lo and
+ * unicast). Each valid data packet (start code 0x00 levels or 0xDD
+ * per-address priority) is handed to the registered callback together with
+ * the source CID, priority, sequence and option flags; sequence checking and
+ * merging are done per source by the merge engine.
+ *
+ * Multicast membership is re-joined with sacn_receiver_refresh_subscriptions()
+ * whenever a network interface comes up, because lwIP only joins groups on
+ * interfaces that exist at join time.
  */
 
-// sACN constants
-#define SACN_PORT 5568
-#define SACN_MULTICAST_BASE "239.255.0.0"
-#define SACN_MAX_UNIVERSES 8  // Maximum universes to subscribe
+#define SACN_PORT            5568
+#define SACN_MAX_UNIVERSES   8
 
-// sACN packet identifier
 #define SACN_PACKET_IDENTIFIER "ASC-E1.17\0\0\0"
 
-// sACN vectors
-#define SACN_ROOT_VECTOR    0x00000004
-#define SACN_FRAME_VECTOR   0x00000002
-#define SACN_DMP_VECTOR     0x02
+#define SACN_ROOT_VECTOR_DATA      0x00000004
+#define SACN_ROOT_VECTOR_EXTENDED  0x00000008
+#define SACN_FRAME_VECTOR_DATA     0x00000002
+#define SACN_EXT_VECTOR_SYNC       0x00000001   /* VECTOR_E131_EXTENDED_SYNCHRONIZATION */
+#define SACN_EXT_VECTOR_DISCOVERY  0x00000002   /* VECTOR_E131_EXTENDED_DISCOVERY */
+#define SACN_SYNC_PACKET_LEN       49
+#define SACN_DMP_VECTOR            0x02
 
-// sACN options flags
-#define SACN_OPT_PREVIEW    0x80
-#define SACN_OPT_STREAM_TERM 0x40
+#define SACN_OPT_PREVIEW      0x80
+#define SACN_OPT_STREAM_TERM  0x40
+#define SACN_OPT_FORCE_SYNC   0x20
 
-/**
- * @brief sACN Root Layer
- */
+#define SACN_DISCOVERY_UNIVERSE 64214
+
 typedef struct __attribute__((packed)) {
-    uint16_t preamble_size;      /**< Preamble size (0x0010) */
-    uint16_t postamble_size;     /**< Postamble size (0x0000) */
-    uint8_t acn_pid[12];         /**< ACN Packet Identifier */
-    uint16_t flags_length;       /**< Flags (0x7) + PDU length */
-    uint32_t vector;             /**< Root vector (0x00000004) */
-    uint8_t cid[16];             /**< Component ID (UUID) */
+    uint16_t preamble_size;
+    uint16_t postamble_size;
+    uint8_t  acn_pid[12];
+    uint16_t flags_length;
+    uint32_t vector;
+    uint8_t  cid[16];
 } sacn_root_layer_t;
 
-/**
- * @brief sACN Framing Layer
- */
 typedef struct __attribute__((packed)) {
-    uint16_t flags_length;       /**< Flags + PDU length */
-    uint32_t vector;             /**< Framing vector (0x00000002) */
-    char source_name[64];        /**< Source name (UTF-8, null terminated) */
-    uint8_t priority;            /**< Priority (0-200, default 100) */
-    uint16_t sync_address;       /**< Synchronization universe (0 = none) */
-    uint8_t sequence_number;     /**< Sequence number (0-255) */
-    uint8_t options;             /**< Options flags */
-    uint16_t universe;           /**< Universe number (1-63999) */
+    uint16_t flags_length;
+    uint32_t vector;
+    char     source_name[64];
+    uint8_t  priority;
+    uint16_t sync_address;
+    uint8_t  sequence_number;
+    uint8_t  options;
+    uint16_t universe;
 } sacn_framing_layer_t;
 
-/**
- * @brief sACN DMP Layer
- */
 typedef struct __attribute__((packed)) {
-    uint16_t flags_length;       /**< Flags + PDU length */
-    uint8_t vector;              /**< DMP vector (0x02) */
-    uint8_t address_type;        /**< Address type (0xA1) */
-    uint16_t first_address;      /**< First property address (0x0000) */
-    uint16_t address_increment;  /**< Address increment (0x0001) */
-    uint16_t property_count;     /**< Property value count (1-513) */
-    uint8_t start_code;          /**< DMX512 start code (0x00) */
-    uint8_t data[512];           /**< DMX data (512 channels) */
+    uint16_t flags_length;
+    uint8_t  vector;
+    uint8_t  address_type;
+    uint16_t first_address;
+    uint16_t address_increment;
+    uint16_t property_count;
+    uint8_t  start_code;
+    uint8_t  data[512];
 } sacn_dmp_layer_t;
 
-/**
- * @brief Complete sACN packet
- */
 typedef struct __attribute__((packed)) {
-    sacn_root_layer_t root;      /**< Root layer */
-    sacn_framing_layer_t framing;/**< Framing layer */
-    sacn_dmp_layer_t dmp;        /**< DMP layer */
+    sacn_root_layer_t    root;
+    sacn_framing_layer_t framing;
+    sacn_dmp_layer_t     dmp;
 } sacn_packet_t;
 
-/**
- * @brief sACN receiver statistics
- */
+/** Decoded data packet handed to the callback (pointers valid during the call) */
 typedef struct {
-    uint32_t packets_received;   /**< Total packets received */
-    uint32_t data_packets;        /**< Data packets received */
-    uint32_t preview_packets;     /**< Preview packets received */
-    uint32_t invalid_packets;     /**< Invalid packets */
-    uint32_t sequence_errors;     /**< Sequence number errors */
+    uint16_t universe;
+    const uint8_t *cid;        /**< 16 bytes */
+    const char *source_name;   /**< NUL-terminated */
+    uint8_t priority;          /**< 0-200 (clamped) */
+    uint8_t sequence;
+    uint8_t options;
+    bool preview;
+    bool terminated;
+    uint16_t sync_address;
+    uint8_t start_code;        /**< 0x00 or 0xDD */
+    const uint8_t *data;       /**< slots, without the start code */
+    uint16_t length;           /**< number of slots (0-512) */
+    uint32_t source_ip;        /**< network byte order */
+} sacn_packet_info_t;
+
+typedef struct {
+    uint32_t packets_received;
+    uint32_t data_packets;       /**< valid 0x00 packets */
+    uint32_t pap_packets;        /**< valid 0xDD packets */
+    uint32_t preview_packets;
+    uint32_t terminated_packets;
+    uint32_t extended_packets;   /**< universe discovery (ignored) */
+    uint32_t sync_packets;       /**< valid E1.31 synchronization packets */
+    uint32_t own_packets;        /**< our own transmissions, ignored */
+    uint32_t invalid_packets;
+    uint32_t sequence_errors;    /**< kept for API compatibility (merge engine counts drops) */
 } sacn_stats_t;
 
-/**
- * @brief sACN DMX callback
- * @param universe Universe number (1-63999)
- * @param data DMX data (512 channels)
- * @param priority Priority (0-200)
- * @param sequence Sequence number
- * @param preview true if preview data
- * @param source_name Source name (null terminated)
- * @param source_ip Source IP address (network byte order)
- * @param user_data User data pointer
- */
-typedef void (*sacn_dmx_callback_t)(uint16_t universe, const uint8_t *data,
-                                    uint8_t priority, uint8_t sequence,
-                                    bool preview, const char *source_name,
-                                    uint32_t source_ip, void *user_data);
+typedef void (*sacn_dmx_callback_t)(const sacn_packet_info_t *pkt, void *user_data);
+/** E1.31 synchronization packet for @p sync_universe (receive task) */
+typedef void (*sacn_sync_callback_t)(uint16_t sync_universe, const uint8_t *cid,
+                                     uint32_t source_ip, void *user_data);
 
-/**
- * @brief Initialize sACN receiver
- * 
- * Initializes the sACN receiver module. Must be called before any other functions.
- * 
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_NO_MEM if memory allocation failed
- *     - ESP_ERR_INVALID_STATE if already initialized
- */
 esp_err_t sacn_receiver_init(void);
-
-/**
- * @brief Deinitialize sACN receiver
- * 
- * Stops the receiver and frees resources.
- * 
- * @return
- *     - ESP_OK on success
- */
 esp_err_t sacn_receiver_deinit(void);
-
-/**
- * @brief Start sACN receiver
- * 
- * Starts the UDP receiver task on port 5568.
- * Receiver must be initialized first.
- * 
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_STATE if not initialized
- *     - ESP_FAIL if socket creation failed
- */
 esp_err_t sacn_receiver_start(void);
-
-/**
- * @brief Stop sACN receiver
- * 
- * Stops the receiver task and closes the socket.
- * Unsubscribes from all multicast groups.
- * 
- * @return
- *     - ESP_OK on success
- */
 esp_err_t sacn_receiver_stop(void);
 
-/**
- * @brief Subscribe to a universe
- * 
- * Joins the multicast group for the specified universe.
- * Universe 1 = 239.255.0.1, Universe 256 = 239.255.1.0, etc.
- * 
- * @param universe Universe number (1-63999)
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if universe out of range
- *     - ESP_ERR_INVALID_STATE if not running
- *     - ESP_ERR_NO_MEM if maximum universes reached
- *     - ESP_FAIL if multicast join failed
- */
+/** Add a universe (1-63999) to the wanted set and join its multicast group */
 esp_err_t sacn_receiver_subscribe_universe(uint16_t universe);
-
-/**
- * @brief Unsubscribe from a universe
- * 
- * Leaves the multicast group for the specified universe.
- * 
- * @param universe Universe number (1-63999)
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if universe out of range
- *     - ESP_ERR_INVALID_STATE if not running
- *     - ESP_ERR_NOT_FOUND if not subscribed to universe
- */
 esp_err_t sacn_receiver_unsubscribe_universe(uint16_t universe);
+/** Replace the wanted set with @p universes (0 entries are skipped) */
+esp_err_t sacn_receiver_set_universes(const uint16_t *universes, uint8_t count);
+/** Re-join every wanted group (call after an interface gets an IP) */
+esp_err_t sacn_receiver_refresh_subscriptions(void);
 
-/**
- * @brief Register DMX data callback
- * 
- * Registers a callback to be called when sACN data packets are received.
- * Only one callback can be registered at a time.
- * 
- * @param callback Callback function
- * @param user_data User data pointer passed to callback
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if callback is NULL
- *     - ESP_ERR_INVALID_STATE if not initialized
- */
+/** Packets carrying this CID (our own transmitter) are ignored */
+void sacn_receiver_set_local_cid(const uint8_t cid[16]);
+
 esp_err_t sacn_receiver_set_callback(sacn_dmx_callback_t callback, void *user_data);
-
-/**
- * @brief Get receiver statistics
- * 
- * Retrieves current receiver statistics.
- * 
- * @param stats Pointer to statistics structure
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if stats is NULL
- *     - ESP_ERR_INVALID_STATE if not initialized
- */
+esp_err_t sacn_receiver_set_sync_callback(sacn_sync_callback_t callback, void *user_data);
 esp_err_t sacn_receiver_get_stats(sacn_stats_t *stats);
-
-/**
- * @brief Check if receiver is running
- * 
- * @return true if running, false otherwise
- */
 bool sacn_receiver_is_running(void);
-
-/**
- * @brief Get number of subscribed universes
- * 
- * @return Number of currently subscribed universes
- */
+/** Number of groups currently joined */
 uint8_t sacn_receiver_get_subscription_count(void);
 
 #ifdef __cplusplus

@@ -1,558 +1,812 @@
 /**
  * @file artnet_receiver.c
- * @brief Art-Net v4 Protocol Receiver Implementation
- * 
- * This component receives Art-Net packets over UDP and processes them.
- * It handles ArtDmx (DMX data), ArtPoll (discovery), and sends ArtPollReply.
- * 
- * Thread Safety:
- * - All public APIs are thread-safe using mutexes
- * - Receiver runs on dedicated task (Core 0)
- * - Callbacks executed from receiver task context
- * 
- * Memory Usage:
- * - ~2KB for context and buffers
- * - Task stack: 4KB
- * - Total: ~6KB
+ * @brief Art-Net 4 node (ArtDmx / ArtPoll / ArtPollReply / ArtAddress)
+ *
+ * Wire format notes (Art-Net 4):
+ *  - OpCode and the ArtPollReply UDP port field are little-endian.
+ *  - ArtDmx Length, ArtPollReply VersInfo, Oem, NumPorts, RefreshRate and the
+ *    ArtPoll TargetPortAddress fields are big-endian (Hi byte first).
+ *  - EstaMan is little-endian (Lo byte first).
+ *  - Port-Address = Net(7 bits) : Sub-Net(4 bits) : Universe(4 bits).
  */
 
 #include "artnet_receiver.h"
-#include "config_manager.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "lwip/sockets.h"
-#include "lwip/netdb.h"
 #include <string.h>
-#include <arpa/inet.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <inttypes.h>
 
 static const char *TAG = "artnet_receiver";
 
-// Task configuration
-#define ARTNET_TASK_STACK_SIZE 4096
-#define ARTNET_TASK_PRIORITY   5
-#define ARTNET_TASK_CORE       0
+#define ARTNET_TASK_STACK_SIZE   6144
+#define ARTNET_TASK_PRIORITY     6
+#define ARTNET_TASK_CORE         0
+#define ARTNET_RX_BUF_SIZE       640
+#define ARTNET_RX_TIMEOUT_MS     200
+#define ARTNET_REPLY_LEN         239
+#define ARTNET_CHANGE_CHECK_US   1000000
 
-// Buffer sizes
-#define ARTNET_MAX_PACKET_SIZE 1024
+#define ARTNET_OEM               0x00FF   /* OemUnknown */
+#define ARTNET_ESTA_MAN          0x7FF0   /* ESTA prototype / experimental range */
+#define ARTNET_REFRESH_HZ        44
 
-// Timeout
-#define ARTNET_RECEIVE_TIMEOUT_MS 1000
-
-/**
- * @brief Module state
- */
 static struct {
     bool initialized;
-    bool running;
+    volatile bool running;
+    int sock;
+    TaskHandle_t task;
+    SemaphoreHandle_t task_done;
+
+    artnet_dmx_callback_t dmx_cb;
+    void *dmx_ctx;
+    artnet_status_callback_t status_cb;
+    void *status_ctx;
+    artnet_address_callback_t addr_cb;
+    void *addr_ctx;
+    artnet_rdm_callback_t rdm_cb;
+    void *rdm_ctx;
+    artnet_sync_callback_t sync_cb;
+    void *sync_ctx;
+    artnet_ipprog_callback_t ipprog_cb;
+    void *ipprog_ctx;
+
     bool poll_reply_enabled;
-    
-    int socket_fd;
-    TaskHandle_t task_handle;
-    
-    artnet_dmx_callback_t dmx_callback;
-    void *dmx_callback_user_data;
-    
+    volatile bool reply_pending;
+    volatile bool reply_force;
+    bool reply_on_change;
+    uint32_t last_signature;
+    int64_t last_change_check_us;
+
+    uint16_t report_code;
+    char report_text[48];
+    uint32_t reply_counter;
+
+    uint32_t own_ip;            /* network byte order, 0 = unknown */
     artnet_stats_t stats;
-    uint8_t last_sequence[ARTNET_MAX_UNIVERSES];  // Track sequence per universe
-    
-    SemaphoreHandle_t mutex;
-} artnet_state = {
-    .initialized = false,
-    .running = false,
+} s_an = {
+    .sock = -1,
     .poll_reply_enabled = true,
-    .socket_fd = -1,
+    .report_code = ARTNET_RC_POWER_OK,
+    .report_text = "Power On Tests successful",
 };
 
-// Forward declarations
-static void artnet_receive_task(void *arg);
-static esp_err_t process_artnet_packet(const uint8_t *buffer, size_t length, 
-                                       const struct sockaddr_in *src_addr);
-static esp_err_t process_artdmx(const artnet_dmx_packet_t *packet,
-                                const struct sockaddr_in *src_addr);
-static esp_err_t process_artpoll(const artnet_poll_packet_t *packet, 
-                                 const struct sockaddr_in *src_addr);
-static esp_err_t send_artpoll_reply(const struct sockaddr_in *dest_addr);
-
-/**
- * @brief Validate Art-Net header
- */
-static bool validate_artnet_header(const uint8_t *buffer, size_t length)
+static inline uint32_t ip_from_bytes(const uint8_t b[4])
 {
-    if (length < 12) {
-        return false;
-    }
-    
-    // Check "Art-Net\0" signature
-    if (memcmp(buffer, ARTNET_HEADER, 8) != 0) {
-        return false;
-    }
-    
-    return true;
-}
-
-/**
- * @brief Convert network byte order to host byte order for uint16_t
- */
-static inline uint16_t artnet_ntohs(uint16_t netshort)
-{
-    return ntohs(netshort);
+    uint32_t v;
+    memcpy(&v, b, 4);           /* bytes are already in network order */
+    return v;
 }
 
 // ============================================================================
-// Public API Implementation
+// ArtPollReply
+// ============================================================================
+
+static void build_reply(uint8_t *r, const artnet_node_status_t *st, int port_idx)
+{
+    memset(r, 0, ARTNET_REPLY_LEN);
+    memcpy(r, ARTNET_HEADER, 8);
+    r[8]  = ARTNET_OP_POLL_REPLY & 0xFF;
+    r[9]  = ARTNET_OP_POLL_REPLY >> 8;
+    memcpy(&r[10], st->ip, 4);
+    r[14] = ARTNET_PORT & 0xFF;               /* Port: Lo first */
+    r[15] = ARTNET_PORT >> 8;
+    r[16] = st->firmware_version >> 8;        /* VersInfoH */
+    r[17] = st->firmware_version & 0xFF;      /* VersInfoL */
+
+    const artnet_port_status_t *p = (port_idx >= 0) ? &st->ports[port_idx] : NULL;
+    uint16_t pa = p ? (p->port_address & 0x7FFF) : 0;
+    r[18] = (pa >> 8) & 0x7F;                 /* NetSwitch */
+    r[19] = (pa >> 4) & 0x0F;                 /* SubSwitch */
+    r[20] = ARTNET_OEM >> 8;                  /* OemHi */
+    r[21] = ARTNET_OEM & 0xFF;                /* Oem */
+    r[22] = 0;                                /* UBEA */
+
+    bool any_rdm = false;
+    for (int i = 0; i < ARTNET_NODE_PORTS; i++) {
+        if (st->ports[i].enabled && st->ports[i].rdm_capable) any_rdm = true;
+    }
+    uint8_t indicator = (st->indicator == 1) ? 0x40 : (st->indicator == 2) ? 0x80 : 0xC0;
+    r[23] = indicator | 0x20 | (any_rdm ? 0x02 : 0x00);   /* Status1: addr set by network */
+    r[24] = ARTNET_ESTA_MAN & 0xFF;           /* EstaManLo */
+    r[25] = ARTNET_ESTA_MAN >> 8;             /* EstaManHi */
+
+    /* ShortName 18 / LongName 64 bytes, always NUL-terminated */
+    memcpy(&r[26], st->short_name, strnlen(st->short_name, 17));
+    memcpy(&r[44], st->long_name, strnlen(st->long_name, 63));
+    snprintf((char *)&r[108], 64, "#%04X [%04" PRIu32 "] %s",
+             s_an.report_code, s_an.reply_counter % 10000, s_an.report_text);
+
+    if (p) {
+        r[172] = 0;                           /* NumPortsHi */
+        r[173] = 1;                           /* NumPortsLo */
+        if (p->is_input) {
+            r[174] = 0x40;                    /* PortTypes: DMX512 input */
+            uint8_t gi = 0;
+            if (p->data_active)  gi |= 0x80;
+            if (p->input_errors) gi |= 0x04;
+            if (p->sacn)         gi |= 0x01;
+            r[178] = gi;
+            r[186] = pa & 0x0F;               /* SwIn */
+        } else {
+            r[174] = 0x80;                    /* PortTypes: DMX512 output */
+            uint8_t go = 0;
+            if (p->data_active) go |= 0x80;
+            if (p->merging)     go |= 0x08;
+            if (p->ltp)         go |= 0x02;
+            if (p->sacn)        go |= 0x01;
+            r[182] = go;
+            r[190] = pa & 0x0F;               /* SwOut */
+        }
+        uint8_t gob = 0x40;                   /* continuous output */
+        if (!p->rdm_enabled)     gob |= 0x80;
+        if (!p->rdm_discovering) gob |= 0x20;
+        if (!p->rdm_enabled || !p->rdm_background) gob |= 0x10;
+        r[213] = gob;                          /* GoodOutputB */
+        memcpy(&r[218], p->responder_uid, 6); /* DefaultRespUID */
+    }
+    r[194] = 100;                              /* AcnPriority */
+    r[200] = 0x00;                             /* Style: StNode */
+    memcpy(&r[201], st->mac, 6);
+    memcpy(&r[207], st->ip, 4);                /* BindIp */
+    r[211] = (port_idx >= 0) ? (uint8_t)(port_idx + 1) : 1;   /* BindIndex */
+    r[212] = 0x01 | (st->dhcp ? 0x02 : 0x00) | 0x04 | 0x08;   /* Status2 */
+    /* Status3: failsafe state (7-6), programmable failsafe (5), port
+     * direction switchable (3) */
+    r[217] = (uint8_t)(((st->failsafe & 0x03) << 6) | 0x20 | 0x08);
+    r[226] = 0;                                /* RefreshRateHi */
+    r[227] = ARTNET_REFRESH_HZ;                /* RefreshRateLo */
+}
+
+static uint32_t fnv1a(uint32_t h, const uint8_t *d, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        h ^= d[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static bool get_status(artnet_node_status_t *st)
+{
+    memset(st, 0, sizeof(*st));
+    if (!s_an.status_cb) {
+        return false;
+    }
+    s_an.status_cb(st, s_an.status_ctx);
+    s_an.own_ip = ip_from_bytes(st->ip);
+    return s_an.own_ip != 0;
+}
+
+/**
+ * Send the node's ArtPollReply set.
+ * @param poller     controller that polled (NULL for unsolicited replies)
+ * @param targeted   ArtPoll targeted mode: only report ports in [bottom, top]
+ */
+static void send_replies(const struct sockaddr_in *poller, bool targeted,
+                         uint16_t bottom, uint16_t top)
+{
+    artnet_node_status_t st;
+    if (!get_status(&st) || s_an.sock < 0) {
+        return;
+    }
+
+    uint32_t ip = ip_from_bytes(st.ip);
+    uint32_t mask = ip_from_bytes(st.netmask);
+    struct sockaddr_in bcast = {
+        .sin_family = AF_INET,
+        .sin_port = htons(ARTNET_PORT),
+        .sin_addr.s_addr = mask ? ((ip & mask) | ~mask) : htonl(INADDR_BROADCAST),
+    };
+    bool unicast_too = poller && mask &&
+                       ((poller->sin_addr.s_addr & mask) != (ip & mask));
+
+    uint8_t reply[ARTNET_REPLY_LEN];
+    int sent = 0;
+    for (int p = 0; p < ARTNET_NODE_PORTS; p++) {
+        if (!st.ports[p].enabled) continue;
+        uint16_t pa = st.ports[p].port_address & 0x7FFF;
+        if (targeted && (pa < bottom || pa > top)) continue;
+        build_reply(reply, &st, p);
+        if (sendto(s_an.sock, reply, sizeof(reply), 0,
+                   (struct sockaddr *)&bcast, sizeof(bcast)) >= 0) {
+            s_an.stats.poll_replies_sent++;
+        }
+        if (unicast_too) {
+            struct sockaddr_in to = *poller;
+            to.sin_port = htons(ARTNET_PORT);
+            sendto(s_an.sock, reply, sizeof(reply), 0, (struct sockaddr *)&to, sizeof(to));
+        }
+        sent++;
+    }
+    if (sent == 0 && !targeted) {
+        /* No active ports: still announce the node itself */
+        build_reply(reply, &st, -1);
+        if (sendto(s_an.sock, reply, sizeof(reply), 0,
+                   (struct sockaddr *)&bcast, sizeof(bcast)) >= 0) {
+            s_an.stats.poll_replies_sent++;
+        }
+    }
+    s_an.reply_counter++;
+}
+
+/* Signature of everything a controller would see change (NodeReport excluded) */
+static uint32_t status_signature(void)
+{
+    artnet_node_status_t st;
+    if (!get_status(&st)) {
+        return 0;
+    }
+    uint8_t reply[ARTNET_REPLY_LEN];
+    uint32_t h = 2166136261u;
+    for (int p = 0; p < ARTNET_NODE_PORTS; p++) {
+        build_reply(reply, &st, st.ports[p].enabled ? p : -1);
+        h = fnv1a(h, reply, 108);
+        h = fnv1a(h, reply + 172, ARTNET_REPLY_LEN - 172);
+    }
+    return h;
+}
+
+// ============================================================================
+// Packet handlers
+// ============================================================================
+
+static void handle_dmx(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    if (len < 18) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    uint16_t length = ((uint16_t)b[16] << 8) | b[17];
+    if (length == 0 || length > 512) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    int avail = len - 18;
+    if (avail <= 0) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    if (length > avail) {
+        length = (uint16_t)avail;   /* truncated packet: use what arrived */
+    }
+    uint16_t port_address = b[14] | ((uint16_t)(b[15] & 0x7F) << 8);
+    s_an.stats.dmx_packets++;
+
+    artnet_dmx_callback_t cb = s_an.dmx_cb;
+    if (cb) {
+        cb(port_address, &b[18], length, b[12], from->sin_addr.s_addr, s_an.dmx_ctx);
+    }
+}
+
+static void handle_poll(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    if (len < 14) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    s_an.stats.poll_packets++;
+    uint8_t flags = b[12];
+    s_an.reply_on_change = (flags & 0x02) != 0;
+
+    bool targeted = (flags & 0x20) && len >= 18;
+    uint16_t top = 0x7FFF, bottom = 0;
+    if (targeted) {
+        top    = (((uint16_t)b[14] << 8) | b[15]) & 0x7FFF;
+        bottom = (((uint16_t)b[16] << 8) | b[17]) & 0x7FFF;
+    }
+    if (s_an.poll_reply_enabled) {
+        send_replies(from, targeted, bottom, top);
+    }
+}
+
+static void handle_address(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    if (len < 107) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    s_an.stats.address_packets++;
+
+    uint8_t bind = b[13];
+    artnet_address_cmd_t cmd = {
+        .port = (bind <= 1) ? 1 : bind,
+        .net = -1, .sub = -1, .universe = -1,
+        .command = b[106],
+        .acn_priority = b[105],
+        .source_ip = from->sin_addr.s_addr,
+    };
+    if (cmd.port > ARTNET_NODE_PORTS) {
+        return;   /* addressed to a bind index we do not have */
+    }
+
+    char short_name[18], long_name[64];
+    if (b[14]) {
+        memcpy(short_name, &b[14], 17);
+        short_name[17] = '\0';
+        cmd.short_name = short_name;
+    }
+    if (b[32]) {
+        memcpy(long_name, &b[32], 63);
+        long_name[63] = '\0';
+        cmd.long_name = long_name;
+    }
+
+    uint8_t net = b[12], sub = b[104], swin = b[96], swout = b[100];
+    if (net & 0x80)        cmd.net = net & 0x7F;
+    else if (net == 0x00)  cmd.reset_address = true;
+    if (sub & 0x80)        cmd.sub = sub & 0x0F;
+    else if (sub == 0x00)  cmd.reset_address = true;
+    if (swout & 0x80)      cmd.universe = swout & 0x0F;
+    else if (swin & 0x80)  cmd.universe = swin & 0x0F;
+
+    ESP_LOGI(TAG, "ArtAddress port %u: net %d sub %d uni %d cmd 0x%02X%s%s",
+             cmd.port, cmd.net, cmd.sub, cmd.universe, cmd.command,
+             cmd.short_name ? " short-name" : "", cmd.long_name ? " long-name" : "");
+
+    artnet_address_callback_t cb = s_an.addr_cb;
+    if (cb) {
+        cb(&cmd, s_an.addr_ctx);
+    }
+    /* The node replies to ArtAddress with an ArtPollReply */
+    send_replies(from, false, 0, 0x7FFF);
+}
+
+/* ArtTodRequest: Net 21, Command 22, AddCount 23, Address[32] 24.. */
+static void handle_tod_request(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    if (len < 24) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    artnet_rdm_event_t ev = {
+        .type = ARTNET_RDM_EV_TOD_REQUEST,
+        .source_ip = from->sin_addr.s_addr,
+        .net = b[21] & 0x7F,
+        .command = b[22],
+    };
+    int count = b[23] > 32 ? 32 : b[23];
+    if (count > len - 24) count = len - 24;
+    for (int i = 0; i < count; i++) {
+        ev.addresses[i] = ((uint16_t)ev.net << 8) | b[24 + i];
+    }
+    ev.address_count = (uint8_t)count;
+    artnet_rdm_callback_t cb = s_an.rdm_cb;
+    if (cb) cb(&ev, s_an.rdm_ctx);
+}
+
+/* ArtTodControl: Net 21, Command 22, Address 23 */
+static void handle_tod_control(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    if (len < 24) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    artnet_rdm_event_t ev = {
+        .type = ARTNET_RDM_EV_TOD_CONTROL,
+        .source_ip = from->sin_addr.s_addr,
+        .net = b[21] & 0x7F,
+        .command = b[22],
+        .port_address = ((uint16_t)(b[21] & 0x7F) << 8) | b[23],
+    };
+    artnet_rdm_callback_t cb = s_an.rdm_cb;
+    if (cb) cb(&ev, s_an.rdm_ctx);
+}
+
+/* ArtRdm: RdmVer 12, FifoAvail 19, FifoMax 20, Net 21, Command 22,
+ * Address 23, RdmPacket 24.. */
+static void handle_rdm(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    if (len < 24 + 23) {   /* shortest RDM message without start code: 23 bytes */
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    artnet_rdm_event_t ev = {
+        .type = ARTNET_RDM_EV_RDM,
+        .source_ip = from->sin_addr.s_addr,
+        .net = b[21] & 0x7F,
+        .command = b[22],
+        .port_address = ((uint16_t)(b[21] & 0x7F) << 8) | b[23],
+        .rdm = &b[24],
+        .rdm_len = (uint16_t)(len - 24),
+    };
+    artnet_rdm_callback_t cb = s_an.rdm_cb;
+    if (cb) cb(&ev, s_an.rdm_ctx);
+}
+
+static void handle_sync(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    (void)b;
+    s_an.stats.sync_packets++;
+    if (len < 14) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    artnet_sync_callback_t cb = s_an.sync_cb;
+    if (cb) cb(from->sin_addr.s_addr, s_an.sync_ctx);
+}
+
+static void put_header(uint8_t *b, uint16_t opcode);
+
+/* ArtIpProg: Command 14, ProgIp 16-19, ProgSm 20-23, ProgPort 24-25,
+ * ProgDg 26-29 (Art-Net 4). Reply: ProgIp 16, ProgSm 20, ProgPort 24,
+ * Status 26 (bit 6 = DHCP), ProgDg 28, 34 bytes, unicast to the sender. */
+static void handle_ip_prog(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    if (len < 24) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    artnet_ipprog_callback_t cb = s_an.ipprog_cb;
+    if (!cb) {
+        s_an.stats.unsupported_packets++;
+        return;
+    }
+    uint8_t c = b[14];
+    artnet_ipprog_cmd_t cmd = {
+        .program = (c & 0x80) != 0,
+        .dhcp = (c & 0xC0) == 0xC0,
+        .set_gateway = (c & 0x90) == 0x90 && len >= 30,
+        .reset_default = (c & 0x88) == 0x88,
+        .set_ip = (c & 0x84) == 0x84,
+        .set_mask = (c & 0x82) == 0x82,
+        .source_ip = from->sin_addr.s_addr,
+    };
+    memcpy(cmd.ip, &b[16], 4);
+    memcpy(cmd.mask, &b[20], 4);
+    if (len >= 30) memcpy(cmd.gateway, &b[26], 4);
+
+    ESP_LOGI(TAG, "ArtIpProg command 0x%02X%s", c, cmd.program ? "" : " (query)");
+    artnet_ipprog_reply_t rep;
+    memset(&rep, 0, sizeof(rep));
+    cb(&cmd, &rep, s_an.ipprog_ctx);
+
+    uint8_t r[34];
+    memset(r, 0, sizeof(r));
+    put_header(r, ARTNET_OP_IP_PROG_REPLY);
+    memcpy(&r[16], rep.ip, 4);
+    memcpy(&r[20], rep.mask, 4);
+    r[24] = ARTNET_PORT >> 8;
+    r[25] = ARTNET_PORT & 0xFF;
+    r[26] = rep.dhcp ? 0x40 : 0x00;
+    memcpy(&r[28], rep.gateway, 4);
+    struct sockaddr_in to = *from;
+    if (s_an.sock >= 0) {
+        sendto(s_an.sock, r, sizeof(r), 0, (struct sockaddr *)&to, sizeof(to));
+    }
+}
+
+static void process_packet(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    if (len < 10 || memcmp(b, ARTNET_HEADER, 8) != 0) {
+        s_an.stats.invalid_packets++;
+        return;
+    }
+    if (s_an.own_ip && from->sin_addr.s_addr == s_an.own_ip) {
+        s_an.stats.own_packets++;
+        return;
+    }
+    uint16_t opcode = b[8] | ((uint16_t)b[9] << 8);
+    switch (opcode) {
+        case ARTNET_OP_DMX:        handle_dmx(b, len, from);     break;
+        case ARTNET_OP_POLL:       handle_poll(b, len, from);    break;
+        case ARTNET_OP_ADDRESS:    handle_address(b, len, from); break;
+        case ARTNET_OP_SYNC:        handle_sync(b, len, from);        break;
+        case ARTNET_OP_TOD_REQUEST: handle_tod_request(b, len, from); break;
+        case ARTNET_OP_TOD_CONTROL: handle_tod_control(b, len, from); break;
+        case ARTNET_OP_RDM:         handle_rdm(b, len, from);         break;
+        case ARTNET_OP_IP_PROG:     handle_ip_prog(b, len, from);     break;
+        case ARTNET_OP_IP_PROG_REPLY: break;
+        case ARTNET_OP_TOD_DATA:    break;   /* from other gateways */
+        case ARTNET_OP_POLL_REPLY: break;   /* other nodes announcing themselves */
+        default:                   s_an.stats.unsupported_packets++; break;
+    }
+}
+
+static void artnet_receive_task(void *arg)
+{
+    uint8_t *buf = malloc(ARTNET_RX_BUF_SIZE);
+    if (!buf) {
+        ESP_LOGE(TAG, "rx buffer alloc failed");
+        s_an.running = false;
+    }
+    ESP_LOGI(TAG, "Art-Net receiver task started");
+
+    while (s_an.running) {
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+        int len = recvfrom(s_an.sock, buf, ARTNET_RX_BUF_SIZE, 0,
+                           (struct sockaddr *)&from, &from_len);
+        if (len > 0) {
+            s_an.stats.packets_received++;
+            process_packet(buf, len, &from);
+        } else if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK && s_an.running) {
+            ESP_LOGW(TAG, "recvfrom error %d", errno);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        if (s_an.reply_pending) {
+            bool force = s_an.reply_force;
+            s_an.reply_pending = false;
+            s_an.reply_force = false;
+            if (force || s_an.reply_on_change) {
+                send_replies(NULL, false, 0, 0x7FFF);
+            }
+            s_an.last_signature = status_signature();
+        }
+
+        int64_t now = esp_timer_get_time();
+        if (s_an.reply_on_change && now - s_an.last_change_check_us > ARTNET_CHANGE_CHECK_US) {
+            s_an.last_change_check_us = now;
+            uint32_t sig = status_signature();
+            if (sig != s_an.last_signature) {
+                s_an.last_signature = sig;
+                send_replies(NULL, false, 0, 0x7FFF);
+            }
+        }
+    }
+
+    free(buf);
+    ESP_LOGI(TAG, "Art-Net receiver task stopped");
+    xSemaphoreGive(s_an.task_done);
+    vTaskDelete(NULL);
+}
+
+// ============================================================================
+// Public API
 // ============================================================================
 
 esp_err_t artnet_receiver_init(void)
 {
-    if (artnet_state.initialized) {
-        ESP_LOGW(TAG, "Already initialized");
+    if (s_an.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    ESP_LOGI(TAG, "Initializing Art-Net receiver...");
-    
-    // Create mutex
-    artnet_state.mutex = xSemaphoreCreateMutex();
-    if (!artnet_state.mutex) {
-        ESP_LOGE(TAG, "Failed to create mutex");
+    s_an.task_done = xSemaphoreCreateBinary();
+    if (!s_an.task_done) {
         return ESP_ERR_NO_MEM;
     }
-    
-    // Initialize statistics
-    memset(&artnet_state.stats, 0, sizeof(artnet_stats_t));
-    memset(artnet_state.last_sequence, 0, sizeof(artnet_state.last_sequence));
-    
-    artnet_state.initialized = true;
-    ESP_LOGI(TAG, "Art-Net receiver initialized successfully");
-    
+    memset(&s_an.stats, 0, sizeof(s_an.stats));
+    s_an.initialized = true;
+    ESP_LOGI(TAG, "Art-Net receiver initialized");
     return ESP_OK;
 }
 
 esp_err_t artnet_receiver_deinit(void)
 {
-    if (!artnet_state.initialized) {
+    if (!s_an.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    ESP_LOGI(TAG, "Deinitializing Art-Net receiver...");
-    
-    // Stop if running
-    if (artnet_state.running) {
-        artnet_receiver_stop();
-    }
-    
-    // Delete mutex
-    if (artnet_state.mutex) {
-        vSemaphoreDelete(artnet_state.mutex);
-        artnet_state.mutex = NULL;
-    }
-    
-    artnet_state.initialized = false;
-    ESP_LOGI(TAG, "Art-Net receiver deinitialized");
-    
+    artnet_receiver_stop();
+    vSemaphoreDelete(s_an.task_done);
+    s_an.task_done = NULL;
+    s_an.initialized = false;
     return ESP_OK;
 }
 
 esp_err_t artnet_receiver_start(void)
 {
-    if (!artnet_state.initialized) {
+    if (!s_an.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    if (artnet_state.running) {
-        ESP_LOGW(TAG, "Already running");
+    if (s_an.running) {
         return ESP_OK;
     }
-    
-    ESP_LOGI(TAG, "Starting Art-Net receiver on port %d...", ARTNET_PORT);
-    
-    xSemaphoreTake(artnet_state.mutex, portMAX_DELAY);
-    
-    // Create UDP socket
-    artnet_state.socket_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (artnet_state.socket_fd < 0) {
-        ESP_LOGE(TAG, "Failed to create socket: %d", errno);
-        xSemaphoreGive(artnet_state.mutex);
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "socket() failed: %d", errno);
         return ESP_FAIL;
     }
-    
-    // Set socket options
-    int opt = 1;
-    setsockopt(artnet_state.socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    
-    // Set receive timeout
-    struct timeval timeout = {
-        .tv_sec = ARTNET_RECEIVE_TIMEOUT_MS / 1000,
-        .tv_usec = (ARTNET_RECEIVE_TIMEOUT_MS % 1000) * 1000
-    };
-    setsockopt(artnet_state.socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    
-    // Bind to Art-Net port
+    int one = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
+    struct timeval tv = { .tv_sec = 0, .tv_usec = ARTNET_RX_TIMEOUT_MS * 1000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons(ARTNET_PORT),
-        .sin_addr.s_addr = INADDR_ANY
+        .sin_addr.s_addr = htonl(INADDR_ANY),
     };
-    
-    if (bind(artnet_state.socket_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ESP_LOGE(TAG, "Failed to bind socket: %d", errno);
-        close(artnet_state.socket_fd);
-        artnet_state.socket_fd = -1;
-        xSemaphoreGive(artnet_state.mutex);
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        ESP_LOGE(TAG, "bind(%d) failed: %d", ARTNET_PORT, errno);
+        close(sock);
         return ESP_FAIL;
     }
-    
-    // Create receiver task
-    BaseType_t ret = xTaskCreatePinnedToCore(
-        artnet_receive_task,
-        "artnet_rx",
-        ARTNET_TASK_STACK_SIZE,
-        NULL,
-        ARTNET_TASK_PRIORITY,
-        &artnet_state.task_handle,
-        ARTNET_TASK_CORE
-    );
-    
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create receiver task");
-        close(artnet_state.socket_fd);
-        artnet_state.socket_fd = -1;
-        xSemaphoreGive(artnet_state.mutex);
+
+    s_an.sock = sock;
+    s_an.running = true;
+    xSemaphoreTake(s_an.task_done, 0);
+    if (xTaskCreatePinnedToCore(artnet_receive_task, "artnet_rx", ARTNET_TASK_STACK_SIZE,
+                                NULL, ARTNET_TASK_PRIORITY, &s_an.task,
+                                ARTNET_TASK_CORE) != pdPASS) {
+        s_an.running = false;
+        close(sock);
+        s_an.sock = -1;
         return ESP_FAIL;
     }
-    
-    artnet_state.running = true;
-    
-    xSemaphoreGive(artnet_state.mutex);
-    
-    ESP_LOGI(TAG, "Art-Net receiver started successfully");
-    
+    ESP_LOGI(TAG, "Art-Net node listening on UDP %d", ARTNET_PORT);
     return ESP_OK;
 }
 
 esp_err_t artnet_receiver_stop(void)
 {
-    if (!artnet_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (!artnet_state.running) {
+    if (!s_an.initialized || !s_an.running) {
         return ESP_OK;
     }
-    
-    ESP_LOGI(TAG, "Stopping Art-Net receiver...");
-    
-    xSemaphoreTake(artnet_state.mutex, portMAX_DELAY);
-    
-    artnet_state.running = false;
-    
-    // Close socket (this will unblock the receive task)
-    if (artnet_state.socket_fd >= 0) {
-        close(artnet_state.socket_fd);
-        artnet_state.socket_fd = -1;
+    s_an.running = false;
+    if (xSemaphoreTake(s_an.task_done, pdMS_TO_TICKS(ARTNET_RX_TIMEOUT_MS * 5)) != pdTRUE) {
+        ESP_LOGW(TAG, "rx task did not stop in time");
     }
-    
-    xSemaphoreGive(artnet_state.mutex);
-    
-    // Wait for task to terminate
-    if (artnet_state.task_handle) {
-        // Task will delete itself
-        vTaskDelay(pdMS_TO_TICKS(100));
-        artnet_state.task_handle = NULL;
+    s_an.task = NULL;
+    if (s_an.sock >= 0) {
+        close(s_an.sock);
+        s_an.sock = -1;
     }
-    
-    ESP_LOGI(TAG, "Art-Net receiver stopped");
-    
     return ESP_OK;
+}
+
+int artnet_receiver_get_socket(void)
+{
+    return s_an.running ? s_an.sock : -1;
 }
 
 esp_err_t artnet_receiver_set_callback(artnet_dmx_callback_t callback, void *user_data)
 {
-    if (!artnet_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (!callback) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(artnet_state.mutex, portMAX_DELAY);
-    artnet_state.dmx_callback = callback;
-    artnet_state.dmx_callback_user_data = user_data;
-    xSemaphoreGive(artnet_state.mutex);
-    
-    ESP_LOGI(TAG, "DMX callback registered");
-    
+    if (!s_an.initialized) return ESP_ERR_INVALID_STATE;
+    s_an.dmx_ctx = user_data;
+    s_an.dmx_cb = callback;
     return ESP_OK;
+}
+
+esp_err_t artnet_receiver_set_status_callback(artnet_status_callback_t callback, void *user_data)
+{
+    if (!s_an.initialized) return ESP_ERR_INVALID_STATE;
+    s_an.status_ctx = user_data;
+    s_an.status_cb = callback;
+    return ESP_OK;
+}
+
+esp_err_t artnet_receiver_set_address_callback(artnet_address_callback_t callback, void *user_data)
+{
+    if (!s_an.initialized) return ESP_ERR_INVALID_STATE;
+    s_an.addr_ctx = user_data;
+    s_an.addr_cb = callback;
+    return ESP_OK;
+}
+
+esp_err_t artnet_receiver_set_ipprog_callback(artnet_ipprog_callback_t callback, void *user_data)
+{
+    s_an.ipprog_cb = NULL;
+    s_an.ipprog_ctx = user_data;
+    s_an.ipprog_cb = callback;
+    return ESP_OK;
+}
+
+esp_err_t artnet_receiver_set_rdm_callback(artnet_rdm_callback_t callback, void *user_data)
+{
+    s_an.rdm_cb = NULL;
+    s_an.rdm_ctx = user_data;
+    s_an.rdm_cb = callback;
+    return ESP_OK;
+}
+
+esp_err_t artnet_receiver_set_sync_callback(artnet_sync_callback_t callback, void *user_data)
+{
+    s_an.sync_cb = NULL;
+    s_an.sync_ctx = user_data;
+    s_an.sync_cb = callback;
+    return ESP_OK;
+}
+
+static void put_header(uint8_t *b, uint16_t opcode)
+{
+    memcpy(b, ARTNET_HEADER, 8);
+    b[8] = opcode & 0xFF;
+    b[9] = opcode >> 8;
+    b[10] = 0;
+    b[11] = ARTNET_PROTOCOL_VERSION;
+}
+
+static esp_err_t send_to(uint32_t dest_ip, const uint8_t *b, size_t len)
+{
+    if (s_an.sock < 0 || dest_ip == 0) return ESP_ERR_INVALID_STATE;
+    struct sockaddr_in to = {
+        .sin_family = AF_INET,
+        .sin_port = htons(ARTNET_PORT),
+        .sin_addr.s_addr = dest_ip,
+    };
+    return sendto(s_an.sock, b, len, 0, (struct sockaddr *)&to, sizeof(to)) >= 0
+               ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t artnet_receiver_send_tod_data(uint32_t dest_ip, uint8_t bind_index,
+                                        uint16_t port_address, bool nak,
+                                        const uint8_t (*uids)[6], uint16_t total)
+{
+    if (nak || !uids) total = 0;
+    uint8_t *b = malloc(28 + ARTNET_TOD_BLOCK_UIDS * 6);
+    if (!b) return ESP_ERR_NO_MEM;
+    esp_err_t ret = ESP_OK;
+    uint16_t done = 0;
+    uint8_t block = 0;
+    do {
+        uint16_t n = total - done;
+        if (n > ARTNET_TOD_BLOCK_UIDS) n = ARTNET_TOD_BLOCK_UIDS;
+        memset(b, 0, 28);
+        put_header(b, ARTNET_OP_TOD_DATA);
+        b[12] = 0x01;                          /* RdmVer: E1.20 */
+        b[13] = 1;                             /* Port: one port per BindIndex */
+        b[20] = bind_index;
+        b[21] = (port_address >> 8) & 0x7F;    /* Net */
+        b[22] = nak ? ARTNET_TOD_NAK : ARTNET_TOD_FULL;
+        b[23] = port_address & 0xFF;           /* Address (Sub-Net:Universe) */
+        b[24] = total >> 8;                    /* UidTotalHi */
+        b[25] = total & 0xFF;                  /* UidTotalLo */
+        b[26] = block;                         /* BlockCount */
+        b[27] = (uint8_t)n;                    /* UidCount */
+        if (n) memcpy(&b[28], uids[done], (size_t)n * 6);
+        if (send_to(dest_ip, b, 28 + (size_t)n * 6) != ESP_OK) ret = ESP_FAIL;
+        done += n;
+        block++;
+    } while (done < total);
+    free(b);
+    return ret;
+}
+
+esp_err_t artnet_receiver_send_rdm(uint32_t dest_ip, uint8_t bind_index, uint16_t port_address,
+                                   const uint8_t *rdm, uint16_t len)
+{
+    (void)bind_index;
+    if (!rdm || len == 0 || len > 512) return ESP_ERR_INVALID_ARG;
+    uint8_t b[24 + 260];
+    if (len > sizeof(b) - 24) return ESP_ERR_INVALID_SIZE;
+    memset(b, 0, 24);
+    put_header(b, ARTNET_OP_RDM);
+    b[12] = 0x01;                              /* RdmVer */
+    b[21] = (port_address >> 8) & 0x7F;        /* Net */
+    b[22] = 0x00;                              /* ArProcess */
+    b[23] = port_address & 0xFF;               /* Address */
+    memcpy(&b[24], rdm, len);
+    return send_to(dest_ip, b, 24 + (size_t)len);
+}
+
+void artnet_receiver_set_node_report(artnet_report_code_t code, const char *text)
+{
+    s_an.report_code = (uint16_t)code;
+    strncpy(s_an.report_text, text ? text : "", sizeof(s_an.report_text) - 1);
+    s_an.report_text[sizeof(s_an.report_text) - 1] = '\0';
+}
+
+void artnet_receiver_notify_change(bool force)
+{
+    if (force) {
+        s_an.reply_force = true;
+    }
+    s_an.reply_pending = true;
 }
 
 esp_err_t artnet_receiver_get_stats(artnet_stats_t *stats)
 {
-    if (!artnet_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (!stats) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(artnet_state.mutex, portMAX_DELAY);
-    memcpy(stats, &artnet_state.stats, sizeof(artnet_stats_t));
-    xSemaphoreGive(artnet_state.mutex);
-    
+    if (!s_an.initialized) return ESP_ERR_INVALID_STATE;
+    if (!stats) return ESP_ERR_INVALID_ARG;
+    *stats = s_an.stats;
     return ESP_OK;
 }
 
 esp_err_t artnet_receiver_enable_poll_reply(bool enable)
 {
-    if (!artnet_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    xSemaphoreTake(artnet_state.mutex, portMAX_DELAY);
-    artnet_state.poll_reply_enabled = enable;
-    xSemaphoreGive(artnet_state.mutex);
-    
-    ESP_LOGI(TAG, "ArtPollReply %s", enable ? "enabled" : "disabled");
-    
+    if (!s_an.initialized) return ESP_ERR_INVALID_STATE;
+    s_an.poll_reply_enabled = enable;
     return ESP_OK;
 }
 
 bool artnet_receiver_is_running(void)
 {
-    return artnet_state.running;
-}
-
-// ============================================================================
-// Internal Functions
-// ============================================================================
-
-/**
- * @brief Art-Net receiver task
- */
-static void artnet_receive_task(void *arg)
-{
-    uint8_t buffer[ARTNET_MAX_PACKET_SIZE];
-    struct sockaddr_in src_addr;
-    socklen_t src_addr_len = sizeof(src_addr);
-    
-    ESP_LOGI(TAG, "Art-Net receiver task started");
-    
-    while (artnet_state.running) {
-        // Receive packet
-        int len = recvfrom(artnet_state.socket_fd, buffer, sizeof(buffer), 0,
-                          (struct sockaddr *)&src_addr, &src_addr_len);
-        
-        if (len < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Timeout, continue
-                continue;
-            }
-            
-            if (!artnet_state.running) {
-                // Socket closed, exit
-                break;
-            }
-            
-            ESP_LOGW(TAG, "Receive error: %d", errno);
-            continue;
-        }
-        
-        if (len == 0) {
-            continue;
-        }
-        
-        // Update statistics
-        artnet_state.stats.packets_received++;
-        
-        // Process packet
-        esp_err_t ret = process_artnet_packet(buffer, len, &src_addr);
-        if (ret != ESP_OK) {
-            artnet_state.stats.invalid_packets++;
-        }
-    }
-    
-    ESP_LOGI(TAG, "Art-Net receiver task stopped");
-    vTaskDelete(NULL);
-}
-
-/**
- * @brief Process received Art-Net packet
- */
-static esp_err_t process_artnet_packet(const uint8_t *buffer, size_t length,
-                                       const struct sockaddr_in *src_addr)
-{
-    // Validate header
-    if (!validate_artnet_header(buffer, length)) {
-        return ESP_FAIL;
-    }
-    
-    // Get opcode (bytes 8-9, little endian)
-    uint16_t opcode = buffer[8] | (buffer[9] << 8);
-    
-    switch (opcode) {
-        case ARTNET_OP_DMX:
-            if (length >= sizeof(artnet_dmx_packet_t)) {
-                artnet_state.stats.dmx_packets++;
-                return process_artdmx((const artnet_dmx_packet_t *)buffer, src_addr);
-            }
-            break;
-            
-        case ARTNET_OP_POLL:
-            if (length >= sizeof(artnet_poll_packet_t)) {
-                artnet_state.stats.poll_packets++;
-                return process_artpoll((const artnet_poll_packet_t *)buffer, src_addr);
-            }
-            break;
-            
-        default:
-            // Unknown or unsupported opcode
-            break;
-    }
-    
-    return ESP_OK;
-}
-
-/**
- * @brief Process ArtDmx packet
- */
-static esp_err_t process_artdmx(const artnet_dmx_packet_t *packet,
-                                const struct sockaddr_in *src_addr)
-{
-    // Extract universe (little endian)
-    uint16_t universe = packet->universe;
-    
-    // Extract length (big endian / network byte order)
-    uint16_t length = artnet_ntohs(packet->length);
-    
-    // Validate length
-    if (length < 2 || length > 512) {
-        return ESP_FAIL;
-    }
-    
-    // Check sequence number (optional - for statistics)
-    uint8_t sequence = packet->sequence;
-    if (universe < ARTNET_MAX_UNIVERSES) {
-        uint8_t expected = artnet_state.last_sequence[universe] + 1;
-        if (sequence != expected && artnet_state.last_sequence[universe] != 0) {
-            artnet_state.stats.sequence_errors++;
-        }
-        artnet_state.last_sequence[universe] = sequence;
-    }
-    
-    // Extract source IP address
-    uint32_t source_ip = src_addr->sin_addr.s_addr;
-    
-    // Call callback if registered
-    if (artnet_state.dmx_callback) {
-        artnet_state.dmx_callback(universe, packet->data, length, sequence,
-                                  source_ip, artnet_state.dmx_callback_user_data);
-    }
-    
-    return ESP_OK;
-}
-
-/**
- * @brief Process ArtPoll packet
- */
-static esp_err_t process_artpoll(const artnet_poll_packet_t *packet,
-                                 const struct sockaddr_in *src_addr)
-{
-    // Send ArtPollReply if enabled
-    if (artnet_state.poll_reply_enabled) {
-        return send_artpoll_reply(src_addr);
-    }
-    
-    return ESP_OK;
-}
-
-/**
- * @brief Send ArtPollReply packet
- */
-static esp_err_t send_artpoll_reply(const struct sockaddr_in *dest_addr)
-{
-    artnet_poll_reply_packet_t reply;
-    memset(&reply, 0, sizeof(reply));
-    
-    // Fill header
-    memcpy(reply.id, ARTNET_HEADER, 8);
-    reply.opcode = ARTNET_OP_POLL_REPLY;
-    
-    // Get IP address
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (!netif) {
-        netif = esp_netif_get_handle_from_ifkey("ETH_DEF");
-    }
-    
-    if (netif) {
-        esp_netif_ip_info_t ip_info;
-        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
-            reply.ip[0] = (ip_info.ip.addr >> 0) & 0xFF;
-            reply.ip[1] = (ip_info.ip.addr >> 8) & 0xFF;
-            reply.ip[2] = (ip_info.ip.addr >> 16) & 0xFF;
-            reply.ip[3] = (ip_info.ip.addr >> 24) & 0xFF;
-        }
-    }
-    
-    // Port
-    reply.port = htons(ARTNET_PORT);
-    
-    // Version info
-    reply.version_info = htons(0x0001);  // Version 0.1
-    
-    // Get node names from config
-    config_t *config = config_get();
-    if (config) {
-        strncpy(reply.short_name, config->node_info.short_name, sizeof(reply.short_name) - 1);
-        strncpy(reply.long_name, config->node_info.long_name, sizeof(reply.long_name) - 1);
-    }
-    
-    // Node report
-    snprintf(reply.node_report, sizeof(reply.node_report), "#0001 [%04ld] OK",
-             artnet_state.stats.dmx_packets);
-    
-    // Number of ports
-    reply.num_ports = htons(2);  // 2 DMX ports
-    
-    // Port types (DMX output)
-    reply.port_types[0] = 0x80;  // DMX512 output
-    reply.port_types[1] = 0x80;  // DMX512 output
-    
-    // Output universe mapping
-    if (config) {
-        reply.swout[0] = config->port1.universe_primary & 0x0F;
-        reply.swout[1] = config->port2.universe_primary & 0x0F;
-    }
-    
-    // Status
-    reply.status1 = 0xE0;  // Indicators normal, network configured
-    reply.status2 = 0x08;  // Supports ArtNet 4
-    
-    // Style
-    reply.style = 0x00;  // ST_NODE (DMX to/from Art-Net device)
-    
-    // MAC address
-    uint8_t mac[6];
-    if (netif && esp_netif_get_mac(netif, mac) == ESP_OK) {
-        memcpy(reply.mac, mac, 6);
-    }
-    
-    // Send reply
-    int sent = sendto(artnet_state.socket_fd, &reply, sizeof(reply), 0,
-                     (struct sockaddr *)dest_addr, sizeof(*dest_addr));
-    
-    if (sent < 0) {
-        ESP_LOGW(TAG, "Failed to send ArtPollReply: %d", errno);
-        return ESP_FAIL;
-    }
-    
-    artnet_state.stats.poll_replies_sent++;
-    ESP_LOGD(TAG, "Sent ArtPollReply to %s:%d",
-             inet_ntoa(dest_addr->sin_addr), ntohs(dest_addr->sin_port));
-    
-    return ESP_OK;
+    return s_an.running;
 }

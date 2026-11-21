@@ -68,6 +68,15 @@ typedef struct {
  */
 esp_err_t web_server_init(const web_server_config_t *config);
 
+/** Application functions the web API calls (set before web_server_start) */
+typedef struct {
+    void (*identify)(uint32_t seconds);    /**< flash the status LED for @p seconds, 0 = stop */
+    uint32_t (*identify_left)(void);       /**< seconds of identify left */
+} web_server_hooks_t;
+
+/** @p hooks must stay valid (static) */
+void web_server_set_hooks(const web_server_hooks_t *hooks);
+
 /**
  * @brief Start web server
  * 

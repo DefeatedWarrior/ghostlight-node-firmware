@@ -1,3 +1,32 @@
+/**
+ * @file merge_engine.h
+ * @brief Multi-source DMX merge engine (Art-Net / sACN / local layer)
+ *
+ * Per output port the engine tracks up to MERGE_MAX_SOURCES network sources
+ * and produces one 512-slot output frame.
+ *
+ *  - Sources are identified by CID (sACN) or IP address (Art-Net).
+ *  - sACN priority (E1.31 packet priority and per-address priority 0xDD) is
+ *    honoured: per slot, only sources at the highest priority take part.
+ *    Art-Net sources are treated as priority 100 (the sACN default).
+ *  - Merge modes:
+ *      HTP     highest value wins (per slot)
+ *      LTP     latest change wins (per slot)
+ *      LAST    the source that sent the most recent packet owns the frame
+ *      BACKUP  primary/backup failover (secondary universe, or oldest source)
+ *      DISABLE no merge: the first source owns the port until it times out
+ *  - The protocol filter (Art-Net only / sACN only / priority / both) is
+ *    applied before merging.
+ *  - Sequence numbers are checked per source (E1.31 6.7.2 window rule), so
+ *    late/duplicate UDP packets are discarded instead of causing flicker.
+ *  - A "local" layer (scene playback, web test) is HTP-merged on top of the
+ *    network result and never times out.
+ *  - When every source is lost the output either holds the last look or goes
+ *    to zero, depending on the configured loss behaviour.
+ *
+ * Thread safety: all functions may be called from any task.
+ */
+
 #ifndef MERGE_ENGINE_H
 #define MERGE_ENGINE_H
 
@@ -10,234 +39,145 @@
 extern "C" {
 #endif
 
-/**
- * @brief Merge Engine Module
- * 
- * This module merges DMX data from multiple sources using various algorithms.
- * It supports Art-Net, sACN, and DMX input sources with timeout management.
- * 
- * Features:
- * - Multiple merge modes (HTP, LTP, LAST, BACKUP, DISABLE)
- * - Multi-source support (up to 4 sources per port)
- * - Timeout detection and handling
- * - Source tracking (protocol, IP, name, priority)
- * - Thread-safe operation
- */
+/** Maximum tracked network sources per port */
+#define MERGE_MAX_SOURCES 6
 
-// Maximum sources per port
-#define MERGE_MAX_SOURCES 4
-
-// Default timeout (2.5 seconds in microseconds)
+/** Default source-loss timeout (E1.31 network data loss = 2.5 s) */
 #define MERGE_DEFAULT_TIMEOUT_US 2500000
 
-/**
- * @brief Source protocol type
- */
+/** Priority assigned to Art-Net sources (same as the sACN default) */
+#define MERGE_ARTNET_PRIORITY 100
+
 typedef enum {
-    SOURCE_PROTOCOL_ARTNET = 0,    /**< Art-Net source */
-    SOURCE_PROTOCOL_SACN = 1,      /**< sACN source */
-    SOURCE_PROTOCOL_DMX_IN = 2     /**< DMX input source */
+    SOURCE_PROTOCOL_ARTNET = 0,
+    SOURCE_PROTOCOL_SACN   = 1,
+    SOURCE_PROTOCOL_DMX_IN = 2,
 } source_protocol_t;
 
-/**
- * @brief DMX source data structure
- */
+/** One received network packet, as handed to merge_engine_push() */
 typedef struct {
-    uint8_t data[512];             /**< DMX data (512 channels) */
-    uint64_t timestamp_us;         /**< Timestamp in microseconds */
-    uint32_t sequence;             /**< Sequence number */
-    uint8_t priority;              /**< Source priority (0-200, sACN only) */
-    char source_name[64];          /**< Source identifier */
-    uint32_t source_ip;            /**< Source IP address */
-    source_protocol_t protocol;    /**< Protocol type */
-    bool is_valid;                 /**< Data valid flag */
-} dmx_source_data_t;
+    source_protocol_t protocol;
+    uint32_t source_ip;        /**< as received (network byte order) */
+    const uint8_t *cid;        /**< 16-byte sACN CID, NULL for Art-Net */
+    const char *name;          /**< source name, may be NULL */
+    uint8_t priority;          /**< 0-200 (Art-Net: MERGE_ARTNET_PRIORITY) */
+    uint8_t sequence;          /**< packet sequence number */
+    bool check_sequence;       /**< false for Art-Net sequence 0 */
+    uint8_t start_code;        /**< 0x00 = levels, 0xDD = per-address priority */
+    const uint8_t *data;       /**< slot data (without the start code) */
+    uint16_t length;           /**< 1..512 */
+    bool backup;               /**< received on the port's secondary universe */
+    bool terminated;           /**< sACN Stream_Terminated: drop the source now */
+    uint16_t sync_address;     /**< sACN synchronization universe (0 = none) */
+    bool force_sync;           /**< sACN Force_Synchronization option bit */
+} merge_input_t;
 
-/**
- * @brief Merge engine statistics
- */
+/** Output synchronization state of a port */
+typedef enum {
+    MERGE_SYNC_NONE = 0,       /**< levels go out as they arrive */
+    MERGE_SYNC_ARTNET,         /**< latched by ArtSync */
+    MERGE_SYNC_SACN,           /**< latched by E1.31 synchronization packets */
+} merge_sync_t;
+
+/** Snapshot of one source, for status pages */
 typedef struct {
-    uint32_t total_merges;         /**< Total merge operations */
-    uint32_t htp_merges;           /**< HTP merge count */
-    uint32_t ltp_merges;           /**< LTP merge count */
-    uint32_t last_merges;          /**< LAST merge count */
-    uint32_t backup_switches;      /**< Backup failover count */
-    uint32_t source_timeouts;      /**< Source timeout count */
-    uint32_t active_sources;       /**< Currently active sources */
+    source_protocol_t protocol;
+    uint32_t source_ip;
+    char name[64];
+    uint8_t priority;
+    bool uses_pap;             /**< sending per-address priority (0xDD) */
+    bool backup;
+    bool contributing;         /**< currently part of the output */
+    uint32_t age_ms;           /**< time since the last packet */
+    uint32_t packets;
+} merge_source_info_t;
+
+typedef struct {
+    uint32_t total_merges;     /**< output frames computed */
+    uint32_t htp_merges;
+    uint32_t ltp_merges;
+    uint32_t last_merges;
+    uint32_t backup_switches;  /**< backup / owner changes */
+    uint32_t source_timeouts;
+    uint32_t active_sources;
+    uint32_t sequence_drops;   /**< late/duplicate packets discarded */
+    uint32_t sources_rejected; /**< new sources refused (table full) */
+    uint32_t packets_filtered; /**< dropped by the protocol filter */
+    uint32_t sync_frames;      /**< frames latched by a sync packet */
 } merge_stats_t;
 
-/**
- * @brief Initialize merge engine
- * 
- * Initializes the merge engine module. Must be called before any other functions.
- * 
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_NO_MEM if memory allocation failed
- *     - ESP_ERR_INVALID_STATE if already initialized
- */
 esp_err_t merge_engine_init(void);
-
-/**
- * @brief Deinitialize merge engine
- * 
- * Stops the merge engine and frees resources.
- * 
- * @return
- *     - ESP_OK on success
- */
 esp_err_t merge_engine_deinit(void);
 
-/**
- * @brief Configure merge engine for a port
- * 
- * Configures merge mode and timeout for the specified port.
- * 
- * @param port Port number (1 or 2)
- * @param mode Merge mode from config_manager
- * @param timeout_ms Timeout in milliseconds (0 = use default)
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if port invalid
- *     - ESP_ERR_INVALID_STATE if not initialized
- */
+/** Merge mode and source-loss timeout (ms) for a port (1 or 2) */
 esp_err_t merge_engine_config(uint8_t port, merge_mode_t mode, uint32_t timeout_ms);
 
-/**
- * @brief Push Art-Net data to merge engine
- * 
- * Adds or updates Art-Net source data for merging.
- * 
- * @param port Port number (1 or 2)
- * @param universe Universe number
- * @param data DMX data (512 channels)
- * @param sequence Sequence number
- * @param source_ip Source IP address
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if parameters invalid
- *     - ESP_ERR_INVALID_STATE if not initialized
- *     - ESP_ERR_NO_MEM if maximum sources reached
- */
-esp_err_t merge_engine_push_artnet(uint8_t port, uint16_t universe,
-                                   const uint8_t *data, uint8_t sequence,
-                                   uint32_t source_ip);
+/** Which protocols the port accepts (see protocol_mode_t) */
+esp_err_t merge_engine_set_protocol_mode(uint8_t port, protocol_mode_t mode);
+
+/** true: hold the last look when all sources are lost; false: go to zero */
+esp_err_t merge_engine_set_hold_last_look(uint8_t port, bool hold);
 
 /**
- * @brief Push sACN data to merge engine
- * 
- * Adds or updates sACN source data for merging.
- * 
- * @param port Port number (1 or 2)
- * @param universe Universe number
- * @param data DMX data (512 channels)
- * @param sequence Sequence number
- * @param priority Priority (0-200)
- * @param source_name Source name
- * @param source_ip Source IP address
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if parameters invalid
- *     - ESP_ERR_INVALID_STATE if not initialized
- *     - ESP_ERR_NO_MEM if maximum sources reached
+ * What the network layer outputs once every source is lost (Art-Net 4
+ * failsafe). Not applied before the first source has been seen, so a node
+ * that never received data stays at zero (or its power-on scene).
+ * @p scene 512 levels for LOSS_SCENE (copied; NULL = zero)
  */
-esp_err_t merge_engine_push_sacn(uint8_t port, uint16_t universe,
-                                 const uint8_t *data, uint8_t sequence,
-                                 uint8_t priority, const char *source_name,
-                                 uint32_t source_ip);
+esp_err_t merge_engine_set_loss_behavior(uint8_t port, loss_behavior_t loss, const uint8_t *scene);
+
+/** true while the port shows its failsafe look (sources lost) */
+bool merge_engine_in_failsafe(uint8_t port);
+
+/** Feed one received packet to a port */
+esp_err_t merge_engine_push(uint8_t port, const merge_input_t *in);
 
 /**
- * @brief Push DMX input data to merge engine
- * 
- * Adds or updates DMX input source data for merging.
- * 
- * @param port Port number (1 or 2)
- * @param data DMX data (512 channels)
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if parameters invalid
- *     - ESP_ERR_INVALID_STATE if not initialized
+ * Local layer (scenes, web test). HTP-merged on top of the network output.
+ * It never times out; clear it with merge_engine_clear_local().
  */
-esp_err_t merge_engine_push_dmx_in(uint8_t port, const uint8_t *data);
+esp_err_t merge_engine_set_local(uint8_t port, const uint8_t *data);
+esp_err_t merge_engine_set_local_channel(uint8_t port, uint16_t channel, uint8_t value);
+esp_err_t merge_engine_get_local(uint8_t port, uint8_t *data, bool *active);
+esp_err_t merge_engine_clear_local(uint8_t port);
 
 /**
- * @brief Get merged output data
- * 
- * Retrieves the merged DMX data for the specified port.
- * Performs merge operation if needed.
- * 
- * @param port Port number (1 or 2)
- * @param data Buffer to store merged data (512 channels)
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if parameters invalid
- *     - ESP_ERR_INVALID_STATE if not initialized
- *     - ESP_ERR_TIMEOUT if no active sources
+ * Compute the frame to put on the wire. Always fills @p data (512 bytes) and
+ * returns ESP_OK; use merge_engine_is_output_active() to know whether any
+ * source currently drives it.
  */
 esp_err_t merge_engine_get_output(uint8_t port, uint8_t *data);
 
-/**
- * @brief Check if output is active
- * 
- * Checks if there are any active sources within the timeout period.
- * 
- * @param port Port number (1 or 2)
- * @return true if output active, false otherwise
- */
+/** true while at least one network source or the local layer is active */
 bool merge_engine_is_output_active(uint8_t port);
 
 /**
- * @brief Force blackout
- * 
- * Clears all sources and outputs zero for all channels.
- * 
- * @param port Port number (1 or 2)
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if port invalid
- *     - ESP_ERR_INVALID_STATE if not initialized
+ * ArtSync from @p source_ip (network byte order). Latches the current levels
+ * of every port fed only by that controller (not merging) and puts it in
+ * synchronous mode (until 4 s pass without ArtSync).
+ * @return bit mask of latched ports (bit 0 = port 1); trigger their output
  */
+uint8_t merge_engine_artnet_sync(uint32_t source_ip);
+
+/**
+ * E1.31 synchronization packet for @p sync_universe. Latches every port
+ * whose sources all name that synchronization universe.
+ * @return bit mask of latched ports
+ */
+uint8_t merge_engine_sacn_sync(uint16_t sync_universe);
+
+merge_sync_t merge_engine_get_sync_state(uint8_t port);
+
+/** Synchronization universes the port's sACN sources use (deduplicated) */
+uint16_t merge_engine_sync_universes(uint8_t port, uint16_t *out, uint8_t max);
+
+/** Drop all sources, clear the local layer and zero the output */
 esp_err_t merge_engine_blackout(uint8_t port);
 
-/**
- * @brief Get active sources
- * 
- * Retrieves information about currently active sources.
- * 
- * @param port Port number (1 or 2)
- * @param sources Buffer to store source information
- * @param max_sources Maximum number of sources to return
- * @return Number of active sources
- */
-uint8_t merge_engine_get_active_sources(uint8_t port, 
-                                       dmx_source_data_t *sources,
-                                       uint8_t max_sources);
+/** Copy up to @p max source snapshots; returns the number copied */
+uint8_t merge_engine_get_sources(uint8_t port, merge_source_info_t *out, uint8_t max);
 
-/**
- * @brief Get merge statistics
- * 
- * Retrieves merge engine statistics for the specified port.
- * 
- * @param port Port number (1 or 2)
- * @param stats Pointer to statistics structure
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if parameters invalid
- *     - ESP_ERR_INVALID_STATE if not initialized
- */
 esp_err_t merge_engine_get_stats(uint8_t port, merge_stats_t *stats);
-
-/**
- * @brief Reset statistics
- * 
- * Resets merge statistics for the specified port.
- * 
- * @param port Port number (1 or 2)
- * @return
- *     - ESP_OK on success
- *     - ESP_ERR_INVALID_ARG if port invalid
- *     - ESP_ERR_INVALID_STATE if not initialized
- */
 esp_err_t merge_engine_reset_stats(uint8_t port);
 
 #ifdef __cplusplus

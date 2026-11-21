@@ -1,614 +1,556 @@
 /**
  * @file sacn_receiver.c
- * @brief sACN (E1.31) Protocol Receiver Implementation
- * 
- * This component receives sACN packets over UDP multicast and processes them.
- * It handles E1.31 data packets with priority, sequence validation, and preview detection.
- * 
- * Thread Safety:
- * - All public APIs are thread-safe using mutexes
- * - Receiver runs on dedicated task (Core 0)
- * - Callbacks executed from receiver task context
- * 
- * Memory Usage:
- * - ~3KB for context and buffers
- * - Task stack: 4KB
- * - Total: ~7KB
+ * @brief sACN (E1.31) receiver — see sacn_receiver.h
  */
 
 #include "sacn_receiver.h"
 #include "esp_log.h"
-#include "esp_timer.h"
-#include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "lwip/sockets.h"
-#include "lwip/netdb.h"
-#include "lwip/igmp.h"
+#include "lwip/inet.h"
 #include <string.h>
-#include <arpa/inet.h>
+#include <stdlib.h>
+#include <stddef.h>
 
 static const char *TAG = "sacn_receiver";
 
-// Task configuration
-#define SACN_TASK_STACK_SIZE 4096
-#define SACN_TASK_PRIORITY   5
-#define SACN_TASK_CORE       0
+#define SACN_TASK_STACK_SIZE   6144
+#define SACN_TASK_PRIORITY     6
+#define SACN_TASK_CORE         0
+#define SACN_RX_BUF_SIZE       700
+#define SACN_RECEIVE_TIMEOUT_MS 500
 
-// Buffer sizes
-#define SACN_MAX_PACKET_SIZE 638  // Full sACN packet size
+/* Bytes before dmp.start_code */
+#define SACN_HDR_LEN  (offsetof(sacn_packet_t, dmp) + offsetof(sacn_dmp_layer_t, start_code))
 
-// Timeout
-#define SACN_RECEIVE_TIMEOUT_MS 1000
-
-/**
- * @brief Universe subscription entry
- */
 typedef struct {
-    uint16_t universe;
-    bool subscribed;
-    uint8_t last_sequence;
-    struct ip_mreq mreq;
-} universe_subscription_t;
+    uint16_t universe;   /* 0 = free slot */
+    bool joined;
+} subscription_t;
 
-/**
- * @brief Module state
- */
 static struct {
     bool initialized;
-    bool running;
-    
-    int socket_fd;
-    TaskHandle_t task_handle;
-    
-    sacn_dmx_callback_t dmx_callback;
-    void *dmx_callback_user_data;
-    
-    universe_subscription_t subscriptions[SACN_MAX_UNIVERSES];
-    uint8_t subscription_count;
-    
-    sacn_stats_t stats;
-    
+    volatile bool running;
+    int sock;
+    TaskHandle_t task;
+    SemaphoreHandle_t task_done;
     SemaphoreHandle_t mutex;
-} sacn_state = {
-    .initialized = false,
-    .running = false,
-    .socket_fd = -1,
-    .subscription_count = 0,
+
+    sacn_dmx_callback_t cb;
+    void *cb_data;
+    sacn_sync_callback_t sync_cb;
+    void *sync_data;
+
+    /* Sequence tracking for synchronization packets (per source + universe) */
+    struct {
+        uint16_t universe;
+        uint8_t cid[16];
+        uint8_t seq;
+        TickType_t seen;
+    } sync_seq[4];
+
+    subscription_t subs[SACN_MAX_UNIVERSES];
+    bool have_local_cid;
+    uint8_t local_cid[16];
+
+    sacn_stats_t stats;
+} s_sacn = {
+    .sock = -1,
 };
 
-// Forward declarations
-static void sacn_receive_task(void *arg);
-static esp_err_t process_sacn_packet(const uint8_t *buffer, size_t length,
-                                     const struct sockaddr_in *src_addr);
-static esp_err_t process_sacn_data(const sacn_packet_t *packet,
-                                   const struct sockaddr_in *src_addr);
-static void calculate_multicast_addr(uint16_t universe, struct in_addr *addr);
-
-/**
- * @brief Calculate multicast address for universe
- * 
- * Universe 1 = 239.255.0.1
- * Universe 256 = 239.255.1.0
- * Formula: 239.255.(universe / 256).(universe % 256)
- */
-static void calculate_multicast_addr(uint16_t universe, struct in_addr *addr)
+static struct in_addr universe_group(uint16_t universe)
 {
-    uint8_t octet3 = (universe >> 8) & 0xFF;
-    uint8_t octet4 = universe & 0xFF;
-    
-    // 239.255.x.x format
-    addr->s_addr = htonl(0xEFFF0000 | (octet3 << 8) | octet4);
+    struct in_addr a;
+    a.s_addr = htonl(0xEFFF0000u | universe);
+    return a;
 }
 
-/**
- * @brief Validate sACN packet header
- */
-static bool validate_sacn_header(const uint8_t *buffer, size_t length)
+/* Caller holds the mutex */
+static bool join_group(subscription_t *sub, bool rejoin)
 {
-    if (length < sizeof(sacn_packet_t)) {
+    if (s_sacn.sock < 0 || sub->universe == 0) {
         return false;
     }
-    
-    const sacn_packet_t *packet = (const sacn_packet_t *)buffer;
-    
-    // Check preamble
-    if (ntohs(packet->root.preamble_size) != 0x0010) {
+    struct ip_mreq mreq = {
+        .imr_multiaddr = universe_group(sub->universe),
+        .imr_interface.s_addr = htonl(INADDR_ANY),
+    };
+    if (rejoin || sub->joined) {
+        /* Leave first so lwIP re-joins on every interface that exists now */
+        setsockopt(s_sacn.sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+        sub->joined = false;
+    }
+    if (setsockopt(s_sacn.sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        ESP_LOGW(TAG, "Join universe %u (%s) failed: errno %d — will retry on link up",
+                 sub->universe, inet_ntoa(mreq.imr_multiaddr), errno);
         return false;
     }
-    
-    // Check ACN packet identifier
-    if (memcmp(packet->root.acn_pid, SACN_PACKET_IDENTIFIER, 12) != 0) {
-        return false;
-    }
-    
-    // Check root vector
-    if (ntohl(packet->root.vector) != SACN_ROOT_VECTOR) {
-        return false;
-    }
-    
-    // Check framing vector
-    if (ntohl(packet->framing.vector) != SACN_FRAME_VECTOR) {
-        return false;
-    }
-    
-    // Check DMP vector
-    if (packet->dmp.vector != SACN_DMP_VECTOR) {
-        return false;
-    }
-    
-    // Check start code (DMX)
-    if (packet->dmp.start_code != 0x00) {
-        return false;
-    }
-    
+    sub->joined = true;
+    ESP_LOGI(TAG, "Joined universe %u (%s)", sub->universe, inet_ntoa(mreq.imr_multiaddr));
     return true;
 }
 
+/* Caller holds the mutex */
+static void leave_group(subscription_t *sub)
+{
+    if (s_sacn.sock >= 0 && sub->joined) {
+        struct ip_mreq mreq = {
+            .imr_multiaddr = universe_group(sub->universe),
+            .imr_interface.s_addr = htonl(INADDR_ANY),
+        };
+        setsockopt(s_sacn.sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+    }
+    sub->joined = false;
+}
+
 // ============================================================================
-// Public API Implementation
+// Packet parsing
+// ============================================================================
+
+/* Sync sequence check (E1.31 6.7.2 applied per source and sync universe) */
+static bool sync_sequence_ok(uint16_t universe, const uint8_t *cid, uint8_t seq)
+{
+    TickType_t now = xTaskGetTickCount();
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < 4; i++) {
+        if (s_sacn.sync_seq[i].universe == universe &&
+            memcmp(s_sacn.sync_seq[i].cid, cid, 16) == 0) {
+            slot = i;
+            break;
+        }
+        if (s_sacn.sync_seq[i].seen < s_sacn.sync_seq[oldest].seen) oldest = i;
+    }
+    if (slot >= 0 && (now - s_sacn.sync_seq[slot].seen) < pdMS_TO_TICKS(2500)) {
+        int8_t diff = (int8_t)(seq - s_sacn.sync_seq[slot].seq);
+        if (diff <= 0 && diff > -20) {
+            return false;
+        }
+    }
+    if (slot < 0) {
+        slot = oldest;
+        s_sacn.sync_seq[slot].universe = universe;
+        memcpy(s_sacn.sync_seq[slot].cid, cid, 16);
+    }
+    s_sacn.sync_seq[slot].seq = seq;
+    s_sacn.sync_seq[slot].seen = now;
+    return true;
+}
+
+/*
+ * Extended packets: synchronization (root vector 0x8, framing vector 0x1)
+ *   38 flags/len, 40 vector, 44 sequence, 45-46 sync address, 47-48 reserved
+ * Universe discovery (framing vector 0x2) is ignored.
+ */
+static void process_extended(const uint8_t *buf, int len, const struct sockaddr_in *from)
+{
+    const sacn_packet_t *p = (const sacn_packet_t *)buf;
+    if (len < 44) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+    uint32_t vec = ((uint32_t)buf[40] << 24) | ((uint32_t)buf[41] << 16) |
+                   ((uint32_t)buf[42] << 8) | buf[43];
+    if (vec != SACN_EXT_VECTOR_SYNC) {
+        s_sacn.stats.extended_packets++;
+        return;
+    }
+    if (len < SACN_SYNC_PACKET_LEN) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+    if (s_sacn.have_local_cid && memcmp(p->root.cid, s_sacn.local_cid, 16) == 0) {
+        s_sacn.stats.own_packets++;
+        return;
+    }
+    uint16_t universe = ((uint16_t)buf[45] << 8) | buf[46];
+    if (universe < 1 || universe > 63999) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+    if (!sync_sequence_ok(universe, p->root.cid, buf[44])) {
+        return;
+    }
+    s_sacn.stats.sync_packets++;
+    sacn_sync_callback_t cb = s_sacn.sync_cb;
+    if (cb) {
+        cb(universe, p->root.cid, from->sin_addr.s_addr, s_sacn.sync_data);
+    }
+}
+
+static void process_packet(const uint8_t *buf, int len, const struct sockaddr_in *from)
+{
+    if (len < (int)offsetof(sacn_packet_t, framing)) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+    const sacn_packet_t *p = (const sacn_packet_t *)buf;
+
+    if (ntohs(p->root.preamble_size) != 0x0010 ||
+        ntohs(p->root.postamble_size) != 0x0000 ||
+        memcmp(p->root.acn_pid, SACN_PACKET_IDENTIFIER, 12) != 0) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+
+    uint32_t root_vector = ntohl(p->root.vector);
+    if (root_vector == SACN_ROOT_VECTOR_EXTENDED) {
+        process_extended(buf, len, from);
+        return;
+    }
+    if (root_vector != SACN_ROOT_VECTOR_DATA || len < (int)SACN_HDR_LEN + 1) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+    if (ntohl(p->framing.vector) != SACN_FRAME_VECTOR_DATA ||
+        p->dmp.vector != SACN_DMP_VECTOR ||
+        p->dmp.address_type != 0xA1 ||
+        ntohs(p->dmp.first_address) != 0 ||
+        ntohs(p->dmp.address_increment) != 1) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+
+    uint16_t prop_count = ntohs(p->dmp.property_count);
+    if (prop_count < 1 || prop_count > 513 ||
+        len < (int)(SACN_HDR_LEN + prop_count)) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+
+    uint16_t universe = ntohs(p->framing.universe);
+    if (universe < 1 || universe > 63999) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+
+    if (s_sacn.have_local_cid && memcmp(p->root.cid, s_sacn.local_cid, 16) == 0) {
+        s_sacn.stats.own_packets++;
+        return;
+    }
+
+    uint8_t start_code = p->dmp.start_code;
+    if (start_code != 0x00 && start_code != 0xDD) {
+        return;   /* alternate start codes (e.g. 0xCC RDM, 0x17 text) are ignored */
+    }
+
+    uint8_t options = p->framing.options;
+    char name[65];
+    memcpy(name, p->framing.source_name, 64);
+    name[64] = '\0';
+
+    sacn_packet_info_t info = {
+        .universe     = universe,
+        .cid          = p->root.cid,
+        .source_name  = name,
+        .priority     = p->framing.priority > 200 ? 200 : p->framing.priority,
+        .sequence     = p->framing.sequence_number,
+        .options      = options,
+        .preview      = (options & SACN_OPT_PREVIEW) != 0,
+        .terminated   = (options & SACN_OPT_STREAM_TERM) != 0,
+        .sync_address = ntohs(p->framing.sync_address),
+        .start_code   = start_code,
+        .data         = p->dmp.data,
+        .length       = (uint16_t)(prop_count - 1),
+        .source_ip    = from->sin_addr.s_addr,
+    };
+
+    if (info.preview)    s_sacn.stats.preview_packets++;
+    if (info.terminated) s_sacn.stats.terminated_packets++;
+    if (start_code == 0xDD) s_sacn.stats.pap_packets++;
+    else                    s_sacn.stats.data_packets++;
+
+    sacn_dmx_callback_t cb = s_sacn.cb;
+    if (cb) {
+        cb(&info, s_sacn.cb_data);
+    }
+}
+
+static void sacn_receive_task(void *arg)
+{
+    uint8_t *buf = malloc(SACN_RX_BUF_SIZE);
+    if (!buf) {
+        ESP_LOGE(TAG, "rx buffer alloc failed");
+        s_sacn.running = false;
+    }
+    ESP_LOGI(TAG, "sACN receiver task started");
+
+    while (s_sacn.running) {
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+        int len = recvfrom(s_sacn.sock, buf, SACN_RX_BUF_SIZE, 0,
+                           (struct sockaddr *)&from, &from_len);
+        if (len < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && s_sacn.running) {
+                ESP_LOGW(TAG, "recvfrom error %d", errno);
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            continue;
+        }
+        s_sacn.stats.packets_received++;
+        process_packet(buf, len, &from);
+    }
+
+    free(buf);
+    ESP_LOGI(TAG, "sACN receiver task stopped");
+    xSemaphoreGive(s_sacn.task_done);
+    vTaskDelete(NULL);
+}
+
+// ============================================================================
+// Public API
 // ============================================================================
 
 esp_err_t sacn_receiver_init(void)
 {
-    if (sacn_state.initialized) {
-        ESP_LOGW(TAG, "Already initialized");
+    if (s_sacn.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    ESP_LOGI(TAG, "Initializing sACN receiver...");
-    
-    // Create mutex
-    sacn_state.mutex = xSemaphoreCreateMutex();
-    if (!sacn_state.mutex) {
-        ESP_LOGE(TAG, "Failed to create mutex");
+    s_sacn.mutex = xSemaphoreCreateMutex();
+    s_sacn.task_done = xSemaphoreCreateBinary();
+    if (!s_sacn.mutex || !s_sacn.task_done) {
         return ESP_ERR_NO_MEM;
     }
-    
-    // Initialize statistics
-    memset(&sacn_state.stats, 0, sizeof(sacn_stats_t));
-    memset(sacn_state.subscriptions, 0, sizeof(sacn_state.subscriptions));
-    sacn_state.subscription_count = 0;
-    
-    sacn_state.initialized = true;
-    ESP_LOGI(TAG, "sACN receiver initialized successfully");
-    
+    memset(&s_sacn.stats, 0, sizeof(s_sacn.stats));
+    memset(s_sacn.subs, 0, sizeof(s_sacn.subs));
+    s_sacn.initialized = true;
+    ESP_LOGI(TAG, "sACN receiver initialized");
     return ESP_OK;
 }
 
 esp_err_t sacn_receiver_deinit(void)
 {
-    if (!sacn_state.initialized) {
+    if (!s_sacn.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    ESP_LOGI(TAG, "Deinitializing sACN receiver...");
-    
-    // Stop if running
-    if (sacn_state.running) {
-        sacn_receiver_stop();
-    }
-    
-    // Delete mutex
-    if (sacn_state.mutex) {
-        vSemaphoreDelete(sacn_state.mutex);
-        sacn_state.mutex = NULL;
-    }
-    
-    sacn_state.initialized = false;
-    ESP_LOGI(TAG, "sACN receiver deinitialized");
-    
+    sacn_receiver_stop();
+    vSemaphoreDelete(s_sacn.mutex);
+    vSemaphoreDelete(s_sacn.task_done);
+    s_sacn.mutex = NULL;
+    s_sacn.task_done = NULL;
+    s_sacn.initialized = false;
     return ESP_OK;
 }
 
 esp_err_t sacn_receiver_start(void)
 {
-    if (!sacn_state.initialized) {
+    if (!s_sacn.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    if (sacn_state.running) {
-        ESP_LOGW(TAG, "Already running");
+    if (s_sacn.running) {
         return ESP_OK;
     }
-    
-    ESP_LOGI(TAG, "Starting sACN receiver on port %d...", SACN_PORT);
-    
-    xSemaphoreTake(sacn_state.mutex, portMAX_DELAY);
-    
-    // Create UDP socket
-    sacn_state.socket_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sacn_state.socket_fd < 0) {
-        ESP_LOGE(TAG, "Failed to create socket: %d", errno);
-        xSemaphoreGive(sacn_state.mutex);
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "socket() failed: %d", errno);
         return ESP_FAIL;
     }
-    
-    // Set socket options
-    int opt = 1;
-    setsockopt(sacn_state.socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    
-    // Set receive timeout
-    struct timeval timeout = {
-        .tv_sec = SACN_RECEIVE_TIMEOUT_MS / 1000,
-        .tv_usec = (SACN_RECEIVE_TIMEOUT_MS % 1000) * 1000
-    };
-    setsockopt(sacn_state.socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    
-    // Bind to sACN port
+    int one = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct timeval tv = { .tv_sec = 0, .tv_usec = SACN_RECEIVE_TIMEOUT_MS * 1000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons(SACN_PORT),
-        .sin_addr.s_addr = INADDR_ANY
+        .sin_addr.s_addr = htonl(INADDR_ANY),
     };
-    
-    if (bind(sacn_state.socket_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ESP_LOGE(TAG, "Failed to bind socket: %d", errno);
-        close(sacn_state.socket_fd);
-        sacn_state.socket_fd = -1;
-        xSemaphoreGive(sacn_state.mutex);
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        ESP_LOGE(TAG, "bind(%d) failed: %d", SACN_PORT, errno);
+        close(sock);
         return ESP_FAIL;
     }
-    
-    // Create receiver task
-    BaseType_t ret = xTaskCreatePinnedToCore(
-        sacn_receive_task,
-        "sacn_rx",
-        SACN_TASK_STACK_SIZE,
-        NULL,
-        SACN_TASK_PRIORITY,
-        &sacn_state.task_handle,
-        SACN_TASK_CORE
-    );
-    
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create receiver task");
-        close(sacn_state.socket_fd);
-        sacn_state.socket_fd = -1;
-        xSemaphoreGive(sacn_state.mutex);
+
+    xSemaphoreTake(s_sacn.mutex, portMAX_DELAY);
+    s_sacn.sock = sock;
+    for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
+        s_sacn.subs[i].joined = false;
+        if (s_sacn.subs[i].universe) {
+            join_group(&s_sacn.subs[i], false);
+        }
+    }
+    xSemaphoreGive(s_sacn.mutex);
+
+    s_sacn.running = true;
+    xSemaphoreTake(s_sacn.task_done, 0);
+    if (xTaskCreatePinnedToCore(sacn_receive_task, "sacn_rx", SACN_TASK_STACK_SIZE,
+                                NULL, SACN_TASK_PRIORITY, &s_sacn.task,
+                                SACN_TASK_CORE) != pdPASS) {
+        s_sacn.running = false;
+        close(sock);
+        s_sacn.sock = -1;
         return ESP_FAIL;
     }
-    
-    sacn_state.running = true;
-    
-    xSemaphoreGive(sacn_state.mutex);
-    
-    ESP_LOGI(TAG, "sACN receiver started successfully");
-    
+    ESP_LOGI(TAG, "sACN receiver listening on UDP %d", SACN_PORT);
     return ESP_OK;
 }
 
 esp_err_t sacn_receiver_stop(void)
 {
-    if (!sacn_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (!sacn_state.running) {
+    if (!s_sacn.initialized || !s_sacn.running) {
         return ESP_OK;
     }
-    
-    ESP_LOGI(TAG, "Stopping sACN receiver...");
-    
-    xSemaphoreTake(sacn_state.mutex, portMAX_DELAY);
-    
-    // Unsubscribe from all multicast groups
-    for (int i = 0; i < sacn_state.subscription_count; i++) {
-        if (sacn_state.subscriptions[i].subscribed && sacn_state.socket_fd >= 0) {
-            setsockopt(sacn_state.socket_fd, IPPROTO_IP, IP_DROP_MEMBERSHIP,
-                      &sacn_state.subscriptions[i].mreq, sizeof(struct ip_mreq));
-        }
+    s_sacn.running = false;
+    /* The task exits within one receive timeout */
+    if (xSemaphoreTake(s_sacn.task_done, pdMS_TO_TICKS(SACN_RECEIVE_TIMEOUT_MS * 4)) != pdTRUE) {
+        ESP_LOGW(TAG, "rx task did not stop in time");
     }
-    
-    sacn_state.running = false;
-    
-    // Close socket (this will unblock the receive task)
-    if (sacn_state.socket_fd >= 0) {
-        close(sacn_state.socket_fd);
-        sacn_state.socket_fd = -1;
+    s_sacn.task = NULL;
+
+    xSemaphoreTake(s_sacn.mutex, portMAX_DELAY);
+    for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
+        leave_group(&s_sacn.subs[i]);
     }
-    
-    xSemaphoreGive(sacn_state.mutex);
-    
-    // Wait for task to terminate
-    if (sacn_state.task_handle) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        sacn_state.task_handle = NULL;
+    if (s_sacn.sock >= 0) {
+        close(s_sacn.sock);
+        s_sacn.sock = -1;
     }
-    
-    ESP_LOGI(TAG, "sACN receiver stopped");
-    
+    xSemaphoreGive(s_sacn.mutex);
     return ESP_OK;
 }
 
 esp_err_t sacn_receiver_subscribe_universe(uint16_t universe)
 {
-    if (!sacn_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (!sacn_state.running) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (universe < 1 || universe > 63999) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(sacn_state.mutex, portMAX_DELAY);
-    
-    // Check if already subscribed
-    for (int i = 0; i < sacn_state.subscription_count; i++) {
-        if (sacn_state.subscriptions[i].universe == universe &&
-            sacn_state.subscriptions[i].subscribed) {
-            ESP_LOGW(TAG, "Already subscribed to universe %d", universe);
-            xSemaphoreGive(sacn_state.mutex);
-            return ESP_OK;
+    if (!s_sacn.initialized) return ESP_ERR_INVALID_STATE;
+    if (universe < 1 || universe > 63999) return ESP_ERR_INVALID_ARG;
+
+    esp_err_t ret = ESP_OK;
+    xSemaphoreTake(s_sacn.mutex, portMAX_DELAY);
+    subscription_t *slot = NULL;
+    for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
+        if (s_sacn.subs[i].universe == universe) {
+            slot = &s_sacn.subs[i];
+            break;
         }
     }
-    
-    // Check if we have space for more subscriptions
-    if (sacn_state.subscription_count >= SACN_MAX_UNIVERSES) {
-        ESP_LOGE(TAG, "Maximum universes reached");
-        xSemaphoreGive(sacn_state.mutex);
-        return ESP_ERR_NO_MEM;
+    if (!slot) {
+        for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
+            if (s_sacn.subs[i].universe == 0) {
+                slot = &s_sacn.subs[i];
+                slot->universe = universe;
+                slot->joined = false;
+                break;
+            }
+        }
     }
-    
-    // Calculate multicast address
-    struct in_addr multicast_addr;
-    calculate_multicast_addr(universe, &multicast_addr);
-    
-    // Prepare multicast request
-    struct ip_mreq mreq = {
-        .imr_multiaddr = multicast_addr,
-        .imr_interface.s_addr = INADDR_ANY
-    };
-    
-    // Join multicast group
-    if (setsockopt(sacn_state.socket_fd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-                  &mreq, sizeof(mreq)) < 0) {
-        ESP_LOGE(TAG, "Failed to join multicast group for universe %d: %d",
-                 universe, errno);
-        xSemaphoreGive(sacn_state.mutex);
-        return ESP_FAIL;
+    if (!slot) {
+        ret = ESP_ERR_NO_MEM;
+    } else if (!slot->joined && s_sacn.sock >= 0) {
+        ret = join_group(slot, false) ? ESP_OK : ESP_FAIL;
     }
-    
-    // Add to subscriptions
-    universe_subscription_t *sub = &sacn_state.subscriptions[sacn_state.subscription_count];
-    sub->universe = universe;
-    sub->subscribed = true;
-    sub->last_sequence = 0;
-    sub->mreq = mreq;
-    
-    sacn_state.subscription_count++;
-    
-    ESP_LOGI(TAG, "Subscribed to universe %d (multicast %s)",
-             universe, inet_ntoa(multicast_addr));
-    
-    xSemaphoreGive(sacn_state.mutex);
-    
-    return ESP_OK;
+    xSemaphoreGive(s_sacn.mutex);
+    return ret;
 }
 
 esp_err_t sacn_receiver_unsubscribe_universe(uint16_t universe)
 {
-    if (!sacn_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (!sacn_state.running) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (universe < 1 || universe > 63999) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(sacn_state.mutex, portMAX_DELAY);
-    
-    // Find subscription
-    int found_index = -1;
-    for (int i = 0; i < sacn_state.subscription_count; i++) {
-        if (sacn_state.subscriptions[i].universe == universe &&
-            sacn_state.subscriptions[i].subscribed) {
-            found_index = i;
-            break;
+    if (!s_sacn.initialized) return ESP_ERR_INVALID_STATE;
+    esp_err_t ret = ESP_ERR_NOT_FOUND;
+    xSemaphoreTake(s_sacn.mutex, portMAX_DELAY);
+    for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
+        if (s_sacn.subs[i].universe == universe) {
+            leave_group(&s_sacn.subs[i]);
+            s_sacn.subs[i].universe = 0;
+            ESP_LOGI(TAG, "Left universe %u", universe);
+            ret = ESP_OK;
         }
     }
-    
-    if (found_index < 0) {
-        ESP_LOGW(TAG, "Not subscribed to universe %d", universe);
-        xSemaphoreGive(sacn_state.mutex);
-        return ESP_ERR_NOT_FOUND;
+    xSemaphoreGive(s_sacn.mutex);
+    return ret;
+}
+
+esp_err_t sacn_receiver_set_universes(const uint16_t *universes, uint8_t count)
+{
+    if (!s_sacn.initialized) return ESP_ERR_INVALID_STATE;
+
+    /* Leave groups that are no longer wanted */
+    uint16_t current[SACN_MAX_UNIVERSES];
+    xSemaphoreTake(s_sacn.mutex, portMAX_DELAY);
+    for (int i = 0; i < SACN_MAX_UNIVERSES; i++) current[i] = s_sacn.subs[i].universe;
+    xSemaphoreGive(s_sacn.mutex);
+
+    for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
+        if (!current[i]) continue;
+        bool keep = false;
+        for (uint8_t k = 0; k < count; k++) {
+            if (universes[k] == current[i]) keep = true;
+        }
+        if (!keep) sacn_receiver_unsubscribe_universe(current[i]);
     }
-    
-    // Leave multicast group
-    universe_subscription_t *sub = &sacn_state.subscriptions[found_index];
-    if (setsockopt(sacn_state.socket_fd, IPPROTO_IP, IP_DROP_MEMBERSHIP,
-                  &sub->mreq, sizeof(struct ip_mreq)) < 0) {
-        ESP_LOGW(TAG, "Failed to leave multicast group: %d", errno);
+
+    esp_err_t ret = ESP_OK;
+    for (uint8_t k = 0; k < count; k++) {
+        if (universes[k] >= 1 && universes[k] <= 63999) {
+            esp_err_t e = sacn_receiver_subscribe_universe(universes[k]);
+            if (e != ESP_OK) ret = e;
+        }
     }
-    
-    // Remove from array (shift remaining items)
-    for (int i = found_index; i < sacn_state.subscription_count - 1; i++) {
-        sacn_state.subscriptions[i] = sacn_state.subscriptions[i + 1];
+    return ret;
+}
+
+esp_err_t sacn_receiver_refresh_subscriptions(void)
+{
+    if (!s_sacn.initialized) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_sacn.mutex, portMAX_DELAY);
+    for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
+        if (s_sacn.subs[i].universe) {
+            join_group(&s_sacn.subs[i], true);
+        }
     }
-    
-    sacn_state.subscription_count--;
-    
-    ESP_LOGI(TAG, "Unsubscribed from universe %d", universe);
-    
-    xSemaphoreGive(sacn_state.mutex);
-    
+    xSemaphoreGive(s_sacn.mutex);
     return ESP_OK;
+}
+
+void sacn_receiver_set_local_cid(const uint8_t cid[16])
+{
+    if (cid) {
+        memcpy(s_sacn.local_cid, cid, 16);
+        s_sacn.have_local_cid = true;
+    } else {
+        s_sacn.have_local_cid = false;
+    }
 }
 
 esp_err_t sacn_receiver_set_callback(sacn_dmx_callback_t callback, void *user_data)
 {
-    if (!sacn_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (!callback) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(sacn_state.mutex, portMAX_DELAY);
-    sacn_state.dmx_callback = callback;
-    sacn_state.dmx_callback_user_data = user_data;
-    xSemaphoreGive(sacn_state.mutex);
-    
-    ESP_LOGI(TAG, "DMX callback registered");
-    
+    if (!s_sacn.initialized) return ESP_ERR_INVALID_STATE;
+    s_sacn.cb_data = user_data;
+    s_sacn.cb = callback;
+    return ESP_OK;
+}
+
+esp_err_t sacn_receiver_set_sync_callback(sacn_sync_callback_t callback, void *user_data)
+{
+    if (!s_sacn.initialized) return ESP_ERR_INVALID_STATE;
+    s_sacn.sync_cb = NULL;
+    s_sacn.sync_data = user_data;
+    s_sacn.sync_cb = callback;
     return ESP_OK;
 }
 
 esp_err_t sacn_receiver_get_stats(sacn_stats_t *stats)
 {
-    if (!sacn_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (!stats) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(sacn_state.mutex, portMAX_DELAY);
-    memcpy(stats, &sacn_state.stats, sizeof(sacn_stats_t));
-    xSemaphoreGive(sacn_state.mutex);
-    
+    if (!s_sacn.initialized) return ESP_ERR_INVALID_STATE;
+    if (!stats) return ESP_ERR_INVALID_ARG;
+    *stats = s_sacn.stats;   /* 32-bit counters, written by one task only */
     return ESP_OK;
 }
 
 bool sacn_receiver_is_running(void)
 {
-    return sacn_state.running;
+    return s_sacn.running;
 }
 
 uint8_t sacn_receiver_get_subscription_count(void)
 {
-    return sacn_state.subscription_count;
-}
-
-// ============================================================================
-// Internal Functions
-// ============================================================================
-
-/**
- * @brief sACN receiver task
- */
-static void sacn_receive_task(void *arg)
-{
-    uint8_t buffer[SACN_MAX_PACKET_SIZE];
-    struct sockaddr_in src_addr;
-    socklen_t src_addr_len = sizeof(src_addr);
-    
-    ESP_LOGI(TAG, "sACN receiver task started");
-    
-    while (sacn_state.running) {
-        // Receive packet
-        int len = recvfrom(sacn_state.socket_fd, buffer, sizeof(buffer), 0,
-                          (struct sockaddr *)&src_addr, &src_addr_len);
-        
-        if (len < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Timeout, continue
-                continue;
-            }
-            
-            if (!sacn_state.running) {
-                // Socket closed, exit
-                break;
-            }
-            
-            ESP_LOGW(TAG, "Receive error: %d", errno);
-            continue;
-        }
-        
-        if (len == 0) {
-            continue;
-        }
-        
-        // Update statistics
-        sacn_state.stats.packets_received++;
-        
-        // Process packet
-        esp_err_t ret = process_sacn_packet(buffer, len, &src_addr);
-        if (ret != ESP_OK) {
-            sacn_state.stats.invalid_packets++;
-        }
+    if (!s_sacn.initialized) return 0;
+    uint8_t n = 0;
+    xSemaphoreTake(s_sacn.mutex, portMAX_DELAY);
+    for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
+        if (s_sacn.subs[i].universe && s_sacn.subs[i].joined) n++;
     }
-    
-    ESP_LOGI(TAG, "sACN receiver task stopped");
-    vTaskDelete(NULL);
-}
-
-/**
- * @brief Process received sACN packet
- */
-static esp_err_t process_sacn_packet(const uint8_t *buffer, size_t length,
-                                     const struct sockaddr_in *src_addr)
-{
-    // Validate header
-    if (!validate_sacn_header(buffer, length)) {
-        return ESP_FAIL;
-    }
-    
-    const sacn_packet_t *packet = (const sacn_packet_t *)buffer;
-    
-    // Process data packet
-    sacn_state.stats.data_packets++;
-    return process_sacn_data(packet, src_addr);
-}
-
-/**
- * @brief Process sACN data packet
- */
-static esp_err_t process_sacn_data(const sacn_packet_t *packet,
-                                   const struct sockaddr_in *src_addr)
-{
-    // Extract universe (big endian / network byte order)
-    uint16_t universe = ntohs(packet->framing.universe);
-    
-    // Check if preview data
-    bool is_preview = (packet->framing.options & SACN_OPT_PREVIEW) != 0;
-    if (is_preview) {
-        sacn_state.stats.preview_packets++;
-    }
-    
-    // Extract priority
-    uint8_t priority = packet->framing.priority;
-    
-    // Extract sequence number
-    uint8_t sequence = packet->framing.sequence_number;
-    
-    // Check sequence number for this universe (optional - for statistics)
-    for (int i = 0; i < sacn_state.subscription_count; i++) {
-        if (sacn_state.subscriptions[i].universe == universe) {
-            uint8_t expected = sacn_state.subscriptions[i].last_sequence + 1;
-            if (sequence != expected && sacn_state.subscriptions[i].last_sequence != 0) {
-                sacn_state.stats.sequence_errors++;
-            }
-            sacn_state.subscriptions[i].last_sequence = sequence;
-            break;
-        }
-    }
-    
-    // Extract source name (null terminated)
-    char source_name[65];
-    strncpy(source_name, packet->framing.source_name, 64);
-    source_name[64] = '\0';
-    
-    // Extract source IP address
-    uint32_t source_ip = src_addr->sin_addr.s_addr;
-    
-    // Call callback if registered
-    if (sacn_state.dmx_callback) {
-        sacn_state.dmx_callback(universe, packet->dmp.data, priority, sequence,
-                               is_preview, source_name, source_ip,
-                               sacn_state.dmx_callback_user_data);
-    }
-    
-    return ESP_OK;
+    xSemaphoreGive(s_sacn.mutex);
+    return n;
 }

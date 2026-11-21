@@ -71,23 +71,42 @@ esp_err_t storage_read_file(const char *path, char *buffer, size_t *size)
 esp_err_t storage_write_file(const char *path, const char *data, size_t size)
 {
     char full_path[128];
+    char tmp_path[136];
     snprintf(full_path, sizeof(full_path), "%s/%s", STORAGE_BASE_PATH, path);
-    
-    FILE *f = fopen(full_path, "w");
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", full_path);
+
+    /* Write to a temporary file and rename it over the target. LittleFS
+     * rename is atomic, so a power cut mid-save leaves either the old or the
+     * new file intact, never a truncated one. */
+    FILE *f = fopen(tmp_path, "w");
     if (!f) {
-        ESP_LOGE(TAG, "Failed to create file: %s", full_path);
+        ESP_LOGE(TAG, "Failed to create file: %s", tmp_path);
         return ESP_FAIL;
     }
-    
+
     size_t written = fwrite(data, 1, size, f);
-    fclose(f);
-    
-    if (written != size) {
-        ESP_LOGE(TAG, "Write size mismatch: %d != %d", written, size);
+    bool ok = (written == size) && (fflush(f) == 0) && (fsync(fileno(f)) == 0);
+    if (fclose(f) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        ESP_LOGE(TAG, "Write failed for %s (%u of %u bytes)", path,
+                 (unsigned)written, (unsigned)size);
+        unlink(tmp_path);
         return ESP_FAIL;
     }
-    
-    ESP_LOGI(TAG, "Wrote %d bytes to %s", written, path);
+
+    if (rename(tmp_path, full_path) != 0) {
+        /* Some VFS layers refuse to rename over an existing file */
+        unlink(full_path);
+        if (rename(tmp_path, full_path) != 0) {
+            ESP_LOGE(TAG, "Failed to rename %s", tmp_path);
+            unlink(tmp_path);
+            return ESP_FAIL;
+        }
+    }
+
+    ESP_LOGI(TAG, "Wrote %u bytes to %s", (unsigned)written, path);
     return ESP_OK;
 }
 

@@ -1,17 +1,6 @@
 /**
  * @file merge_engine.c
- * @brief Merge Engine Implementation
- * 
- * This component merges DMX data from multiple sources using various algorithms.
- * It supports HTP, LTP, LAST, BACKUP, and DISABLE modes with timeout management.
- * 
- * Thread Safety:
- * - All public APIs are thread-safe using mutexes
- * - Merge operations are atomic per port
- * 
- * Memory Usage:
- * - ~4KB per port (context + sources)
- * - Total: ~8KB for 2 ports
+ * @brief Multi-source DMX merge engine — see merge_engine.h for the model.
  */
 
 #include "merge_engine.h"
@@ -21,685 +10,821 @@
 #include "freertos/semphr.h"
 #include <string.h>
 #include <inttypes.h>
-#include <inttypes.h>
 
 static const char *TAG = "merge_engine";
 
-/**
- * @brief Merge context for one port
- */
-typedef struct {
-    uint8_t port_num;              /**< Port number (1 or 2) */
-    uint16_t universe;             /**< Target universe */
-    merge_mode_t mode;             /**< Merge mode */
-    uint32_t timeout_us;           /**< Timeout in microseconds */
-    
-    // Source tracking
-    dmx_source_data_t sources[MERGE_MAX_SOURCES];
-    uint8_t source_count;
-    
-    // Output buffer
-    uint8_t merged_data[512];
-    uint64_t last_merge_time_us;
-    bool output_active;
-    
-    // Statistics
-    merge_stats_t stats;
-    
-    // Primary source index (for BACKUP mode)
-    int8_t primary_source_index;
-} merge_context_t;
+#define MERGE_PORTS CONFIG_DMX_PORTS
 
-/**
- * @brief Module state
- */
+/* Per-address priority (0xDD) is considered stale after this long without a
+ * 0xDD packet; the source then reverts to its packet priority. */
+#define PAP_TIMEOUT_US   2500000
+/* A new sACN source joining a port that already has sources is held back for
+ * up to this long, waiting for a possible 0xDD packet, so it cannot flash
+ * levels into slots it does not actually source (E1.31 recommendation). */
+#define PAP_WAIT_US      1500000
+
+#define NO_SOURCE 0xFF
+
+/* Art-Net 4: back to non-synchronous output after 4 s without ArtSync */
+#define ARTNET_SYNC_TIMEOUT_US  4000000
+/* E1.31 11.2.2: synchronization is lost after E131_NETWORK_DATA_LOSS_TIMEOUT */
+#define SACN_SYNC_TIMEOUT_US    2500000
+
+typedef struct {
+    bool in_use;
+    source_protocol_t protocol;
+    uint32_t ip;
+    uint8_t cid[16];
+    char name[64];
+    uint8_t priority;          /* packet (universe) priority */
+    bool backup;
+    bool seq_valid;
+    uint8_t seq;
+    bool has_levels;
+    bool contributing;
+    uint8_t levels[512];
+    uint8_t pap[512];
+    int64_t first_seen_us;
+    int64_t last_rx_us;        /* last 0x00 (levels) packet */
+    int64_t pap_rx_us;         /* last 0xDD packet, 0 = never */
+    int64_t pending_until_us;
+    uint32_t packets;
+    uint16_t sync_address;     /* sACN synchronization universe, 0 = none */
+    bool force_sync;           /* sACN Force_Synchronization option */
+} source_t;
+
+typedef struct {
+    SemaphoreHandle_t mutex;
+    merge_mode_t mode;
+    protocol_mode_t protocol_mode;
+    loss_behavior_t loss;      /* failsafe look once every source is lost */
+    uint8_t loss_scene[512];   /* LOSS_SCENE levels */
+    bool had_net;              /* a source has been seen since power-on */
+    bool failsafe;             /* currently showing the failsafe look */
+    int64_t timeout_us;
+
+    source_t sources[MERGE_MAX_SOURCES];
+    uint8_t ltp_src[512];      /* LTP: source index that last changed each slot */
+    uint8_t owner;             /* owner-based modes: current owner index */
+
+    uint8_t last_net[512];     /* last frame produced from network sources */
+    bool net_active;
+
+    uint8_t local[512];
+    bool local_active;
+
+    /* Synchronous output: the network layer only changes when a sync
+     * packet latches it into held[] */
+    merge_sync_t sync;
+    uint32_t sync_ip;          /* Art-Net: controller sending ArtSync */
+    uint16_t sync_addr;        /* sACN: synchronization universe */
+    int64_t last_sync_us;
+    uint8_t held[512];
+
+    merge_stats_t stats;
+} port_ctx_t;
+
 static struct {
     bool initialized;
-    merge_context_t ports[2];      /**< Contexts for port 1 and 2 */
-    SemaphoreHandle_t mutex;
-} merge_state = {
-    .initialized = false,
-};
+    port_ctx_t port[MERGE_PORTS];
+} s_merge;
 
-// Forward declarations
-static void perform_merge(merge_context_t *ctx);
-static void merge_htp(merge_context_t *ctx);
-static void merge_ltp(merge_context_t *ctx);
-static void merge_last(merge_context_t *ctx);
-static void merge_backup(merge_context_t *ctx);
-static void merge_disable(merge_context_t *ctx);
-static bool is_source_timeout(const dmx_source_data_t *source, uint64_t timeout_us);
-static int find_or_create_source(merge_context_t *ctx, uint32_t source_ip, 
-                                 source_protocol_t protocol);
-static void cleanup_timeout_sources(merge_context_t *ctx);
-
-/**
- * @brief Get current time in microseconds
- */
-static inline uint64_t get_time_us(void)
+static port_ctx_t *ctx_for(uint8_t port)
 {
-    return esp_timer_get_time();
-}
-
-/**
- * @brief Check if source has timed out
- */
-static bool is_source_timeout(const dmx_source_data_t *source, uint64_t timeout_us)
-{
-    if (!source->is_valid) {
-        return true;
-    }
-    
-    uint64_t now = get_time_us();
-    uint64_t elapsed = now - source->timestamp_us;
-    
-    return elapsed > timeout_us;
-}
-
-/**
- * @brief Count active (non-timeout) sources
- */
-static uint8_t count_active_sources(merge_context_t *ctx)
-{
-    uint8_t count = 0;
-    for (int i = 0; i < ctx->source_count; i++) {
-        if (!is_source_timeout(&ctx->sources[i], ctx->timeout_us)) {
-            count++;
-        }
-    }
-    return count;
-}
-
-/**
- * @brief Find or create source entry
- */
-static int find_or_create_source(merge_context_t *ctx, uint32_t source_ip,
-                                source_protocol_t protocol)
-{
-    // Try to find existing source by IP and protocol
-    for (int i = 0; i < ctx->source_count; i++) {
-        if (ctx->sources[i].source_ip == source_ip &&
-            ctx->sources[i].protocol == protocol) {
-            return i;
-        }
-    }
-    
-    // Try to reuse timeout source slot
-    for (int i = 0; i < ctx->source_count; i++) {
-        if (is_source_timeout(&ctx->sources[i], ctx->timeout_us)) {
-            // Reuse this slot
-            memset(&ctx->sources[i], 0, sizeof(dmx_source_data_t));
-            return i;
-        }
-    }
-    
-    // Create new source if space available
-    if (ctx->source_count < MERGE_MAX_SOURCES) {
-        int index = ctx->source_count;
-        ctx->source_count++;
-        memset(&ctx->sources[index], 0, sizeof(dmx_source_data_t));
-        return index;
-    }
-    
-    return -1;  // No space available
-}
-
-/**
- * @brief Cleanup timeout sources
- */
-static void cleanup_timeout_sources(merge_context_t *ctx)
-{
-    for (int i = 0; i < ctx->source_count; i++) {
-        if (is_source_timeout(&ctx->sources[i], ctx->timeout_us)) {
-            if (ctx->sources[i].is_valid) {
-                ctx->stats.source_timeouts++;
-                ctx->sources[i].is_valid = false;
-            }
-        }
-    }
-}
-
-/**
- * @brief Get port context
- */
-static merge_context_t* get_port_context(uint8_t port)
-{
-    if (port < 1 || port > 2) {
+    if (!s_merge.initialized || port < 1 || port > MERGE_PORTS) {
         return NULL;
     }
-    return &merge_state.ports[port - 1];
+    return &s_merge.port[port - 1];
+}
+
+static const char *proto_name(source_protocol_t p)
+{
+    switch (p) {
+        case SOURCE_PROTOCOL_ARTNET: return "Art-Net";
+        case SOURCE_PROTOCOL_SACN:   return "sACN";
+        case SOURCE_PROTOCOL_DMX_IN: return "DMX-in";
+        default:                     return "?";
+    }
+}
+
+static void log_source(const char *what, uint8_t port, const source_t *s)
+{
+    uint32_t ip = s->ip;
+    ESP_LOGI(TAG, "Port %u: %s %s source %u.%u.%u.%u \"%s\" prio %u%s",
+             port, what, proto_name(s->protocol),
+             (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
+             (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF),
+             s->name, s->priority, s->backup ? " (backup)" : "");
+}
+
+static void remove_source(port_ctx_t *ctx, uint8_t idx)
+{
+    for (int c = 0; c < 512; c++) {
+        if (ctx->ltp_src[c] == idx) {
+            ctx->ltp_src[c] = NO_SOURCE;
+        }
+    }
+    if (ctx->owner == idx) {
+        ctx->owner = NO_SOURCE;
+    }
+    memset(&ctx->sources[idx], 0, sizeof(source_t));
+}
+
+static void expire_sources(port_ctx_t *ctx, uint8_t port, int64_t now)
+{
+    for (uint8_t i = 0; i < MERGE_MAX_SOURCES; i++) {
+        source_t *s = &ctx->sources[i];
+        if (s->in_use && (now - s->last_rx_us) > ctx->timeout_us) {
+            log_source("lost (timeout)", port, s);
+            ctx->stats.source_timeouts++;
+            remove_source(ctx, i);
+        }
+    }
+}
+
+static bool protocol_allowed(protocol_mode_t pm, source_protocol_t p)
+{
+    if (p == SOURCE_PROTOCOL_DMX_IN) return true;
+    switch (pm) {
+        case PROTOCOL_ARTNET_ONLY: return p == SOURCE_PROTOCOL_ARTNET;
+        case PROTOCOL_SACN_ONLY:   return p == SOURCE_PROTOCOL_SACN;
+        default:                   return true;
+    }
+}
+
+static int find_source(port_ctx_t *ctx, const merge_input_t *in)
+{
+    for (int i = 0; i < MERGE_MAX_SOURCES; i++) {
+        const source_t *s = &ctx->sources[i];
+        if (!s->in_use || s->protocol != in->protocol) continue;
+        if (in->protocol == SOURCE_PROTOCOL_SACN && in->cid) {
+            if (memcmp(s->cid, in->cid, 16) == 0) return i;
+        } else if (s->ip == in->source_ip) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int alloc_source(port_ctx_t *ctx)
+{
+    for (int i = 0; i < MERGE_MAX_SOURCES; i++) {
+        if (!ctx->sources[i].in_use) return i;
+    }
+    return -1;
+}
+
+static inline bool pap_current(const source_t *s, int64_t now)
+{
+    return s->pap_rx_us != 0 && (now - s->pap_rx_us) < PAP_TIMEOUT_US;
 }
 
 // ============================================================================
-// Public API Implementation
+// Init / config
 // ============================================================================
 
 esp_err_t merge_engine_init(void)
 {
-    if (merge_state.initialized) {
-        ESP_LOGW(TAG, "Already initialized");
-        return ESP_ERR_INVALID_STATE;
+    if (s_merge.initialized) {
+        return ESP_OK;
     }
-    
-    ESP_LOGI(TAG, "Initializing merge engine...");
-    
-    // Create mutex
-    merge_state.mutex = xSemaphoreCreateMutex();
-    if (!merge_state.mutex) {
-        ESP_LOGE(TAG, "Failed to create mutex");
-        return ESP_ERR_NO_MEM;
-    }
-    
-    // Initialize port contexts
-    for (int i = 0; i < 2; i++) {
-        merge_context_t *ctx = &merge_state.ports[i];
-        memset(ctx, 0, sizeof(merge_context_t));
-        ctx->port_num = i + 1;
-        ctx->mode = MERGE_MODE_HTP;  // Default mode
+    memset(&s_merge, 0, sizeof(s_merge));
+    for (int p = 0; p < MERGE_PORTS; p++) {
+        port_ctx_t *ctx = &s_merge.port[p];
+        ctx->mutex = xSemaphoreCreateMutex();
+        if (!ctx->mutex) {
+            ESP_LOGE(TAG, "mutex alloc failed");
+            return ESP_ERR_NO_MEM;
+        }
+        ctx->mode = MERGE_MODE_HTP;
+        ctx->protocol_mode = PROTOCOL_MERGE_BOTH;
+        ctx->loss = LOSS_HOLD_LAST_LOOK;
         ctx->timeout_us = MERGE_DEFAULT_TIMEOUT_US;
-        ctx->primary_source_index = -1;
-        ctx->output_active = false;
+        ctx->owner = NO_SOURCE;
+        memset(ctx->ltp_src, NO_SOURCE, sizeof(ctx->ltp_src));
     }
-    
-    merge_state.initialized = true;
-    ESP_LOGI(TAG, "Merge engine initialized successfully");
-    
+    s_merge.initialized = true;
+    ESP_LOGI(TAG, "Merge engine initialised (%d sources/port)", MERGE_MAX_SOURCES);
     return ESP_OK;
 }
 
 esp_err_t merge_engine_deinit(void)
 {
-    if (!merge_state.initialized) {
+    if (!s_merge.initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
-    ESP_LOGI(TAG, "Deinitializing merge engine...");
-    
-    // Delete mutex
-    if (merge_state.mutex) {
-        vSemaphoreDelete(merge_state.mutex);
-        merge_state.mutex = NULL;
+    for (int p = 0; p < MERGE_PORTS; p++) {
+        if (s_merge.port[p].mutex) {
+            vSemaphoreDelete(s_merge.port[p].mutex);
+        }
     }
-    
-    merge_state.initialized = false;
-    ESP_LOGI(TAG, "Merge engine deinitialized");
-    
+    memset(&s_merge, 0, sizeof(s_merge));
     return ESP_OK;
 }
 
 esp_err_t merge_engine_config(uint8_t port, merge_mode_t mode, uint32_t timeout_ms)
 {
-    if (!merge_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    if (mode > MERGE_MODE_DISABLE) return ESP_ERR_INVALID_ARG;
+    if (timeout_ms < 500) timeout_ms = 500;
+    if (timeout_ms > 60000) timeout_ms = 60000;
+
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    if (ctx->mode != mode) {
+        memset(ctx->ltp_src, NO_SOURCE, sizeof(ctx->ltp_src));
+        ctx->owner = NO_SOURCE;
     }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    
     ctx->mode = mode;
-    
-    if (timeout_ms > 0) {
-        ctx->timeout_us = timeout_ms * 1000;
+    ctx->timeout_us = (int64_t)timeout_ms * 1000;
+    xSemaphoreGive(ctx->mutex);
+
+    ESP_LOGI(TAG, "Port %u: merge mode %d, timeout %" PRIu32 " ms", port, mode, timeout_ms);
+    return ESP_OK;
+}
+
+esp_err_t merge_engine_set_protocol_mode(uint8_t port, protocol_mode_t mode)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx || mode > PROTOCOL_MERGE_BOTH) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    ctx->protocol_mode = mode;
+    /* Drop sources the new filter no longer accepts */
+    for (uint8_t i = 0; i < MERGE_MAX_SOURCES; i++) {
+        if (ctx->sources[i].in_use &&
+            !protocol_allowed(mode, ctx->sources[i].protocol)) {
+            remove_source(ctx, i);
+        }
+    }
+    xSemaphoreGive(ctx->mutex);
+    return ESP_OK;
+}
+
+esp_err_t merge_engine_set_hold_last_look(uint8_t port, bool hold)
+{
+    return merge_engine_set_loss_behavior(port, hold ? LOSS_HOLD_LAST_LOOK : LOSS_BLACKOUT, NULL);
+}
+
+esp_err_t merge_engine_set_loss_behavior(uint8_t port, loss_behavior_t loss, const uint8_t *scene)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx || loss > LOSS_LAST) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    ctx->loss = loss;
+    if (scene) memcpy(ctx->loss_scene, scene, 512);
+    else memset(ctx->loss_scene, 0, 512);
+    xSemaphoreGive(ctx->mutex);
+    return ESP_OK;
+}
+
+bool merge_engine_in_failsafe(uint8_t port)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    return ctx && ctx->failsafe;
+}
+
+// ============================================================================
+// Input
+// ============================================================================
+
+esp_err_t merge_engine_push(uint8_t port, const merge_input_t *in)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx || !in || !in->data || in->length == 0 || in->length > 512) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (in->start_code != 0x00 && in->start_code != 0xDD) {
+        return ESP_OK;  /* other alternate start codes are not merged */
+    }
+
+    int64_t now = esp_timer_get_time();
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+
+    if (!protocol_allowed(ctx->protocol_mode, in->protocol)) {
+        ctx->stats.packets_filtered++;
+        xSemaphoreGive(ctx->mutex);
+        return ESP_OK;
+    }
+
+    int idx = find_source(ctx, in);
+
+    if (in->terminated) {
+        if (idx >= 0) {
+            log_source("terminated", port, &ctx->sources[idx]);
+            remove_source(ctx, (uint8_t)idx);
+        }
+        xSemaphoreGive(ctx->mutex);
+        return ESP_OK;
+    }
+
+    bool is_new = false;
+    if (idx < 0) {
+        idx = alloc_source(ctx);
+        if (idx < 0) {
+            expire_sources(ctx, port, now);
+            idx = alloc_source(ctx);
+        }
+        if (idx < 0) {
+            ctx->stats.sources_rejected++;
+            xSemaphoreGive(ctx->mutex);
+            return ESP_ERR_NO_MEM;
+        }
+        source_t *s = &ctx->sources[idx];
+        memset(s, 0, sizeof(*s));
+        s->in_use = true;
+        s->protocol = in->protocol;
+        s->ip = in->source_ip;
+        if (in->cid) memcpy(s->cid, in->cid, 16);
+        s->first_seen_us = now;
+        s->last_rx_us = now;
+        s->backup = in->backup;
+
+        /* Hold a new sACN source back briefly if it would merge with others */
+        if (in->protocol == SOURCE_PROTOCOL_SACN) {
+            for (int i = 0; i < MERGE_MAX_SOURCES; i++) {
+                if (i != idx && ctx->sources[i].in_use && ctx->sources[i].has_levels) {
+                    s->pending_until_us = now + PAP_WAIT_US;
+                    break;
+                }
+            }
+        }
+        is_new = true;
+    }
+
+    source_t *s = &ctx->sources[idx];
+
+    /* E1.31 6.7.2: discard if -20 < (new - last) <= 0 */
+    if (in->check_sequence) {
+        if (s->seq_valid) {
+            int8_t diff = (int8_t)(in->sequence - s->seq);
+            if (diff <= 0 && diff > -20) {
+                ctx->stats.sequence_drops++;
+                xSemaphoreGive(ctx->mutex);
+                return ESP_OK;
+            }
+        }
+        s->seq = in->sequence;
+        s->seq_valid = true;
+    }
+
+    if (in->name) {
+        strncpy(s->name, in->name, sizeof(s->name) - 1);
+        s->name[sizeof(s->name) - 1] = '\0';
+    }
+    s->packets++;
+
+    if (in->start_code == 0xDD) {
+        memset(s->pap, 0, sizeof(s->pap));
+        memcpy(s->pap, in->data, in->length);
+        s->pap_rx_us = now;
     } else {
-        ctx->timeout_us = MERGE_DEFAULT_TIMEOUT_US;
+        bool first_levels = !s->has_levels;
+        s->priority = in->priority;
+        s->backup = in->backup;
+        s->last_rx_us = now;
+        s->sync_address = in->protocol == SOURCE_PROTOCOL_SACN ? in->sync_address : 0;
+        s->force_sync = in->force_sync;
+
+        if (ctx->mode == MERGE_MODE_LTP) {
+            for (int c = 0; c < 512; c++) {
+                uint8_t v = (c < in->length) ? in->data[c] : 0;
+                if (first_levels || v != s->levels[c]) {
+                    ctx->ltp_src[c] = (uint8_t)idx;
+                }
+            }
+        }
+        memcpy(s->levels, in->data, in->length);
+        if (in->length < 512) {
+            memset(s->levels + in->length, 0, 512 - in->length);
+        }
+        s->has_levels = true;
+        if (first_levels || is_new) {
+            log_source("new", port, s);
+        }
     }
-    
-    ESP_LOGI(TAG, "Port %d configured: mode=%d, timeout=%lu ms", 
-             port, mode, ctx->timeout_us / 1000);
-    
-    xSemaphoreGive(merge_state.mutex);
-    
+
+    xSemaphoreGive(ctx->mutex);
     return ESP_OK;
 }
 
-esp_err_t merge_engine_push_artnet(uint8_t port, uint16_t universe,
-                                   const uint8_t *data, uint8_t sequence,
-                                   uint32_t source_ip)
+// ============================================================================
+// Local layer
+// ============================================================================
+
+esp_err_t merge_engine_set_local(uint8_t port, const uint8_t *data)
 {
-    if (!merge_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx || !data) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    
-    // Find or create source
-    int source_idx = find_or_create_source(ctx, source_ip, SOURCE_PROTOCOL_ARTNET);
-    if (source_idx < 0) {
-        ESP_LOGW(TAG, "Port %d: Maximum sources reached", port);
-        xSemaphoreGive(merge_state.mutex);
-        return ESP_ERR_NO_MEM;
-    }
-    
-    // Update source data
-    dmx_source_data_t *source = &ctx->sources[source_idx];
-    memcpy(source->data, data, 512);
-    source->timestamp_us = get_time_us();
-    source->sequence = sequence;
-    source->priority = 100;  // Default priority for Art-Net
-    snprintf(source->source_name, sizeof(source->source_name), "ArtNet_%08" PRIX32, source_ip);
-    source->source_ip = source_ip;
-    source->protocol = SOURCE_PROTOCOL_ARTNET;
-    source->is_valid = true;
-    
-    xSemaphoreGive(merge_state.mutex);
-    
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx || !data) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    memcpy(ctx->local, data, 512);
+    ctx->local_active = true;
+    xSemaphoreGive(ctx->mutex);
     return ESP_OK;
 }
 
-esp_err_t merge_engine_push_sacn(uint8_t port, uint16_t universe,
-                                 const uint8_t *data, uint8_t sequence,
-                                 uint8_t priority, const char *source_name,
-                                 uint32_t source_ip)
+esp_err_t merge_engine_set_local_channel(uint8_t port, uint16_t channel, uint8_t value)
 {
-    if (!merge_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx || channel < 1 || channel > 512) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    ctx->local[channel - 1] = value;
+    ctx->local_active = true;
+    xSemaphoreGive(ctx->mutex);
+    return ESP_OK;
+}
+
+esp_err_t merge_engine_get_local(uint8_t port, uint8_t *data, bool *active)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    if (data) memcpy(data, ctx->local, 512);
+    if (active) *active = ctx->local_active;
+    xSemaphoreGive(ctx->mutex);
+    return ESP_OK;
+}
+
+esp_err_t merge_engine_clear_local(uint8_t port)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    memset(ctx->local, 0, 512);
+    ctx->local_active = false;
+    xSemaphoreGive(ctx->mutex);
+    return ESP_OK;
+}
+
+// ============================================================================
+// Output
+// ============================================================================
+
+/*
+ * Merge the network sources into @p out. Sets each source's contributing
+ * flag; returns false if no source contributes. Caller holds the mutex.
+ */
+static bool compute_net(port_ctx_t *ctx, uint8_t port, int64_t now, uint8_t *out)
+{
+    expire_sources(ctx, port, now);
+
+    /* ---- candidate selection ---- */
+    uint8_t cand[MERGE_MAX_SOURCES];
+    uint8_t n = 0;
+    bool have_artnet = false, have_sacn = false, have_primary = false;
+
+    for (uint8_t i = 0; i < MERGE_MAX_SOURCES; i++) {
+        source_t *s = &ctx->sources[i];
+        s->contributing = false;
+        if (!s->in_use || !s->has_levels) continue;
+        if (!protocol_allowed(ctx->protocol_mode, s->protocol)) continue;
+        if (s->pending_until_us && now < s->pending_until_us && !pap_current(s, now)) continue;
+        s->pending_until_us = 0;
+        cand[n++] = i;
+        if (s->protocol == SOURCE_PROTOCOL_ARTNET) have_artnet = true;
+        if (s->protocol == SOURCE_PROTOCOL_SACN)   have_sacn = true;
+        if (!s->backup) have_primary = true;
     }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx || !data) {
-        return ESP_ERR_INVALID_ARG;
+
+    /* Protocol priority modes: the preferred protocol hides the other one */
+    if ((ctx->protocol_mode == PROTOCOL_ARTNET_PRIORITY && have_artnet) ||
+        (ctx->protocol_mode == PROTOCOL_SACN_PRIORITY && have_sacn)) {
+        source_protocol_t drop = (ctx->protocol_mode == PROTOCOL_ARTNET_PRIORITY)
+                                 ? SOURCE_PROTOCOL_SACN : SOURCE_PROTOCOL_ARTNET;
+        uint8_t m = 0;
+        for (uint8_t k = 0; k < n; k++) {
+            if (ctx->sources[cand[k]].protocol != drop) cand[m++] = cand[k];
+        }
+        n = m;
     }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    
-    // Find or create source
-    int source_idx = find_or_create_source(ctx, source_ip, SOURCE_PROTOCOL_SACN);
-    if (source_idx < 0) {
-        ESP_LOGW(TAG, "Port %d: Maximum sources reached", port);
-        xSemaphoreGive(merge_state.mutex);
-        return ESP_ERR_NO_MEM;
+
+    /* Backup mode: primaries hide backups */
+    if (ctx->mode == MERGE_MODE_BACKUP && have_primary) {
+        uint8_t m = 0;
+        for (uint8_t k = 0; k < n; k++) {
+            if (!ctx->sources[cand[k]].backup) cand[m++] = cand[k];
+        }
+        n = m;
     }
-    
-    // Update source data
-    dmx_source_data_t *source = &ctx->sources[source_idx];
-    memcpy(source->data, data, 512);
-    source->timestamp_us = get_time_us();
-    source->sequence = sequence;
-    source->priority = priority;
-    if (source_name) {
-        strncpy(source->source_name, source_name, sizeof(source->source_name) - 1);
-        source->source_name[sizeof(source->source_name) - 1] = '\0';
+
+    ctx->stats.active_sources = n;
+    if (n == 0) {
+        return false;
+    }
+    ctx->stats.total_merges++;
+
+    if (ctx->mode == MERGE_MODE_HTP || ctx->mode == MERGE_MODE_LTP) {
+        bool use_pap[MERGE_MAX_SOURCES];
+        uint8_t uprio[MERGE_MAX_SOURCES];
+        for (uint8_t k = 0; k < n; k++) {
+            const source_t *s = &ctx->sources[cand[k]];
+            use_pap[k] = pap_current(s, now);
+            uprio[k] = s->priority ? s->priority : 1;
+            ctx->sources[cand[k]].contributing = true;
+        }
+        bool ltp = (ctx->mode == MERGE_MODE_LTP);
+        for (int c = 0; c < 512; c++) {
+            uint8_t best_p = 0, best_v = 0;
+            bool ltp_hit = false;
+            for (uint8_t k = 0; k < n; k++) {
+                const source_t *s = &ctx->sources[cand[k]];
+                uint8_t p = use_pap[k] ? s->pap[c] : uprio[k];
+                if (p == 0) continue;             /* slot not sourced */
+                uint8_t v = s->levels[c];
+                if (p > best_p) {
+                    best_p = p;
+                    best_v = v;
+                    ltp_hit = ltp && ctx->ltp_src[c] == cand[k];
+                } else if (p == best_p) {
+                    if (ltp && ctx->ltp_src[c] == cand[k]) {
+                        best_v = v;
+                        ltp_hit = true;
+                    } else if (!ltp_hit && v > best_v) {
+                        best_v = v;
+                    }
+                }
+            }
+            out[c] = best_v;
+        }
+        if (ltp) ctx->stats.ltp_merges++; else ctx->stats.htp_merges++;
     } else {
-        snprintf(source->source_name, sizeof(source->source_name), "sACN_%08" PRIX32, source_ip);
+        /* Owner modes: keep only the highest universe priority */
+        uint8_t top = 0;
+        for (uint8_t k = 0; k < n; k++) {
+            if (ctx->sources[cand[k]].priority > top) top = ctx->sources[cand[k]].priority;
+        }
+        uint8_t owner = NO_SOURCE;
+        for (uint8_t k = 0; k < n; k++) {
+            const source_t *s = &ctx->sources[cand[k]];
+            if (s->priority != top) continue;
+            if (owner == NO_SOURCE) { owner = cand[k]; continue; }
+            const source_t *o = &ctx->sources[owner];
+            if (ctx->mode == MERGE_MODE_LAST) {
+                if (s->last_rx_us > o->last_rx_us) owner = cand[k];
+            } else {
+                /* DISABLE / BACKUP: the longest-standing source keeps control */
+                if (s->first_seen_us < o->first_seen_us) owner = cand[k];
+            }
+        }
+        if (ctx->mode != MERGE_MODE_LAST && owner != ctx->owner &&
+            ctx->owner != NO_SOURCE) {
+            ctx->stats.backup_switches++;
+            log_source("now controlling", port, &ctx->sources[owner]);
+        }
+        ctx->owner = owner;
+        ctx->sources[owner].contributing = true;
+        memcpy(out, ctx->sources[owner].levels, 512);
+        if (ctx->mode == MERGE_MODE_LAST) ctx->stats.last_merges++;
     }
-    source->source_ip = source_ip;
-    source->protocol = SOURCE_PROTOCOL_SACN;
-    source->is_valid = true;
-    
-    xSemaphoreGive(merge_state.mutex);
-    
-    return ESP_OK;
+    return true;
 }
 
-esp_err_t merge_engine_push_dmx_in(uint8_t port, const uint8_t *data)
+/*
+ * Can the port's current output follow a sync packet of this kind?
+ * Art-Net: exactly one contributing source, Art-Net from @p ip (ArtSync is
+ * ignored while merging, and must come from the ArtDmx sender).
+ * sACN: every contributing source is sACN and names @p addr as its
+ * synchronization universe. *force is set if any of them asks to revert to
+ * unsynchronized output when sync is lost.
+ */
+static bool sync_eligible(const port_ctx_t *ctx, merge_sync_t kind, uint32_t ip,
+                          uint16_t addr, bool *force)
 {
-    if (!merge_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
+    int n = 0;
+    bool f = false;
+    for (int i = 0; i < MERGE_MAX_SOURCES; i++) {
+        const source_t *s = &ctx->sources[i];
+        if (!s->in_use || !s->contributing) continue;
+        n++;
+        if (kind == MERGE_SYNC_ARTNET) {
+            if (s->protocol != SOURCE_PROTOCOL_ARTNET || s->ip != ip) return false;
+        } else {
+            if (s->protocol != SOURCE_PROTOCOL_SACN || s->sync_address != addr) return false;
+            f |= s->force_sync;
+        }
     }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx || !data) {
-        return ESP_ERR_INVALID_ARG;
+    if (force) *force = f;
+    if (n == 0) return false;
+    return kind == MERGE_SYNC_SACN || n == 1;
+}
+
+static void sync_leave(port_ctx_t *ctx, uint8_t port, const char *why)
+{
+    if (ctx->sync != MERGE_SYNC_NONE) {
+        ESP_LOGI(TAG, "Port %u: %s sync off (%s)", port,
+                 ctx->sync == MERGE_SYNC_ARTNET ? "Art-Net" : "sACN", why);
     }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    
-    // DMX input always uses source IP 0 and index 0
-    int source_idx = find_or_create_source(ctx, 0, SOURCE_PROTOCOL_DMX_IN);
-    if (source_idx < 0) {
-        ESP_LOGW(TAG, "Port %d: Maximum sources reached", port);
-        xSemaphoreGive(merge_state.mutex);
-        return ESP_ERR_NO_MEM;
-    }
-    
-    // Update source data
-    dmx_source_data_t *source = &ctx->sources[source_idx];
-    memcpy(source->data, data, 512);
-    source->timestamp_us = get_time_us();
-    source->sequence = 0;
-    source->priority = 100;
-    snprintf(source->source_name, sizeof(source->source_name), "DMX_IN_%d", port);
-    source->source_ip = 0;
-    source->protocol = SOURCE_PROTOCOL_DMX_IN;
-    source->is_valid = true;
-    
-    xSemaphoreGive(merge_state.mutex);
-    
-    return ESP_OK;
+    ctx->sync = MERGE_SYNC_NONE;
 }
 
 esp_err_t merge_engine_get_output(uint8_t port, uint8_t *data)
 {
-    if (!merge_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx || !data) return ESP_ERR_INVALID_ARG;
+
+    int64_t now = esp_timer_get_time();
+    uint8_t out[512];
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+
+    bool net_active = compute_net(ctx, port, now, out);
+
+    if (ctx->sync != MERGE_SYNC_NONE) {
+        bool force = false;
+        if (!net_active ||
+            !sync_eligible(ctx, ctx->sync, ctx->sync_ip, ctx->sync_addr, &force)) {
+            sync_leave(ctx, port, net_active ? "sources changed" : "no sources");
+        } else if (ctx->sync == MERGE_SYNC_ARTNET &&
+                   now - ctx->last_sync_us > ARTNET_SYNC_TIMEOUT_US) {
+            sync_leave(ctx, port, "no ArtSync for 4 s");
+        } else if (ctx->sync == MERGE_SYNC_SACN && force &&
+                   now - ctx->last_sync_us > SACN_SYNC_TIMEOUT_US) {
+            sync_leave(ctx, port, "sync packets lost");
+        }
+        /* sACN without Force_Synchronization keeps holding until sync resumes */
     }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx || !data) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    
-    // Cleanup timeout sources
-    cleanup_timeout_sources(ctx);
-    
-    // Perform merge
-    perform_merge(ctx);
-    
-    // Copy output data
-    if (ctx->output_active) {
-        memcpy(data, ctx->merged_data, 512);
-        xSemaphoreGive(merge_state.mutex);
-        return ESP_OK;
+
+    if (ctx->sync != MERGE_SYNC_NONE) {
+        memcpy(out, ctx->held, 512);
+        memcpy(ctx->last_net, out, 512);
+    } else if (net_active) {
+        memcpy(ctx->last_net, out, 512);
     } else {
-        // No active sources - return blackout
-        memset(data, 0, 512);
-        xSemaphoreGive(merge_state.mutex);
-        return ESP_ERR_TIMEOUT;
+        ctx->owner = NO_SOURCE;
+        /* Before any source was seen there is nothing to fail over from */
+        loss_behavior_t loss = ctx->had_net ? ctx->loss : LOSS_HOLD_LAST_LOOK;
+        switch (loss) {
+            case LOSS_HOLD_LAST_LOOK: memcpy(out, ctx->last_net, 512); break;
+            case LOSS_FULL:           memset(out, 255, 512); break;
+            case LOSS_SCENE:          memcpy(out, ctx->loss_scene, 512); break;
+            case LOSS_BLACKOUT:
+            default:
+                memset(out, 0, 512);
+                memset(ctx->last_net, 0, 512);
+                break;
+        }
     }
+    if (net_active) ctx->had_net = true;
+    bool failsafe = ctx->had_net && !net_active && ctx->sync == MERGE_SYNC_NONE;
+    if (failsafe != ctx->failsafe) {
+        ctx->failsafe = failsafe;
+        if (failsafe) {
+            static const char *names[] = {"hold last look", "zero", "full", "scene"};
+            ESP_LOGW(TAG, "Port %u: all sources lost, failsafe: %s", port,
+                     ctx->loss <= LOSS_LAST ? names[ctx->loss] : "?");
+        }
+    }
+
+    if (ctx->local_active) {
+        for (int c = 0; c < 512; c++) {
+            if (ctx->local[c] > out[c]) out[c] = ctx->local[c];
+        }
+    }
+
+    ctx->net_active = net_active;
+    xSemaphoreGive(ctx->mutex);
+
+    memcpy(data, out, 512);
+    return ESP_OK;
+}
+
+/* Latch every port that can follow this sync packet; returns the port mask */
+static uint8_t sync_latch(merge_sync_t kind, uint32_t ip, uint16_t addr)
+{
+    uint8_t mask = 0;
+    int64_t now = esp_timer_get_time();
+    for (uint8_t p = 1; p <= MERGE_PORTS; p++) {
+        port_ctx_t *ctx = ctx_for(p);
+        if (!ctx) continue;
+        uint8_t out[512];
+        xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+        if (compute_net(ctx, p, now, out) && sync_eligible(ctx, kind, ip, addr, NULL)) {
+            if (ctx->sync != kind || ctx->sync_ip != ip || ctx->sync_addr != addr) {
+                ESP_LOGI(TAG, "Port %u: %s sync on", p,
+                         kind == MERGE_SYNC_ARTNET ? "Art-Net" : "sACN");
+            }
+            memcpy(ctx->held, out, 512);
+            ctx->sync = kind;
+            ctx->sync_ip = ip;
+            ctx->sync_addr = addr;
+            ctx->last_sync_us = now;
+            ctx->stats.sync_frames++;
+            mask |= (uint8_t)(1u << (p - 1));
+        }
+        xSemaphoreGive(ctx->mutex);
+    }
+    return mask;
+}
+
+uint8_t merge_engine_artnet_sync(uint32_t source_ip)
+{
+    if (!s_merge.initialized) return 0;
+    return sync_latch(MERGE_SYNC_ARTNET, source_ip, 0);
+}
+
+uint8_t merge_engine_sacn_sync(uint16_t sync_universe)
+{
+    if (!s_merge.initialized || sync_universe == 0) return 0;
+    return sync_latch(MERGE_SYNC_SACN, 0, sync_universe);
+}
+
+merge_sync_t merge_engine_get_sync_state(uint8_t port)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx) return MERGE_SYNC_NONE;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    merge_sync_t st = ctx->sync;
+    xSemaphoreGive(ctx->mutex);
+    return st;
+}
+
+uint16_t merge_engine_sync_universes(uint8_t port, uint16_t *out, uint8_t max)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx || !out || max == 0) return 0;
+    uint16_t n = 0;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    for (int i = 0; i < MERGE_MAX_SOURCES && n < max; i++) {
+        const source_t *s = &ctx->sources[i];
+        if (!s->in_use || s->protocol != SOURCE_PROTOCOL_SACN || s->sync_address == 0) continue;
+        bool dup = false;
+        for (uint16_t k = 0; k < n; k++) dup |= out[k] == s->sync_address;
+        if (!dup) out[n++] = s->sync_address;
+    }
+    xSemaphoreGive(ctx->mutex);
+    return n;
 }
 
 bool merge_engine_is_output_active(uint8_t port)
 {
-    if (!merge_state.initialized) {
-        return false;
-    }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx) {
-        return false;
-    }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    cleanup_timeout_sources(ctx);
-    uint8_t active = count_active_sources(ctx);
-    xSemaphoreGive(merge_state.mutex);
-    
-    return active > 0;
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx) return false;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    bool active = ctx->net_active || ctx->local_active;
+    xSemaphoreGive(ctx->mutex);
+    return active;
 }
 
 esp_err_t merge_engine_blackout(uint8_t port)
 {
-    if (!merge_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    for (uint8_t i = 0; i < MERGE_MAX_SOURCES; i++) {
+        if (ctx->sources[i].in_use) remove_source(ctx, i);
     }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    
-    // Invalidate all sources
-    for (int i = 0; i < ctx->source_count; i++) {
-        ctx->sources[i].is_valid = false;
-    }
-    
-    // Clear output
-    memset(ctx->merged_data, 0, 512);
-    ctx->output_active = false;
-    
-    ESP_LOGI(TAG, "Port %d blackout", port);
-    
-    xSemaphoreGive(merge_state.mutex);
-    
+    memset(ctx->ltp_src, NO_SOURCE, sizeof(ctx->ltp_src));
+    memset(ctx->last_net, 0, 512);
+    memset(ctx->local, 0, 512);
+    ctx->local_active = false;
+    ctx->net_active = false;
+    ctx->sync = MERGE_SYNC_NONE;
+    xSemaphoreGive(ctx->mutex);
+    ESP_LOGI(TAG, "Port %u blackout", port);
     return ESP_OK;
 }
 
-uint8_t merge_engine_get_active_sources(uint8_t port, 
-                                       dmx_source_data_t *sources,
-                                       uint8_t max_sources)
+uint8_t merge_engine_get_sources(uint8_t port, merge_source_info_t *out, uint8_t max)
 {
-    if (!merge_state.initialized || !sources || max_sources == 0) {
-        return 0;
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx || !out || max == 0) return 0;
+    int64_t now = esp_timer_get_time();
+    uint8_t n = 0;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    for (uint8_t i = 0; i < MERGE_MAX_SOURCES && n < max; i++) {
+        const source_t *s = &ctx->sources[i];
+        if (!s->in_use) continue;
+        merge_source_info_t *o = &out[n++];
+        o->protocol = s->protocol;
+        o->source_ip = s->ip;
+        memcpy(o->name, s->name, sizeof(o->name));
+        o->priority = s->priority;
+        o->uses_pap = pap_current(s, now);
+        o->backup = s->backup;
+        o->contributing = s->contributing;
+        o->age_ms = (uint32_t)((now - s->last_rx_us) / 1000);
+        o->packets = s->packets;
     }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx) {
-        return 0;
-    }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    
-    cleanup_timeout_sources(ctx);
-    
-    uint8_t count = 0;
-    for (int i = 0; i < ctx->source_count && count < max_sources; i++) {
-        if (!is_source_timeout(&ctx->sources[i], ctx->timeout_us)) {
-            memcpy(&sources[count], &ctx->sources[i], sizeof(dmx_source_data_t));
-            count++;
-        }
-    }
-    
-    xSemaphoreGive(merge_state.mutex);
-    
-    return count;
+    xSemaphoreGive(ctx->mutex);
+    return n;
 }
 
 esp_err_t merge_engine_get_stats(uint8_t port, merge_stats_t *stats)
 {
-    if (!merge_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx || !stats) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    
-    memcpy(stats, &ctx->stats, sizeof(merge_stats_t));
-    stats->active_sources = count_active_sources(ctx);
-    
-    xSemaphoreGive(merge_state.mutex);
-    
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx || !stats) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    *stats = ctx->stats;
+    xSemaphoreGive(ctx->mutex);
     return ESP_OK;
 }
 
 esp_err_t merge_engine_reset_stats(uint8_t port)
 {
-    if (!merge_state.initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    merge_context_t *ctx = get_port_context(port);
-    if (!ctx) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    xSemaphoreTake(merge_state.mutex, portMAX_DELAY);
-    memset(&ctx->stats, 0, sizeof(merge_stats_t));
-    xSemaphoreGive(merge_state.mutex);
-    
-    ESP_LOGI(TAG, "Port %d statistics reset", port);
-    
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    uint32_t active = ctx->stats.active_sources;
+    memset(&ctx->stats, 0, sizeof(ctx->stats));
+    ctx->stats.active_sources = active;
+    xSemaphoreGive(ctx->mutex);
     return ESP_OK;
-}
-
-// ============================================================================
-// Internal Merge Functions
-// ============================================================================
-
-/**
- * @brief Perform merge based on configured mode
- */
-static void perform_merge(merge_context_t *ctx)
-{
-    ctx->stats.total_merges++;
-    ctx->stats.active_sources = count_active_sources(ctx);
-    
-    switch (ctx->mode) {
-        case MERGE_MODE_HTP:
-            merge_htp(ctx);
-            ctx->stats.htp_merges++;
-            break;
-            
-        case MERGE_MODE_LTP:
-            merge_ltp(ctx);
-            ctx->stats.ltp_merges++;
-            break;
-            
-        case MERGE_MODE_LAST:
-            merge_last(ctx);
-            ctx->stats.last_merges++;
-            break;
-            
-        case MERGE_MODE_BACKUP:
-            merge_backup(ctx);
-            break;
-            
-        case MERGE_MODE_DISABLE:
-        default:
-            merge_disable(ctx);
-            break;
-    }
-    
-    ctx->last_merge_time_us = get_time_us();
-}
-
-/**
- * @brief HTP (Highest Takes Precedence) merge
- * Takes the maximum value for each channel across all active sources
- */
-static void merge_htp(merge_context_t *ctx)
-{
-    memset(ctx->merged_data, 0, 512);
-    ctx->output_active = false;
-    
-    for (int i = 0; i < ctx->source_count; i++) {
-        if (!is_source_timeout(&ctx->sources[i], ctx->timeout_us)) {
-            ctx->output_active = true;
-            
-            for (int ch = 0; ch < 512; ch++) {
-                if (ctx->sources[i].data[ch] > ctx->merged_data[ch]) {
-                    ctx->merged_data[ch] = ctx->sources[i].data[ch];
-                }
-            }
-        }
-    }
-}
-
-/**
- * @brief LTP (Lowest Takes Precedence) merge
- * Takes the minimum value for each channel across all active sources
- */
-static void merge_ltp(merge_context_t *ctx)
-{
-    memset(ctx->merged_data, 255, 512);
-    ctx->output_active = false;
-    
-    for (int i = 0; i < ctx->source_count; i++) {
-        if (!is_source_timeout(&ctx->sources[i], ctx->timeout_us)) {
-            ctx->output_active = true;
-            
-            for (int ch = 0; ch < 512; ch++) {
-                if (ctx->sources[i].data[ch] < ctx->merged_data[ch]) {
-                    ctx->merged_data[ch] = ctx->sources[i].data[ch];
-                }
-            }
-        }
-    }
-    
-    // If no sources, output 0 instead of 255
-    if (!ctx->output_active) {
-        memset(ctx->merged_data, 0, 512);
-    }
-}
-
-/**
- * @brief LAST (Latest Takes Precedence) merge
- * Uses the entire frame from the most recently updated source
- */
-static void merge_last(merge_context_t *ctx)
-{
-    uint64_t latest_time = 0;
-    dmx_source_data_t *latest_source = NULL;
-    
-    // Find the most recent source
-    for (int i = 0; i < ctx->source_count; i++) {
-        if (!is_source_timeout(&ctx->sources[i], ctx->timeout_us)) {
-            if (ctx->sources[i].timestamp_us > latest_time) {
-                latest_time = ctx->sources[i].timestamp_us;
-                latest_source = &ctx->sources[i];
-            }
-        }
-    }
-    
-    if (latest_source) {
-        memcpy(ctx->merged_data, latest_source->data, 512);
-        ctx->output_active = true;
-    } else {
-        memset(ctx->merged_data, 0, 512);
-        ctx->output_active = false;
-    }
-}
-
-/**
- * @brief BACKUP merge
- * Uses primary source, switches to backup on timeout
- */
-static void merge_backup(merge_context_t *ctx)
-{
-    // If primary source index is valid and not timeout, use it
-    if (ctx->primary_source_index >= 0 && 
-        ctx->primary_source_index < ctx->source_count) {
-        
-        dmx_source_data_t *primary = &ctx->sources[ctx->primary_source_index];
-        
-        if (!is_source_timeout(primary, ctx->timeout_us)) {
-            memcpy(ctx->merged_data, primary->data, 512);
-            ctx->output_active = true;
-            return;
-        }
-    }
-    
-    // Primary timeout or not set - find any active source as backup
-    for (int i = 0; i < ctx->source_count; i++) {
-        if (!is_source_timeout(&ctx->sources[i], ctx->timeout_us)) {
-            memcpy(ctx->merged_data, ctx->sources[i].data, 512);
-            ctx->primary_source_index = i;  // This becomes new primary
-            ctx->output_active = true;
-            ctx->stats.backup_switches++;
-            ESP_LOGI(TAG, "Port %d: Switched to backup source %d", 
-                     ctx->port_num, i);
-            return;
-        }
-    }
-    
-    // No sources available
-    memset(ctx->merged_data, 0, 512);
-    ctx->output_active = false;
-    ctx->primary_source_index = -1;
-}
-
-/**
- * @brief DISABLE merge
- * No merging - uses first active source only
- */
-static void merge_disable(merge_context_t *ctx)
-{
-    // Find first active source
-    for (int i = 0; i < ctx->source_count; i++) {
-        if (!is_source_timeout(&ctx->sources[i], ctx->timeout_us)) {
-            memcpy(ctx->merged_data, ctx->sources[i].data, 512);
-            ctx->output_active = true;
-            return;
-        }
-    }
-    
-    // No active source
-    memset(ctx->merged_data, 0, 512);
-    ctx->output_active = false;
 }
