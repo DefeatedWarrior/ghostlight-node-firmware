@@ -1,0 +1,188 @@
+# Release builds and the browser flasher. See "Making a release" in
+# docs/DEVELOPING.md.
+#
+# Pushing a tag vX.Y.Z builds every board folder under boards/ (the same way
+# build.yml does), attaches two files per board to a GitHub Release, and
+# publishes the flasher page (docs/flasher/) with the merged images to
+# GitHub Pages:
+#   ghostlight-node-<board>-<version>-full.bin  everything, flash at 0x0
+#   ghostlight-node-<board>-<version>-ota.bin   the app, for the web UI upload
+# The tag must match PROJECT_VER in CMakeLists.txt (v1.2.0 <-> "1.2.0").
+#
+# Running it by hand (Actions > Release > Run workflow) is a dry run: it
+# builds everything and keeps the files as workflow artifacts, but creates no
+# release and deploys nothing.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Version and boards
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      boards: ${{ steps.boards.outputs.boards }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          project_ver=$(sed -n 's/^set(PROJECT_VER "\(.*\)")/\1/p' CMakeLists.txt)
+          [ -n "$project_ver" ] || { echo "::error::PROJECT_VER not found in CMakeLists.txt"; exit 1; }
+          if [ "$EVENT" = push ]; then
+            version=${TAG#v}
+            if [ "$version" != "$project_ver" ]; then
+              echo "::error::Tag $TAG does not match PROJECT_VER \"$project_ver\" in CMakeLists.txt. Set PROJECT_VER to \"$version\", commit, and tag that commit."
+              exit 1
+            fi
+          else
+            version="$project_ver-dev.${GITHUB_SHA::7}"
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z._-]*$'; then
+            echo "::error::Version \"$version\" may only use letters, digits, '.', '_' and '-'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Version: $version"
+
+      - name: Boards
+        id: boards
+        run: |
+          boards=$(python3 tools/ci/release.py matrix)
+          echo "boards=$boards" >> "$GITHUB_OUTPUT"
+          echo "Boards: $boards"
+
+  build:
+    name: ${{ matrix.board }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.boards) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Build, then merge the images inside the ESP-IDF container, so the
+      # esptool that merges them is the one that came with this ESP-IDF.
+      - name: Build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.2.6
+          target: ${{ matrix.target }}
+          command: >-
+            tools/build.sh ${{ matrix.board }} build &&
+            python tools/ci/release.py images
+            --board ${{ matrix.board }}
+            --build-dir build-${{ matrix.board }}
+            --out dist
+            --version ${{ needs.prepare.outputs.version }}
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.board }}
+          path: dist/*.bin
+          if-no-files-found: error
+
+  release:
+    name: Release files and flasher site
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download release files
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- *.bin > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Assemble the flasher site
+        run: |
+          cp -r docs/flasher site
+          python3 tools/ci/release.py manifests --out site --version "$VERSION" --check dist
+          mkdir -p site/firmware
+          cp dist/*-full.bin site/firmware/
+          find site -type f | sort
+
+      # On a dry run this is just a workflow artifact named github-pages.
+      - name: Upload the flasher site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Release notes
+        if: github.event_name == 'push'
+        env:
+          FLASHER_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+        run: |
+          {
+            echo "**Install from your browser:** $FLASHER_URL (Chrome or Edge, over USB)"
+            echo
+            echo "Two files per board:"
+            echo
+            echo "- \`ghostlight-node-<board>-$VERSION-full.bin\`: the complete image for a"
+            echo "  first install or a recovery. Flash it at 0x0, for example with"
+            echo "  \`esptool.py write_flash 0x0 <file>\`. Erase the flash first: the node's"
+            echo "  settings are lost."
+            echo "- \`ghostlight-node-<board>-$VERSION-ota.bin\`: the update for a node that"
+            echo "  already runs this firmware. Upload it in the web UI under"
+            echo "  Firmware Update. Settings are kept."
+            echo
+            echo "\`SHA256SUMS.txt\` has the checksums."
+          } > release-notes.md
+
+      - name: Publish the GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Ghostlight Node firmware ${{ github.ref_name }}
+          body_path: release-notes.md
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.bin
+            dist/SHA256SUMS.txt
+
+  pages:
+    name: Deploy the flasher
+    needs: release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
