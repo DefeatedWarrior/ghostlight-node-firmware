@@ -241,6 +241,59 @@ static void test_admin_password(void)
     CHECK(!config_sanitize(&c));             /* a stored credential is valid */
 }
 
+/* ---- Shared checks of the web API and the USB setup -------------------- */
+
+static void test_update_problem(void)
+{
+    struct { const char *json; bool ok; } cases[] = {
+        { "{}", true },
+        { "{\"node_info\":{\"short_name\":\"x\"}}", true },
+        { "{\"network\":{\"ap_password\":\"a good one\"}}", true },
+        { "{\"network\":{\"ap_password\":\"12345678\"}}", false },   /* factory default */
+        { "{\"network\":{\"ap_password\":\"short\"}}", false },
+        { "{\"network\":{\"ap_password\":\"\"}}", false },           /* would leave it open */
+        { "{\"network\":{\"ap_password\":5}}", false },
+        { "{\"network\":{\"wifi_profiles\":[{\"ssid\":\"A\",\"password\":\"\"}]}}", true },
+        { "{\"network\":{\"wifi_profiles\":[{\"ssid\":\"A\",\"password\":\"1234567\"}]}}", false },
+        { "{\"network\":{\"wifi_profiles\":[{\"ssid\":\"A\",\"password\":\"12345678\"}]}}", true },
+        { "[1,2]", false },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        cJSON *doc = cJSON_Parse(cases[i].json);
+        CHECK(doc != NULL);
+        const char *problem = config_update_problem(doc);
+        if ((problem == NULL) != cases[i].ok) {
+            printf("    %s -> %s\n", cases[i].json, problem ? problem : "accepted");
+        }
+        CHECK_EQ(problem == NULL, cases[i].ok);
+        cJSON_Delete(doc);
+    }
+    CHECK(config_ap_password_problem(NULL) != NULL);
+}
+
+static void test_public_json_has_no_secrets(void)
+{
+    CHECK_EQ(config_set_admin_password("correct horse"), ESP_OK);
+    CHECK_EQ(config_from_json("{\"network\":{\"ap_password\":\"ap secret 1\","
+                              "\"wifi_profiles\":[{\"ssid\":\"Venue\",\"password\":\"wifi secret\"}]}}"),
+             ESP_OK);
+    cJSON *pub = config_to_public_json(cfg);
+    CHECK(pub != NULL);
+    char *s = cJSON_PrintUnformatted(pub);
+    CHECK(s != NULL);
+    CHECK(strstr(s, "ap secret 1") == NULL);
+    CHECK(strstr(s, "wifi secret") == NULL);
+    CHECK(strstr(s, "security") == NULL);
+    CHECK(strstr(s, "admin_hash") == NULL);
+    CHECK(strstr(s, "\"has_password\":true") != NULL);
+    /* It is the shape config_from_json() takes: feeding it back changes nothing */
+    config_t before = *cfg;
+    CHECK_EQ(config_from_json(s), ESP_OK);
+    CHECK_MEM(&before, cfg, sizeof(before));
+    cJSON_free(s);
+    cJSON_Delete(pub);
+}
+
 /* ---- WiFi profiles ------------------------------------------------------- */
 
 static void test_wifi_profiles(void)
@@ -508,5 +561,7 @@ int main(void)
     RUN(test_sanitize_wifi_profiles);
     RUN(test_sanitize_names_and_passwords);
     RUN(test_sanitize_credentials);
+    RUN(test_update_problem);
+    RUN(test_public_json_has_no_secrets);
     return test_summary();
 }

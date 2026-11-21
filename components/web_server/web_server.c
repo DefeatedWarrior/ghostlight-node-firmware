@@ -177,7 +177,6 @@ static bool require_auth(httpd_req_t *req);
 static bool require_auth_page(httpd_req_t *req);
 static bool ws_token_ok(httpd_req_t *req);
 static void auth_invalidate(void);
-static const char *ap_password_problem(const char *pw);
 static esp_err_t api_auth_status_handler(httpd_req_t *req);
 static esp_err_t api_setup_handler(httpd_req_t *req);
 static esp_err_t api_auth_password_handler(httpd_req_t *req);
@@ -814,76 +813,10 @@ static esp_err_t api_config_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
     
-    // Create JSON response
-    cJSON *json = cJSON_CreateObject();
-
-    // Node info
-    cJSON *node = cJSON_CreateObject();
-    cJSON_AddStringToObject(node, "short_name", config->node_info.short_name);
-    cJSON_AddStringToObject(node, "long_name", config->node_info.long_name);
-    cJSON_AddNumberToObject(node, "sacn_priority", config->node_info.sacn_priority);
-    cJSON_AddBoolToObject(node, "allow_ip_prog", config->node_info.allow_ip_prog);
-    cJSON_AddItemToObject(json, "node_info", node);
-
-    // Network config
-    cJSON *net = cJSON_CreateObject();
-    cJSON_AddNumberToObject(net, "mode", config->network.mode);
-    cJSON_AddBoolToObject(net, "ap_always", config->network.ap_always);
-#if CONFIG_NODE_ETHERNET
-    cJSON_AddBoolToObject(net, "eth_use_static_ip", config->network.eth_use_static_ip);
-    cJSON_AddStringToObject(net, "eth_static_ip", config->network.eth_static_ip);
-    cJSON_AddStringToObject(net, "eth_gateway", config->network.eth_gateway);
-    cJSON_AddStringToObject(net, "eth_netmask", config->network.eth_netmask);
-#endif
-    cJSON_AddStringToObject(net, "ap_ssid", config->network.ap_ssid);
-    cJSON_AddNumberToObject(net, "ap_channel", config->network.ap_channel);
-    cJSON_AddNumberToObject(net, "wifi_profile_count", config->network.wifi_profile_count);
-    cJSON *profiles = cJSON_CreateArray();
-    for (int i = 0; i < config->network.wifi_profile_count; i++) {
-        const config_wifi_profile_t *wp = &config->network.wifi_profiles[i];
-        cJSON *p = cJSON_CreateObject();
-        /* Passwords never leave the node */
-        cJSON_AddStringToObject(p, "ssid", wp->ssid);
-        cJSON_AddNumberToObject(p, "priority", wp->priority);
-        cJSON_AddBoolToObject(p, "has_password", wp->password[0] != '\0');
-        cJSON_AddBoolToObject(p, "use_static_ip", wp->use_static_ip);
-        cJSON_AddStringToObject(p, "static_ip", wp->static_ip);
-        cJSON_AddStringToObject(p, "gateway", wp->gateway);
-        cJSON_AddStringToObject(p, "netmask", wp->netmask);
-        cJSON_AddItemToArray(profiles, p);
-    }
-    cJSON_AddItemToObject(net, "wifi_profiles", profiles);
-    cJSON_AddItemToObject(json, "network", net);
-
-    // Ports ("port1", "port2", ...)
-    for (int p = 1; p <= CONFIG_DMX_PORTS; p++) {
-        char key[8];
-        snprintf(key, sizeof(key), "port%d", p);
-        cJSON_AddItemToObject(json, key, config_port_to_json(config_port(config, p)));
-    }
-
-    // Merge config
-    cJSON *merge = cJSON_CreateObject();
-    cJSON_AddNumberToObject(merge, "timeout_seconds", config->merge.timeout_seconds);
-    cJSON_AddNumberToObject(merge, "loss_behavior", config->merge.loss_behavior);
-    cJSON_AddItemToObject(json, "merge", merge);
-
-    // DMX tester (the same shape POST /api/config takes)
-    cJSON *tester = cJSON_AddObjectToObject(json, "tester");
-    if (tester) {
-        cJSON_AddBoolToObject(tester, "enabled", config->tester.enabled);
-        cJSON *tports = cJSON_AddArrayToObject(tester, "ports");
-        for (int p = 0; tports && p < CONFIG_DMX_PORTS; p++) {
-            const tester_port_config_t *t = &config->tester.ports[p];
-            cJSON *o = cJSON_CreateObject();
-            if (!o) break;
-            cJSON_AddStringToObject(o, "role", config_tester_role_name(t->role));
-            cJSON_AddNumberToObject(o, "rate_hz", t->rate_hz);
-            cJSON_AddNumberToObject(o, "break_us", t->break_us);
-            cJSON_AddNumberToObject(o, "mab_us", t->mab_us);
-            cJSON_AddNumberToObject(o, "slots", t->slots);
-            cJSON_AddItemToArray(tports, o);
-        }
+    cJSON *json = config_to_public_json(config);
+    if (!json) {
+        send_error_response(req, 500, "Out of memory");
+        return ESP_OK;
     }
 
     send_json_response(req, json, 200);
@@ -909,28 +842,10 @@ static esp_err_t api_config_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    // A new AP password must be a valid WPA2 passphrase and not the
-    // factory default (an empty one would leave the AP open).
+    // Passwords it sets must be valid (the rest is clamped when parsed)
     cJSON *doc = cJSON_Parse(buf);
-    const cJSON *net = cJSON_GetObjectItemCaseSensitive(doc, "network");
-    const bool has_network = cJSON_IsObject(net);
-    const cJSON *ap = cJSON_GetObjectItemCaseSensitive(net, "ap_password");
-    const char *problem = NULL;
-    if (ap) {
-        problem = cJSON_IsString(ap) ? ap_password_problem(ap->valuestring)
-                                     : "AP password must be a string";
-    }
-    const cJSON *profiles = cJSON_GetObjectItemCaseSensitive(net, "wifi_profiles");
-    const cJSON *prof;
-    cJSON_ArrayForEach(prof, profiles) {
-        const cJSON *pw = cJSON_GetObjectItemCaseSensitive(prof, "password");
-        if (!problem && cJSON_IsString(pw)) {
-            size_t n = strlen(pw->valuestring);
-            if (n != 0 && (n < 8 || n > 64)) {
-                problem = "WiFi password must be 8-63 characters (or 64 hex digits)";
-            }
-        }
-    }
+    const bool has_network = cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(doc, "network"));
+    const char *problem = doc ? config_update_problem(doc) : NULL;
     cJSON_Delete(doc);
     if (problem) {
         free(buf);
@@ -2877,13 +2792,6 @@ static bool valid_password_len(const char *pw)
     return n >= 8 && n <= 63;
 }
 
-/* AP (WPA2) password rule: 8-63 characters and not the factory default */
-static const char *ap_password_problem(const char *pw)
-{
-    if (!valid_password_len(pw)) return "AP password must be 8-63 characters";
-    if (strcmp(pw, CONFIG_DEFAULT_AP_PASSWORD) == 0) return "Choose an AP password other than the factory default";
-    return NULL;
-}
 
 /**
  * GET /api/auth/status - never challenges.
@@ -2938,7 +2846,7 @@ static esp_err_t api_setup_handler(httpd_req_t *req)
     } else if (!cJSON_IsString(ap)) {
         problem = "AP password missing";
     } else {
-        problem = ap_password_problem(ap->valuestring);
+        problem = config_ap_password_problem(ap->valuestring);
     }
     if (problem) {
         cJSON_Delete(json);

@@ -79,6 +79,7 @@ are on by default.
 | `CONFIG_NODE_WEB_LOG` | The web UI can't show the log. `CONFIG_NODE_WEB_LOG_KB` sets the log size when the switch is on. |
 | `CONFIG_NODE_MDNS` | No `http://<name>.local/`. |
 | `CONFIG_NODE_TESTER` | No DMX tester mode (needs `CONFIG_NODE_DMX_TOOLS`). |
+| `CONFIG_NODE_SERIAL_SETUP` | No USB setup: the browser flasher can install the firmware but not set it up, and the console port only carries the log. |
 
 To switch features for one board, run `tools/build.sh <board> menuconfig`.
 That changes only `build-<board>/sdkconfig`. To make the change the default
@@ -138,6 +139,7 @@ components/
   scene_manager       scenes stored in LittleFS, fades
   dmx_tools           test patterns, loopback self-test
   dmx_tester          tester mode: levels to send, receive statistics, flicker watch
+  serial_setup        settings over the console UART / native USB (browser flasher)
   network_manager     Ethernet / Wi-Fi / AP with automatic fallback
   web_server          HTTP API and the web UI (web_ui/, built into web_files.h);
                       web_tools.c = diagnostics and tools, web_tester.c = /api/tester
@@ -166,6 +168,29 @@ console on the inputs, one flickering channel, a signal loss every 45 s), RDM
 fixtures and a log. `--tester` starts in tester mode, `--no-ethernet`,
 `--ports N` and `--off rdm,scenes,...` mimic other builds, and `--setup`
 shows the first-run setup. It needs nothing beyond Python 3.
+
+## USB setup
+
+With `CONFIG_NODE_SERIAL_SETUP` (on by default) the node takes commands on
+the port it is flashed through: the console UART (boards with a USB-serial
+chip) and, on the ESP32-S3, the chip's own USB port. The browser flasher uses
+it to set up a node straight after installing it; it also gets a node with a
+lost address or admin password back. One command per line, JSON after
+`#GL `, one reply line per command after `#GL> `:
+
+```
+#GL {"id":1,"cmd":"info"}
+#GL> {"ok":true,"firmware_version":"1.0.0","board":"Ghostlight Node rev1",...,"id":1}
+#GL {"id":2,"cmd":"set","config":{"node_info":{"short_name":"Stage Left"}}}
+#GL> {"ok":true,"restart_needed":false,"id":2}
+```
+
+Commands: `info`, `get` (the settings without passwords), `set` (the same
+document `POST /api/config` takes, checked by the same code), `password`
+(admin password), `scan`, `connect` (a saved Wi-Fi network) and `restart`.
+The details are in `components/serial_setup/include/serial_setup.h`. You can
+try it from any serial monitor at 115200 baud. Everything else on the port is
+the normal log, which keeps working.
 
 ## DMX tester mode
 

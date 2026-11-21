@@ -832,3 +832,107 @@ esp_err_t config_from_json(const char *json_str)
 {
     return parse_json(json_str, false);
 }
+
+const char *config_ap_password_problem(const char *pw)
+{
+    size_t n = pw ? strlen(pw) : 0;
+    if (n < 8 || n > 63) return "AP password must be 8-63 characters";
+    if (strcmp(pw, CONFIG_DEFAULT_AP_PASSWORD) == 0) {
+        return "Choose an AP password other than the factory default";
+    }
+    return NULL;
+}
+
+const char *config_update_problem(const cJSON *doc)
+{
+    if (!cJSON_IsObject(doc)) return "Expected a JSON object";
+    const cJSON *net = cJSON_GetObjectItemCaseSensitive(doc, "network");
+    /* A new AP password must be a valid WPA2 passphrase and not the factory
+     * default (an empty one would leave the AP open). */
+    const cJSON *ap = cJSON_GetObjectItemCaseSensitive(net, "ap_password");
+    if (ap) {
+        if (!cJSON_IsString(ap)) return "AP password must be a string";
+        const char *p = config_ap_password_problem(ap->valuestring);
+        if (p) return p;
+    }
+    const cJSON *profiles = cJSON_GetObjectItemCaseSensitive(net, "wifi_profiles");
+    const cJSON *prof;
+    cJSON_ArrayForEach(prof, profiles) {
+        const cJSON *pw = cJSON_GetObjectItemCaseSensitive(prof, "password");
+        if (cJSON_IsString(pw)) {
+            size_t n = strlen(pw->valuestring);
+            if (n != 0 && (n < 8 || n > 64)) {
+                return "WiFi password must be 8-63 characters (or 64 hex digits)";
+            }
+        }
+    }
+    return NULL;
+}
+
+cJSON *config_to_public_json(const config_t *c)
+{
+    if (!c) return NULL;
+    cJSON *json = cJSON_CreateObject();
+    if (!json) return NULL;
+
+    cJSON *node = cJSON_AddObjectToObject(json, "node_info");
+    cJSON_AddStringToObject(node, "short_name", c->node_info.short_name);
+    cJSON_AddStringToObject(node, "long_name", c->node_info.long_name);
+    cJSON_AddNumberToObject(node, "sacn_priority", c->node_info.sacn_priority);
+    cJSON_AddBoolToObject(node, "allow_ip_prog", c->node_info.allow_ip_prog);
+
+    cJSON *net = cJSON_AddObjectToObject(json, "network");
+    cJSON_AddNumberToObject(net, "mode", c->network.mode);
+    cJSON_AddBoolToObject(net, "ap_always", c->network.ap_always);
+#if CONFIG_NODE_ETHERNET
+    cJSON_AddBoolToObject(net, "eth_use_static_ip", c->network.eth_use_static_ip);
+    cJSON_AddStringToObject(net, "eth_static_ip", c->network.eth_static_ip);
+    cJSON_AddStringToObject(net, "eth_gateway", c->network.eth_gateway);
+    cJSON_AddStringToObject(net, "eth_netmask", c->network.eth_netmask);
+#endif
+    cJSON_AddStringToObject(net, "ap_ssid", c->network.ap_ssid);
+    cJSON_AddNumberToObject(net, "ap_channel", c->network.ap_channel);
+    cJSON_AddNumberToObject(net, "wifi_profile_count", c->network.wifi_profile_count);
+    cJSON *profiles = cJSON_AddArrayToObject(net, "wifi_profiles");
+    for (int i = 0; profiles && i < c->network.wifi_profile_count && i < CONFIG_WIFI_PROFILES_MAX; i++) {
+        const config_wifi_profile_t *wp = &c->network.wifi_profiles[i];
+        cJSON *p = cJSON_CreateObject();
+        if (!p) break;
+        cJSON_AddStringToObject(p, "ssid", wp->ssid);
+        cJSON_AddNumberToObject(p, "priority", wp->priority);
+        cJSON_AddBoolToObject(p, "has_password", wp->password[0] != '\0');
+        cJSON_AddBoolToObject(p, "use_static_ip", wp->use_static_ip);
+        cJSON_AddStringToObject(p, "static_ip", wp->static_ip);
+        cJSON_AddStringToObject(p, "gateway", wp->gateway);
+        cJSON_AddStringToObject(p, "netmask", wp->netmask);
+        cJSON_AddItemToArray(profiles, p);
+    }
+
+    for (int p = 1; p <= CONFIG_DMX_PORTS; p++) {
+        char key[8];
+        snprintf(key, sizeof(key), "port%d", p);
+        cJSON_AddItemToObject(json, key, config_port_to_json(&c->ports[p - 1]));
+    }
+
+    cJSON *merge = cJSON_AddObjectToObject(json, "merge");
+    cJSON_AddNumberToObject(merge, "timeout_seconds", c->merge.timeout_seconds);
+    cJSON_AddNumberToObject(merge, "loss_behavior", c->merge.loss_behavior);
+
+    cJSON *tester = cJSON_AddObjectToObject(json, "tester");
+    if (tester) {
+        cJSON_AddBoolToObject(tester, "enabled", c->tester.enabled);
+        cJSON *tports = cJSON_AddArrayToObject(tester, "ports");
+        for (int p = 0; tports && p < CONFIG_DMX_PORTS; p++) {
+            const tester_port_config_t *t = &c->tester.ports[p];
+            cJSON *o = cJSON_CreateObject();
+            if (!o) break;
+            cJSON_AddStringToObject(o, "role", config_tester_role_name(t->role));
+            cJSON_AddNumberToObject(o, "rate_hz", t->rate_hz);
+            cJSON_AddNumberToObject(o, "break_us", t->break_us);
+            cJSON_AddNumberToObject(o, "mab_us", t->mab_us);
+            cJSON_AddNumberToObject(o, "slots", t->slots);
+            cJSON_AddItemToArray(tports, o);
+        }
+    }
+    return json;
+}

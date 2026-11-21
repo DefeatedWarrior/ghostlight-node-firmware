@@ -54,6 +54,7 @@ if [ "$FEATURES" != none ]; then
 #define CONFIG_NODE_WEB_LOG 1
 #define CONFIG_NODE_WEB_LOG_KB 32
 #define CONFIG_NODE_MDNS 1
+#define CONFIG_NODE_SERIAL_SETUP 1
 CFGEOF
 fi
 

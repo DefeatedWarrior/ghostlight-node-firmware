@@ -28,6 +28,7 @@
 #include "rdm_bridge.h"
 #include "dmx_tools.h"
 #include "dmx_tester.h"
+#include "serial_setup.h"
 #include "diag.h"
 #include "board.h"
 #include "app.h"
@@ -249,6 +250,9 @@ void app_main(void)
     web_server_set_hooks(&hooks);
     ESP_ERROR_CHECK(web_server_init(NULL));
     ESP_ERROR_CHECK(web_server_start());
+#if CONFIG_NODE_SERIAL_SETUP
+    serial_setup_start();   /* settings over USB (browser flasher) */
+#endif
 
     app_indicator_start_tasks();   /* reset button, port LEDs */
 

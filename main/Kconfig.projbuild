@@ -116,6 +116,18 @@ menu "ESP-NODE"
             help
                 Lets browsers find the node as http://<name>.local/.
 
+        config NODE_SERIAL_SETUP
+            bool "USB setup (settings over the serial / USB port)"
+            default y
+            help
+                Lets a computer read and change the settings over the port
+                the node is flashed through: the console UART and, on the
+                ESP32-S3, the chip's own USB port. The browser flasher uses it
+                to set a node up after installing the firmware, and it gets a
+                node with a lost address or admin password back. There is no
+                sign-in: whoever has the cable can reflash the node anyway.
+                Off: those ports only carry the log.
+
     endmenu
 
 endmenu

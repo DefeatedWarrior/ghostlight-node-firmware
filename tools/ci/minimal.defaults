@@ -12,3 +12,4 @@
 # CONFIG_NODE_TESTER is not set
 # CONFIG_NODE_WEB_LOG is not set
 # CONFIG_NODE_MDNS is not set
+# CONFIG_NODE_SERIAL_SETUP is not set

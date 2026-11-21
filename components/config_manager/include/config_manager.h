@@ -237,6 +237,25 @@ esp_err_t config_from_json(const char *json_str);
 /** One port's settings as a cJSON object (the "portN" object of the config) */
 struct cJSON *config_port_to_json(const port_config_t *p);
 
+/**
+ * The settings as the web API and the USB setup show them: everything except
+ * the admin credentials, the AP password and Wi-Fi passwords (profiles say
+ * "has_password" instead). The same shape config_from_json() takes.
+ * Caller frees with cJSON_Delete().
+ */
+struct cJSON *config_to_public_json(const config_t *c);
+
+/** Why @p pw can't be the AP password (8-63 characters, not the factory
+ *  default), or NULL if it is fine */
+const char *config_ap_password_problem(const char *pw);
+
+/**
+ * Check a (partial) settings document before config_from_json(): the AP
+ * password and Wi-Fi passwords it sets. Returns a message for the user, or
+ * NULL if it may be applied (every other value is clamped by the parser).
+ */
+const char *config_update_problem(const struct cJSON *doc);
+
 /** "off" / "send" / "receive" / "rdm" */
 const char *config_tester_role_name(uint8_t role);
 /** Parse a tester role name; -1 if unknown */
