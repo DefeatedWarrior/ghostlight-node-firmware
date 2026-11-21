@@ -131,9 +131,9 @@ ESP-NODE-2RDM is a professional lighting control device that converts network pr
 
 | Component | Specification |
 |-----------|--------------|
-| **MCU** | ESP32-S3-WROOM-1-N16R8 |
-| **Flash Memory** | 16 MB |
-| **PSRAM** | 8 MB (Octal SPI) |
+| **MCU** | ESP32-S3-WROOM-1-N8 |
+| **Flash Memory** | 8 MB |
+| **PSRAM** | None |
 | **Ethernet** | W5500 (SPI interface) |
 | **WiFi** | 802.11 b/g/n (2.4 GHz) |
 | **DMX Ports** | 2× RS485 transceivers |
@@ -161,6 +161,15 @@ ESP-NODE-2RDM is a professional lighting control device that converts network pr
 
 ### 🚀 Quick Start
 
+> **Boards and features:** the firmware builds for several boards
+> (Ghostlight Node rev1, the ESP-NODE-2RDM N16R8 prototype, an ESP32
+> DevKitC), and
+> optional features (sACN, RDM, scenes, DMX tools, web log, mDNS, Ethernet)
+> can be switched off at build time. Use `tools/build.sh <board>` rather
+> than plain `idf.py build`. See **[docs/DEVELOPING.md](docs/DEVELOPING.md)**
+> for building, the feature switches, the code layout, and how to add a
+> board.
+
 #### Prerequisites
 
 **Software Requirements:**
@@ -170,7 +179,7 @@ ESP-NODE-2RDM is a professional lighting control device that converts network pr
 - Git
 
 **Hardware Requirements:**
-- ESP32-S3 development board with ≥16MB Flash and 8MB PSRAM
+- ESP32-S3 development board with ≥8MB Flash (no PSRAM needed)
 - W5500 Ethernet module
 - 2× RS485 transceivers (MAX485 or similar)
 - WS2812 RGB LED (optional, for status indication)
@@ -180,8 +189,8 @@ ESP-NODE-2RDM is a professional lighting control device that converts network pr
 
 1. **Clone the Repository**
    ```bash
-   git clone https://github.com/thinhh0321/ESP-NODE-2RDM.git
-   cd ESP-NODE-2RDM
+   git clone https://github.com/DefeatedWarrior/ghostlight-node.git
+   cd ghostlight-node/firmware
    ```
 
 2. **Set up ESP-IDF Environment**
@@ -195,25 +204,26 @@ ESP-NODE-2RDM is a professional lighting control device that converts network pr
 
 3. **Configure the Project** (Optional)
    ```bash
-   idf.py menuconfig
+   tools/build.sh esp-node-2rdm menuconfig    # ESP-NODE > Features
    ```
    - Most settings use sensible defaults from `sdkconfig.defaults`
    - Customize partition table, WiFi settings, etc. if needed
 
 4. **Build the Firmware**
    ```bash
-   idf.py build
+   tools/build.sh list            # esp-node-2rdm, esp32-devkitc, ghostlight-rev1
+   tools/build.sh esp-node-2rdm
    ```
 
 5. **Flash to Device**
    ```bash
    # Replace COM3 with your serial port (e.g., /dev/ttyUSB0 on Linux)
-   idf.py -p COM3 flash
+   tools/build.sh esp-node-2rdm -p COM3 flash
    ```
 
 6. **Monitor Serial Output**
    ```bash
-   idf.py -p COM3 monitor
+   tools/build.sh esp-node-2rdm -p COM3 monitor
    ```
    - Press `Ctrl+]` to exit monitor
 
@@ -353,7 +363,7 @@ Contributions are welcome! When contributing to this project, please:
 
 ### 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/thinhh0321/ESP-NODE-2RDM/issues)
+- **Issues**: [GitHub Issues](https://github.com/DefeatedWarrior/ghostlight-node/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/thinhh0321/ESP-NODE-2RDM/discussions)
 - **Author**: thinhh0321
 
@@ -486,9 +496,9 @@ ESP-NODE-2RDM là thiết bị điều khiển ánh sáng chuyên nghiệp, chuy
 
 | Linh kiện | Thông số |
 |-----------|----------|
-| **MCU** | ESP32-S3-WROOM-1-N16R8 |
-| **Flash Memory** | 16 MB |
-| **PSRAM** | 8 MB (Octal SPI) |
+| **MCU** | ESP32-S3-WROOM-1-N8 |
+| **Flash Memory** | 8 MB |
+| **PSRAM** | None |
 | **Ethernet** | W5500 (giao diện SPI) |
 | **WiFi** | 802.11 b/g/n (2.4 GHz) |
 | **Cổng DMX** | 2× RS485 transceivers |
@@ -525,7 +535,7 @@ ESP-NODE-2RDM là thiết bị điều khiển ánh sáng chuyên nghiệp, chuy
 - Git
 
 **Yêu cầu phần cứng:**
-- Bo mạch phát triển ESP32-S3 với ≥16MB Flash và 8MB PSRAM
+- Bo mạch phát triển ESP32-S3 với ≥8MB Flash (không cần PSRAM)
 - Module Ethernet W5500
 - 2× RS485 transceivers (MAX485 hoặc tương tự)
 - WS2812 RGB LED (tùy chọn, cho chỉ báo trạng thái)
@@ -535,8 +545,8 @@ ESP-NODE-2RDM là thiết bị điều khiển ánh sáng chuyên nghiệp, chuy
 
 1. **Clone Repository**
    ```bash
-   git clone https://github.com/thinhh0321/ESP-NODE-2RDM.git
-   cd ESP-NODE-2RDM
+   git clone https://github.com/DefeatedWarrior/ghostlight-node.git
+   cd ghostlight-node/firmware
    ```
 
 2. **Thiết lập môi trường ESP-IDF**
@@ -767,7 +777,7 @@ Chúng tôi hoan nghênh các đóng góp! Khi đóng góp cho dự án này, vu
 
 ### 📞 Hỗ trợ
 
-- **Vấn đề**: [GitHub Issues](https://github.com/thinhh0321/ESP-NODE-2RDM/issues)
+- **Vấn đề**: [GitHub Issues](https://github.com/DefeatedWarrior/ghostlight-node/issues)
 - **Thảo luận**: [GitHub Discussions](https://github.com/thinhh0321/ESP-NODE-2RDM/discussions)
 - **Tác giả**: thinhh0321
 

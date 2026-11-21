@@ -40,10 +40,11 @@ static const int8_t k_uart[DMX_PORT_MAX]    = BOARD_DMX_UART;
 static const int8_t k_tx_pin[DMX_PORT_MAX]  = BOARD_DMX_TX_GPIO;
 static const int8_t k_rx_pin[DMX_PORT_MAX]  = BOARD_DMX_RX_GPIO;
 static const int8_t k_dir_pin[DMX_PORT_MAX] = BOARD_DMX_DIR_GPIO;
+static const int8_t k_bias_pin[DMX_PORT_MAX] = BOARD_DMX_BIAS_GPIO;
 
 #define DMX_TASK_STACK_SIZE   4096
 #define DMX_TASK_PRIORITY     12          /* above network rx (6) */
-#define DMX_TASK_CORE         1
+#define DMX_TASK_CORE         BOARD_CORE_DMX   /* board.h: 1, or 0 on single-core chips */
 #define DMX_DISC_STACK_SIZE   6144
 #define DMX_DISC_PRIORITY     4
 
@@ -493,12 +494,24 @@ static void input_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* Line bias (boards with a bias switch): on while the port drives the bus.
+ * E1.20 has the controller bias the line, so RDM response windows (nobody
+ * driving) read as idle instead of noise. */
+static void set_bias(const port_t *p, bool on)
+{
+    int pin = k_bias_pin[p->port_num - 1];
+    if (pin >= 0) {
+        gpio_set_level(pin, on ? 1 : 0);
+    }
+}
+
 /* Caller holds state_mutex */
 static void stop_port_locked(port_t *p)
 {
     if (!p->is_active) {
         return;
     }
+    set_bias(p, false);
 
     /* Abort discovery first: it uses the bus and the driver */
     if (p->discovering) {
@@ -566,6 +579,11 @@ esp_err_t dmx_handler_init(void)
             return ESP_ERR_NO_MEM;
         }
         xEventGroupSetBits(p->disc_events, DISC_IDLE_BIT);
+        if (k_bias_pin[i] >= 0) {
+            gpio_reset_pin(k_bias_pin[i]);
+            gpio_set_direction(k_bias_pin[i], GPIO_MODE_OUTPUT);
+            gpio_set_level(k_bias_pin[i], 0);   /* no bias until a port drives the bus */
+        }
     }
 
     s_dmx.initialized = true;
@@ -683,6 +701,7 @@ esp_err_t dmx_handler_start_port(uint8_t port)
     }
 
     p->is_active = true;
+    set_bias(p, is_output_mode(p->mode));
     xSemaphoreGive(s_dmx.state_mutex);
     ESP_LOGI(TAG, "Port %u started", port);
     return ESP_OK;

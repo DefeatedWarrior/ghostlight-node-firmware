@@ -164,6 +164,26 @@ static bool sanitize_port(port_config_t *p, uint16_t def_artnet, uint16_t def_sa
     CLAMP_FIELD(p->break_us, CONFIG_DMX_BREAK_MIN, CONFIG_DMX_BREAK_MAX, CONFIG_DMX_BREAK_DEFAULT);
     CLAMP_FIELD(p->mab_us, CONFIG_DMX_MAB_MIN, CONFIG_DMX_MAB_MAX, CONFIG_DMX_MAB_DEFAULT);
     CLAMP_FIELD(p->out_slots, CONFIG_DMX_SLOTS_MIN, CONFIG_DMX_SLOTS_MAX, CONFIG_DMX_SLOTS_MAX);
+
+    /* Settings for features this firmware was built without (menuconfig:
+     * ESP-NODE > Features) fall back to what the node can do */
+#if !CONFIG_NODE_RDM
+    if (p->mode == DMX_MODE_RDM_MASTER)    { p->mode = DMX_MODE_OUTPUT; changed = true; }
+    if (p->mode == DMX_MODE_RDM_RESPONDER) { p->mode = DMX_MODE_INPUT;  changed = true; }
+    if (p->rdm_enabled)                    { p->rdm_enabled = false;    changed = true; }
+#endif
+#if !CONFIG_NODE_SCENES
+    if (p->startup_scene || p->failsafe_scene) {
+        p->startup_scene = p->failsafe_scene = 0;
+        changed = true;
+    }
+#endif
+#if !CONFIG_NODE_SACN
+    if (p->protocol_mode != PROTOCOL_ARTNET_ONLY) {
+        p->protocol_mode = PROTOCOL_ARTNET_ONLY;
+        changed = true;
+    }
+#endif
     return changed;
 }
 
@@ -236,6 +256,12 @@ bool config_sanitize(config_t *c)
 
     CLAMP_FIELD(c->merge.timeout_seconds, 1, 60, 3);
     CLAMP_FIELD(c->merge.loss_behavior, LOSS_HOLD_LAST_LOOK, LOSS_LAST, LOSS_HOLD_LAST_LOOK);
+#if !CONFIG_NODE_SCENES
+    if (c->merge.loss_behavior == LOSS_SCENE) {
+        c->merge.loss_behavior = LOSS_BLACKOUT;   /* no failsafe scene to show */
+        changed = true;
+    }
+#endif
     CLAMP_FIELD(c->node_info.sacn_priority, 0, 200, 100);
 
     if (c->node_info.short_name[0] == '\0') {

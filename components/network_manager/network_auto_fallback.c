@@ -502,11 +502,13 @@ static void tick(int64_t now)
     bool eth_wanted = (t->mode == NET_MODE_AUTO || t->mode == NET_MODE_ETHERNET) && !s.eth_absent;
     if (eth_wanted && !eth.running) {
         ip_config_t ic = eth_ip_config(t);
-        if (network_ethernet_connect(&ic) == ESP_OK) {
+        esp_err_t err = network_ethernet_connect(&ic);
+        if (err == ESP_OK) {
             s.eth_started_ms = now;
         } else {
             s.eth_absent = true;
-            ESP_LOGW(TAG, "No Ethernet (W5500 not found)");
+            ESP_LOGW(TAG, "%s", err == ESP_ERR_NOT_SUPPORTED ? "Ethernet is not built into this firmware"
+                                                             : "No Ethernet (W5500 not found)");
         }
         network_get_eth_info(&eth);
     } else if (!eth_wanted && eth.running) {

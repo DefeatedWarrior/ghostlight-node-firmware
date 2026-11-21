@@ -18,8 +18,14 @@
 
 static const char *TAG = "diag";
 
-#define LOG_RING_PSRAM     (32 * 1024)
-#define LOG_RING_INTERNAL  (8 * 1024)
+/* menuconfig: ESP-NODE > Features > Web log. PSRAM first, then internal RAM
+ * (at most 8 KB there, the rest of the firmware needs it more). */
+#if CONFIG_NODE_WEB_LOG
+#define LOG_RING_SIZE      (CONFIG_NODE_WEB_LOG_KB * 1024)
+#else
+#define LOG_RING_SIZE      0
+#endif
+#define LOG_RING_INTERNAL_MAX  (8 * 1024)
 #define LOG_LINE_MAX       256
 
 static struct {
@@ -220,15 +226,18 @@ esp_err_t diag_init(void)
     s_diag.mutex = xSemaphoreCreateMutex();
     if (!s_diag.mutex) return ESP_ERR_NO_MEM;
 
-    s_diag.ring = heap_caps_malloc(LOG_RING_PSRAM, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s_diag.cap = LOG_RING_PSRAM;
-    if (!s_diag.ring) {
-        s_diag.ring = heap_caps_malloc(LOG_RING_INTERNAL, MALLOC_CAP_8BIT);
-        s_diag.cap = LOG_RING_INTERNAL;
+    if (LOG_RING_SIZE > 0) {
+        s_diag.cap = LOG_RING_SIZE;
+        s_diag.ring = heap_caps_malloc(s_diag.cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_diag.ring) {
+            s_diag.cap = LOG_RING_SIZE < LOG_RING_INTERNAL_MAX ? LOG_RING_SIZE
+                                                               : LOG_RING_INTERNAL_MAX;
+            s_diag.ring = heap_caps_malloc(s_diag.cap, MALLOC_CAP_8BIT);
+        }
     }
     if (!s_diag.ring) {
         s_diag.cap = 0;
-        ESP_LOGW(TAG, "No memory for the web log");
+        if (LOG_RING_SIZE > 0) ESP_LOGW(TAG, "No memory for the web log");
     } else {
         s_diag.prev = esp_log_set_vprintf(diag_vprintf);
     }

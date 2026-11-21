@@ -1,4 +1,4 @@
-# ESP-NODE-2RDM / Ghostlight Node partition table (8 MB flash, ESP32-S3-WROOM-1-N8)
+# 8 MB flash (Ghostlight Node rev1, ESP32-S3-WROOM-1-N8)
 # Two app slots for web OTA with automatic rollback, LittleFS for config and
 # scenes, and a core dump area so crashes can be read back after a reboot.
 # Name,     Type, SubType,  Offset,    Size,

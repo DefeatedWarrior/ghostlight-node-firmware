@@ -1,0 +1,13 @@
+# Every optional feature off (main/Kconfig.projbuild, menu "ESP-NODE" ->
+# "Features"). CI builds this on top of a board's defaults so code behind
+# each switch keeps compiling both ways:
+#   BUILD_DIR=build-minimal EXTRA_DEFAULTS=tools/ci/minimal.defaults \
+#       tools/build.sh <board>
+# (BUILD_DIR keeps it out of the board's normal build-<board>/ folder.)
+# CONFIG_NODE_ETHERNET is not set
+# CONFIG_NODE_SACN is not set
+# CONFIG_NODE_RDM is not set
+# CONFIG_NODE_SCENES is not set
+# CONFIG_NODE_DMX_TOOLS is not set
+# CONFIG_NODE_WEB_LOG is not set
+# CONFIG_NODE_MDNS is not set

@@ -1,0 +1,11 @@
+# 4 MB flash (original ESP32: WROOM-32 / DevKitC)
+# Two 1.75 MB app slots for web OTA with automatic rollback, 320 KB LittleFS
+# for config and scenes, and a core dump area.
+# Name,     Type, SubType,  Offset,    Size,
+nvs,        data, nvs,      0x9000,    0x5000,
+otadata,    data, ota,      0xe000,    0x2000,
+phy_init,   data, phy,      0x10000,   0x1000,
+ota_0,      app,  ota_0,    0x20000,   0x1C0000,
+ota_1,      app,  ota_1,    0x1E0000,  0x1C0000,
+littlefs,   data, spiffs,   0x3A0000,  0x50000,
+coredump,   data, coredump, 0x3F0000,  0x10000,

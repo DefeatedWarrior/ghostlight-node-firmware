@@ -7,9 +7,10 @@
 #define LED_MANAGER_INTERNAL_H
 
 #include "led_manager.h"
+#include "board.h"
 
 // Hardware Configuration
-#define LED_GPIO_PIN            48
+#define LED_GPIO_PIN            BOARD_STATUS_LED_GPIO   /* -1 = no status LED */
 #define LED_RMT_RESOLUTION_HZ   10000000 // 10MHz
 #define LED_STRIP_NUM_PIXELS    1
 

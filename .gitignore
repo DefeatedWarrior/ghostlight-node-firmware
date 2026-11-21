@@ -24,3 +24,5 @@ test_output/
 # Temporary files
 *~
 *.tmp
+# Per-board build folders (tools/build.sh)
+build-*/

@@ -1,0 +1,17 @@
+# Original ESP32: DevKitC with a WROOM-32 (4 MB flash, no PSRAM)
+# (applied on top of the top-level sdkconfig.defaults by tools/build.sh)
+# Pin map: components/board/include/boards/esp32_devkitc.h
+CONFIG_IDF_TARGET="esp32"
+CONFIG_BOARD_ESP32_DEVKITC=y
+
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+
+# Full speed: one core runs Wi-Fi and the network side, the other DMX
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Console on UART0 (the DevKitC's USB-serial chip); DMX uses UART1/UART2
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+

@@ -33,6 +33,7 @@
 #include "esp_timer.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "board.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -45,12 +46,7 @@ static const char *TAG = "network_mgr";
 #define ETH_READY_BIT   BIT0   /* Ethernet link up and an address */
 #define STA_READY_BIT   BIT1   /* station has an address */
 
-/* W5500 wiring */
-#define W5500_CS_PIN        GPIO_NUM_10
-#define W5500_MOSI_PIN      GPIO_NUM_11
-#define W5500_MISO_PIN      GPIO_NUM_13
-#define W5500_SCK_PIN       GPIO_NUM_12
-#define W5500_INT_PIN       GPIO_NUM_9
+/* W5500 wiring: components/board/include/boards/<board>.h */
 
 #define SCAN_CACHE_MAX      24
 
@@ -532,16 +528,20 @@ esp_err_t network_ethernet_connect(const ip_config_t *config)
         return ESP_OK;
     }
 
+#if !CONFIG_NODE_ETHERNET
+    (void)config;
+    return ESP_ERR_NOT_SUPPORTED;   /* menuconfig: ESP-NODE > Features > Wired Ethernet */
+#else
     ESP_LOGI(TAG, "Initialising W5500 SPI Ethernet...");
 
     spi_bus_config_t buscfg = {
-        .mosi_io_num   = W5500_MOSI_PIN,
-        .miso_io_num   = W5500_MISO_PIN,
-        .sclk_io_num   = W5500_SCK_PIN,
+        .mosi_io_num   = BOARD_ETH_MOSI_GPIO,
+        .miso_io_num   = BOARD_ETH_MISO_GPIO,
+        .sclk_io_num   = BOARD_ETH_SCK_GPIO,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
     };
-    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    esp_err_t ret = spi_bus_initialize(BOARD_ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(ret));
         return ret;
@@ -553,9 +553,9 @@ esp_err_t network_ethernet_connect(const ip_config_t *config)
         .address_bits   = 8,
         .dummy_bits     = 0,
         .mode           = 0,
-        .spics_io_num   = W5500_CS_PIN,
+        .spics_io_num   = BOARD_ETH_CS_GPIO,
         .queue_size     = 20,
-        .clock_speed_hz = 20 * 1000 * 1000,
+        .clock_speed_hz = BOARD_ETH_SPI_MHZ * 1000 * 1000,
     };
 
     esp_err_t isr_ret = gpio_install_isr_service(0);
@@ -563,12 +563,12 @@ esp_err_t network_ethernet_connect(const ip_config_t *config)
         ESP_LOGW(TAG, "gpio_install_isr_service failed: %d", isr_ret);
     }
 
-    eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(SPI2_HOST, &devcfg);
-    w5500_cfg.int_gpio_num = W5500_INT_PIN;
+    eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(BOARD_ETH_SPI_HOST, &devcfg);
+    w5500_cfg.int_gpio_num = BOARD_ETH_INT_GPIO;
 
     eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_cfg = ETH_PHY_DEFAULT_CONFIG();
-    phy_cfg.reset_gpio_num = -1;
+    phy_cfg.reset_gpio_num = BOARD_ETH_RST_GPIO;   /* -1: no reset line */
 
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_cfg, &mac_cfg);
     if (!mac) {
@@ -629,6 +629,7 @@ esp_err_t network_ethernet_connect(const ip_config_t *config)
     refresh_state(false);
     ESP_LOGI(TAG, "W5500 Ethernet started, waiting for link");
     return ESP_OK;
+#endif /* CONFIG_NODE_ETHERNET */
 }
 
 esp_err_t network_ethernet_set_ip(const ip_config_t *config)

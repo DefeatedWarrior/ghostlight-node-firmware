@@ -1,0 +1,13 @@
+# 16 MB flash (ESP-NODE-2RDM prototype, ESP32-S3 N16R8)
+# Two app slots for web OTA with automatic rollback, LittleFS for config and
+# scenes, and a core dump area so crashes can be read back after a reboot.
+# This is the layout the prototype has been running since 2026-11-10: changing
+# it moves LittleFS and loses the stored settings and scenes.
+# Name,     Type, SubType,  Offset,    Size,
+nvs,        data, nvs,      0x9000,    0x5000,
+otadata,    data, ota,      0xe000,    0x2000,
+phy_init,   data, phy,      0x10000,   0x1000,
+ota_0,      app,  ota_0,    0x20000,   0x300000,
+ota_1,      app,  ota_1,    0x320000,  0x300000,
+littlefs,   data, spiffs,   0x620000,  0x200000,
+coredump,   data, coredump, 0x820000,  0x10000,

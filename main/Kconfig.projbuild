@@ -1,0 +1,96 @@
+menu "ESP-NODE"
+
+    choice NODE_BOARD
+        prompt "Board"
+        default BOARD_ESP_NODE_2RDM if IDF_TARGET_ESP32S3
+        default BOARD_ESP32_DEVKITC if IDF_TARGET_ESP32
+        help
+            The hardware the firmware runs on: pins, port count, Ethernet,
+            LEDs. Each board has a pin header in
+            components/board/include/boards/ and a settings file in
+            boards/<name>/sdkconfig.defaults. Build one with
+            tools/build.sh <name> (see docs/DEVELOPING.md).
+
+        config BOARD_ESP_NODE_2RDM
+            bool "ESP-NODE-2RDM prototype (ESP32-S3 N16R8 dev board)"
+            depends on IDF_TARGET_ESP32S3
+            select BOARD_HAS_W5500
+
+        config BOARD_GHOSTLIGHT_REV1
+            bool "Ghostlight Node rev1 (ESP32-S3-WROOM-1-N8)"
+            depends on IDF_TARGET_ESP32S3
+            select BOARD_HAS_W5500
+
+        config BOARD_ESP32_DEVKITC
+            bool "ESP32 DevKitC (WROOM-32) with a W5500 and 2 RS-485 transceivers"
+            depends on IDF_TARGET_ESP32
+            select BOARD_HAS_W5500
+    endchoice
+
+    config BOARD_HAS_W5500
+        bool
+
+    menu "Features"
+
+        config NODE_ETHERNET
+            bool "Wired Ethernet (W5500)"
+            depends on BOARD_HAS_W5500
+            default y
+            help
+                Without it the node uses Wi-Fi only and the Ethernet settings
+                are hidden in the web UI.
+
+        config NODE_SACN
+            bool "sACN (E1.31)"
+            default y
+            help
+                Receive sACN on output ports, send DMX input as sACN, and
+                E1.31 synchronization. Without it the node speaks Art-Net only.
+
+        config NODE_RDM
+            bool "RDM"
+            default y
+            help
+                RDM controller and responder port modes, fixture discovery,
+                the RDM tab in the web UI and RDM over Art-Net (ArtTod/ArtRdm).
+                Without it ports are plain DMX outputs and inputs.
+
+        config NODE_SCENES
+            bool "Scenes"
+            default y
+            help
+                Record and play back scenes, the failsafe scene (shown when
+                the network data stops) and the power-on scene.
+
+        config NODE_DMX_TOOLS
+            bool "DMX tools"
+            default y
+            help
+                Test patterns and the loopback self-test in the web UI. The
+                input analyser on the dashboard is always included.
+
+        config NODE_WEB_LOG
+            bool "Web log"
+            default y
+            help
+                Keep the console log in RAM so the web UI can show and
+                download it (System tab). The crash report is always included.
+
+        config NODE_WEB_LOG_KB
+            int "Web log size (KB)"
+            depends on NODE_WEB_LOG
+            range 2 256
+            default 32 if SPIRAM
+            default 8
+            help
+                RAM used for the log. Boards with PSRAM keep it there.
+
+        config NODE_MDNS
+            bool ".local name (mDNS)"
+            default y
+            help
+                Lets browsers find the node as http://<name>.local/.
+
+    endmenu
+
+endmenu

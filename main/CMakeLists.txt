@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS "main.c" "app_routing.c" "app_artnet.c" "app_config.c" "app_scenes.c" "app_indicator.c"
     INCLUDE_DIRS "."
     REQUIRES driver storage_manager config_manager led_manager network_manager dmx_handler
              artnet_receiver sacn_receiver artnet_transmitter sacn_transmitter

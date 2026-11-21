@@ -148,6 +148,10 @@ static void led_task(void *pvParameters) {
 
 esp_err_t led_manager_init(void) {
     ESP_LOGI(TAG, "Initializing LED Manager...");
+    if (LED_GPIO_PIN < 0) {
+        ESP_LOGI(TAG, "No status LED on this board");
+        return ESP_OK;   /* every led_manager_* call is then a no-op */
+    }
 
     // 1. RMT Config
     led_strip_config_t strip_config = {
@@ -183,7 +187,7 @@ esp_err_t led_manager_init(void) {
 
     // 3. Task
     is_running = true;
-    BaseType_t res = xTaskCreatePinnedToCore(led_task, "led_task", 2048, NULL, 3, &led_task_handle, 1);
+    BaseType_t res = xTaskCreatePinnedToCore(led_task, "led_task", 2048, NULL, 3, &led_task_handle, BOARD_CORE_DMX);
     if (res != pdPASS) {
         ESP_LOGE(TAG, "Failed to create task");
         return ESP_FAIL;

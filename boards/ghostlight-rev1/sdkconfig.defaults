@@ -1,0 +1,12 @@
+# Ghostlight Node rev1: ESP32-S3-WROOM-1-N8 (8 MB quad flash, no PSRAM)
+# (applied on top of the top-level sdkconfig.defaults by tools/build.sh)
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_BOARD_GHOSTLIGHT_REV1=y
+
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_8mb.csv"
+
+# No PSRAM on the N8: enabling it makes the boot fail
+# CONFIG_SPIRAM is not set

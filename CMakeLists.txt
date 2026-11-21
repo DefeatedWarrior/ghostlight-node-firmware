@@ -9,5 +9,12 @@ cmake_minimum_required(VERSION 3.5)
 # Firmware version (shown in the web UI, ArtPollReply and the OTA image)
 set(PROJECT_VER "1.0.0")
 
+# Board: tools/build.sh <board> passes SDKCONFIG_DEFAULTS for the board it
+# builds. Plain `idf.py build` (no SDKCONFIG_DEFAULTS given) builds the
+# Ghostlight Node rev1. See docs/DEVELOPING.md.
+if(NOT DEFINED SDKCONFIG_DEFAULTS AND NOT DEFINED ENV{SDKCONFIG_DEFAULTS})
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;boards/ghostlight-rev1/sdkconfig.defaults")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(ESP-NODE-2RDM)
