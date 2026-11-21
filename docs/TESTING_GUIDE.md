@@ -1,40 +1,40 @@
-# HƯỚNG DẪN TESTING VẬT LÝ
+# PHYSICAL TESTING GUIDE
 
-**Dự án:** Artnet-Node-2RDM  
-**Tài liệu:** Physical Testing Guide  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Project:** Artnet-Node-2RDM  
+**Document:** Physical Testing Guide  
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## MỤC ĐÍCH
+## PURPOSE
 
-Tài liệu này hướng dẫn chi tiết cách test vật lý firmware sau khi flash lên thiết bị, bao gồm:
+This document explains in detail how to test the firmware physically after flashing it to the device, covering:
 
-- Test từng module độc lập
-- Test tích hợp các module
-- Verify chức năng end-to-end
+- Testing each module on its own
+- Testing the modules together
+- Verifying end-to-end function
 - Performance testing
 - Stress testing
 - Troubleshooting
 
 ---
 
-## CHUẨN BỊ
+## PREPARATION
 
-### Thiết bị cần thiết
+### Equipment needed
 
-1. **ESP32-S3 Board** với firmware đã flash
-2. **DMX Controller/Console** (hoặc software như QLC+, Freestyler)
-3. **DMX Fixtures** (đèn LED, moving heads, etc.) - ít nhất 2 fixtures
-4. **DMX Cables** và XLR connectors
+1. **ESP32-S3 Board** with the firmware flashed
+2. **DMX Controller/Console** (or software such as QLC+, Freestyler)
+3. **DMX Fixtures** (LED fixtures, moving heads, etc.) - at least 2 fixtures
+4. **DMX Cables** and XLR connectors
 5. **Network Equipment**:
    - Router/Switch Ethernet
    - Ethernet cable Cat5e/Cat6
-   - Computer với Art-Net/sACN software
+   - Computer with Art-Net/sACN software
 6. **RDM Devices** (optional, cho RDM testing)
-7. **Multimeter** (optional, để đo voltage/signal)
-8. **Logic Analyzer** hoặc Oscilloscope (optional, để debug DMX timing)
+7. **Multimeter** (optional, to measure voltage/signal)
+8. **Logic Analyzer** or Oscilloscope (optional, to debug DMX timing)
 
 ### Software Tools
 
@@ -58,46 +58,46 @@ Tài liệu này hướng dẫn chi tiết cách test vật lý firmware sau khi
    - Angry IP Scanner
 
 4. **Web Browser**:
-   - Chrome/Firefox/Edge (để access web interface)
+   - Chrome/Firefox/Edge (to access the web interface)
 
 ---
 
-## 1. KIỂM TRA BAN ĐẦU (INITIAL CHECKS)
+## 1. INITIAL CHECKS
 
 ### 1.1. Power On Test
 
-**Mục tiêu:** Verify thiết bị khởi động đúng
+**Goal:** Verify the device boots correctly
 
-**Các bước:**
+**Steps:**
 
-1. Kết nối nguồn 5V DC vào board
-2. Quan sát LED status:
-   - ✅ LED sáng màu **xanh dương nhạt** (Boot state)
-   - ⏱️ Sau 2-5 giây, LED đổi màu tùy network state
+1. Connect 5V DC power to the board
+2. Watch the LED status:
+   - ✅ LED lights **light blue** (Boot state)
+   - ⏱️ After 2-5 seconds, the LED colour changes with the network state
 
-**Kết quả mong đợi:**
+**Expected result:**
 
-- LED không nhấp nháy đỏ (error)
-- Board không reset liên tục
-- Có thể thấy WiFi AP "ArtnetNode-XXXX" nếu không có Ethernet
+- LED is not blinking red (error)
+- Board is not resetting repeatedly
+- WiFi AP "ArtnetNode-XXXX" is visible if there is no Ethernet
 
 **Troubleshooting:**
 
-- LED đỏ nhấp nhanh → Check serial log, có thể lỗi hardware hoặc firmware corrupt
-- Không thấy LED → Check power supply, check GPIO 48 connection
+- LED blinks red fast → Check the serial log; possibly a hardware fault or corrupt firmware
+- No LED → Check the power supply, check the GPIO 48 connection
 
 ### 1.2. Serial Monitor Check
 
-**Mục tiêu:** Xem boot logs và debug info
+**Goal:** Read the boot logs and debug info
 
-**Các bước:**
+**Steps:**
 
-1. Kết nối USB serial (115200 baud)
-2. Mở serial monitor (PuTTY, screen, Arduino IDE)
+1. Connect USB serial (115200 baud)
+2. Open a serial monitor (PuTTY, screen, Arduino IDE)
 3. Reset board (press EN button)
-4. Quan sát boot sequence
+4. Watch the boot sequence
 
-**Log mong đợi:**
+**Expected log:**
 
 ```
 ESP-ROM:esp32s3-20210327
@@ -124,66 +124,66 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 #### Test 2.1.1: Ethernet Connection (Priority)
 
-**Các bước:**
+**Steps:**
 
-1. Kết nối Ethernet cable từ board đến router/switch
-2. Quan sát LED status:
-   - ✅ Màu **xanh lá tĩnh** = Ethernet connected
+1. Connect an Ethernet cable from the board to a router/switch
+2. Watch the LED status:
+   - ✅ **Steady green** = Ethernet connected
 3. Check serial log:
    ```
    I (XXX) NETWORK: Ethernet link up
    I (XXX) NETWORK: IP address: 192.168.1.XXX
    ```
-4. Từ computer, ping IP address:
+4. From a computer, ping the IP address:
    ```bash
    ping 192.168.1.100
    ```
-   - ✅ Nhận được reply
+   - ✅ Replies are received
 
 **Test cases:**
 
-- [ ] Ethernet DHCP - nhận IP tự động
-- [ ] Ethernet Static IP - cấu hình IP tĩnh
+- [ ] Ethernet DHCP - gets an IP automatically
+- [ ] Ethernet Static IP - static IP configuration
 - [ ] Ethernet cable unplug/replug - reconnect trong 5s
 - [ ] Ethernet link down - fallback to WiFi
 
 #### Test 2.1.2: WiFi Station Mode
 
-**Các bước:**
+**Steps:**
 
-1. Không kết nối Ethernet
-2. Cấu hình WiFi profile qua serial hoặc web
+1. Do not connect Ethernet
+2. Configure a WiFi profile over serial or the web
 3. Reboot board
-4. Quan sát LED:
-   - ✅ Màu **xanh lá nhấp nháy chậm** = WiFi STA connected
-5. Check IP address từ serial log
+4. Watch the LED:
+   - ✅ **Slow-blinking green** = WiFi STA connected
+5. Check the IP address in the serial log
 
 **Test cases:**
 
-- [ ] WiFi STA connect - password đúng
-- [ ] WiFi STA wrong password - skip và thử profile tiếp theo
+- [ ] WiFi STA connect - correct password
+- [ ] WiFi STA wrong password - skips to the next profile
 - [ ] WiFi STA out of range - skip profile
 - [ ] Multiple profiles - connect theo priority
 
 #### Test 2.1.3: WiFi Access Point Mode
 
-**Các bước:**
+**Steps:**
 
-1. Không kết nối Ethernet và không có WiFi profile valid
-2. Board sẽ tự động tạo WiFi AP
-3. Quan sát LED:
-   - ✅ Màu **tím tĩnh** = WiFi AP active
-4. Từ phone/laptop, scan WiFi:
-   - ✅ Thấy SSID: "ArtnetNode-XXXX"
-5. Connect vào AP (password: "12345678" hoặc theo config)
-6. Open browser, vào http://192.168.4.1
+1. No Ethernet connected and no valid WiFi profile
+2. The board creates a WiFi AP by itself
+3. Watch the LED:
+   - ✅ **Steady purple** = WiFi AP active
+4. From a phone/laptop, scan for WiFi:
+   - ✅ SSID visible: "ArtnetNode-XXXX"
+5. Connect to the AP (password: "12345678" or as configured)
+6. Open a browser at http://192.168.4.1
 
 **Test cases:**
 
-- [ ] AP mode activation khi không có network khác
-- [ ] AP SSID hiển thị đúng
+- [ ] AP mode activates when no other network is available
+- [ ] AP SSID is shown correctly
 - [ ] AP password authentication
-- [ ] Client device nhận IP từ DHCP
+- [ ] Client device gets an IP from DHCP
 - [ ] Web interface accessible
 
 ---
@@ -192,31 +192,31 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 #### Test 2.2.1: LED Status Indication
 
-**Các bước:**
+**Steps:**
 
-1. Test từng trạng thái network:
+1. Test each network state:
 
-   - Boot: Xanh dương nhạt
-   - Ethernet: Xanh lá tĩnh
-   - WiFi STA: Xanh lá nhấp chậm
-   - WiFi AP: Tím tĩnh
+   - Boot: light blue
+   - Ethernet: steady green
+   - WiFi STA: slow-blinking green
+   - WiFi AP: steady purple
 
 2. Test data receiving:
 
-   - Gửi Art-Net/sACN packet
-   - ✅ LED nhấp trắng 1 lần ngắn
+   - Send an Art-Net/sACN packet
+   - ✅ LED blinks white once, briefly
 
 3. Test error state:
    - Trigger error (disconnect critical component)
-   - ✅ LED đỏ nhấp nhanh
+   - ✅ LED blinks red fast
 
 **Test cases:**
 
 - [ ] Boot LED color
 - [ ] Network status LEDs
 - [ ] Data pulse on packet (max 10 Hz)
-- [ ] RDM discovery LED (vàng nhấp)
-- [ ] Error LED (đỏ nhấp nhanh)
+- [ ] RDM discovery LED (blinking yellow)
+- [ ] Error LED (fast-blinking red)
 
 ---
 
@@ -226,16 +226,16 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 **Setup:**
 
-- Kết nối DMX cable từ Port 1 đến DMX fixture
-- Cấu hình Port 1: Mode = DMX_OUT, Universe = 0
+- Connect a DMX cable from Port 1 to a DMX fixture
+- Configure Port 1: Mode = DMX_OUT, Universe = 0
 
-**Các bước:**
+**Steps:**
 
-1. Từ Art-Net controller, gửi DMX data đến Universe 0
-2. Quan sát fixture:
-   - ✅ Fixture nhận được DMX signal (LED indicator blink)
+1. From an Art-Net controller, send DMX data to Universe 0
+2. Watch the fixture:
+   - ✅ The fixture receives the DMX signal (LED indicator blinks)
    - ✅ Fixture respond theo DMX values
-3. Test các kênh:
+3. Test the channels:
    - Channel 1 = 255 → Fixture full brightness/value
    - Channel 1 = 0 → Fixture off/zero
    - Channel 1 = 128 → Fixture 50%
@@ -250,30 +250,30 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 #### Test 2.3.2: DMX Output Port 2
 
-**Các bước:** Tương tự Port 1, nhưng:
+**Steps:** Same as Port 1, but:
 
-- Kết nối Port 2
-- Universe = 1 (hoặc theo config)
-- Test độc lập với Port 1
+- Connect Port 2
+- Universe = 1 (or as configured)
+- Test independently of Port 1
 
 **Test cases:**
 
-- [ ] Port 2 hoạt động độc lập với Port 1
-- [ ] Gửi data đến cả 2 ports đồng thời
-- [ ] Verify không có crosstalk giữa 2 ports
+- [ ] Port 2 works independently of Port 1
+- [ ] Send data to both ports at the same time
+- [ ] Verify there is no crosstalk between the 2 ports
 
 #### Test 2.3.3: DMX Input Mode
 
 **Setup:**
 
-- Cấu hình Port 1: Mode = DMX_IN
-- Kết nối DMX controller/console đến Port 1 input
+- Configure Port 1: Mode = DMX_IN
+- Connect a DMX controller/console to the Port 1 input
 
-**Các bước:**
+**Steps:**
 
-1. Từ DMX console, gửi DMX data
+1. From the DMX console, send DMX data
 2. Access web interface, check DMX levels page
-3. Verify DMX values hiển thị chính xác
+3. Verify the DMX values are shown correctly
 
 **Test cases:**
 
@@ -286,46 +286,46 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 **Setup:**
 
-- Cấu hình Port 1: Mode = RDM_MASTER
-- Kết nối RDM-capable fixture đến Port 1
+- Configure Port 1: Mode = RDM_MASTER
+- Connect an RDM-capable fixture to Port 1
 
-**Các bước:**
+**Steps:**
 
 1. Access web interface → RDM page → Port 1
 2. Click "Start Discovery"
-3. Quan sát LED: Màu vàng nhấp nháy
-4. Sau 5-10 giây, check danh sách devices
-5. ✅ Fixture UID hiển thị trong danh sách
+3. Watch the LED: blinking yellow
+4. After 5-10 seconds, check the device list
+5. ✅ The fixture UID appears in the list
 
 **Test cases:**
 
-- [ ] RDM discovery tìm thấy devices
-- [ ] Device information đầy đủ (UID, model, manufacturer)
-- [ ] Discovery với multiple devices (2-5 devices)
-- [ ] Re-discovery sau khi thêm/bớt device
+- [ ] RDM discovery finds devices
+- [ ] Device information is complete (UID, model, manufacturer)
+- [ ] Discovery with multiple devices (2-5 devices)
+- [ ] Re-discovery after adding/removing a device
 
 #### Test 2.3.5: RDM Get/Set Parameters
 
-**Setup:** Sau khi discovery thành công
+**Setup:** After a successful discovery
 
-**Các bước:**
+**Steps:**
 
-1. Select device từ danh sách
-2. **RDM GET**: Đọc DMX start address
+1. Select a device from the list
+2. **RDM GET**: Read the DMX start address
 
    - Click "Get DMX Address"
-   - ✅ Hiển thị địa chỉ hiện tại (e.g., 001)
+   - ✅ Shows the current address (e.g., 001)
 
-3. **RDM SET**: Thay đổi DMX start address
+3. **RDM SET**: Change the DMX start address
 
-   - Nhập địa chỉ mới: 010
+   - Enter the new address: 010
    - Click "Set DMX Address"
-   - ✅ Fixture cập nhật địa chỉ
-   - Verify bằng cách GET lại
+   - ✅ The fixture updates its address
+   - Verify by doing a GET again
 
 4. **Identify Device**:
    - Click "Identify"
-   - ✅ Fixture blink/flash để identify
+   - ✅ The fixture blinks/flashes to identify itself
 
 **Test cases:**
 
@@ -344,10 +344,10 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 **Setup:**
 
-- Cấu hình Port 1: Merge Mode = HTP, Universe = 0
-- 2 Art-Net sources gửi đến cùng Universe 0
+- Configure Port 1: Merge Mode = HTP, Universe = 0
+- 2 Art-Net sources sending to the same Universe 0
 
-**Các bước:**
+**Steps:**
 
 1. Source 1 (IP .10): Ch1=100, Ch2=50
 2. Source 2 (IP .20): Ch1=50, Ch2=200
@@ -357,36 +357,36 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 **Test cases:**
 
-- [ ] HTP merge với 2 sources
-- [ ] HTP merge với 4 sources
+- [ ] HTP merge with 2 sources
+- [ ] HTP merge with 4 sources
 - [ ] One source timeout → use remaining source
 - [ ] All sources timeout → blackout
 
 #### Test 2.4.2: LTP Merge Mode
 
-**Các bước:** Tương tự HTP, nhưng:
+**Steps:** Same as HTP, but:
 
-- Cấu hình Merge Mode = LTP
-- Verify output = LOWEST values từ các sources
+- Configure Merge Mode = LTP
+- Verify output = LOWEST values from the sources
 
 #### Test 2.4.3: LAST Merge Mode
 
-**Các bước:**
+**Steps:**
 
-1. Source 1 gửi: Ch1=100
+1. Source 1 sends: Ch1=100
 2. Wait 1 second
-3. Source 2 gửi: Ch1=50
+3. Source 2 sends: Ch1=50
 4. ✅ Output = 50 (from last received source)
 
 **Test cases:**
 
 - [ ] Last packet wins
-- [ ] Switching giữa các sources
+- [ ] Switching between sources
 - [ ] Timeout detection
 
 #### Test 2.4.4: BACKUP Merge Mode
 
-**Các bước:**
+**Steps:**
 
 1. Source 1 (priority 100): Ch1=100
 2. Source 2 (priority 50): Ch1=200
@@ -399,7 +399,7 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 - [ ] Primary source active
 - [ ] Backup source active when primary timeout
-- [ ] Recovery khi primary trở lại
+- [ ] Recovery when the primary comes back
 
 ---
 
@@ -409,12 +409,12 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 **Setup:**
 
-- QLC+ hoặc Art-Net software
-- Cấu hình output Universe 0 → IP của ESP32
+- QLC+ or other Art-Net software
+- Configure output Universe 0 → the ESP32's IP
 
-**Các bước:**
+**Steps:**
 
-1. Từ QLC+, create fixture ở Universe 0
+1. In QLC+, create a fixture on Universe 0
 2. Set channel values
 3. Start output
 4. ✅ DMX fixture connected to Port 1 responds
@@ -429,11 +429,11 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 #### Test 2.5.2: Art-Poll Reply
 
-**Các bước:**
+**Steps:**
 
-1. Từ Art-Net controller, send ArtPoll
+1. From an Art-Net controller, send ArtPoll
 2. Check controller's node list
-3. ✅ "ArtNode-2RDM" hiển thị với đúng IP
+3. ✅ "ArtNode-2RDM" appears with the right IP
 4. Verify node information:
    - Short name
    - Long name
@@ -454,10 +454,10 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 **Setup:**
 
-- QLC+ với E1.31 (sACN) output enabled
+- QLC+ with E1.31 (sACN) output enabled
 - Universe 1 → Multicast 239.255.0.1
 
-**Các bước:**
+**Steps:**
 
 1. Enable E1.31 output trong QLC+
 2. Set fixture values
@@ -473,7 +473,7 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 #### Test 2.6.2: sACN Priority
 
-**Các bước:**
+**Steps:**
 
 1. Source 1 (priority 100): Ch1=100
 2. Source 2 (priority 150): Ch1=200
@@ -491,7 +491,7 @@ I (XXX) SYSTEM: Boot completed in XXX ms
 
 #### Test 2.7.1: Web Interface Access
 
-**Các bước:**
+**Steps:**
 
 1. Open browser, navigate to http://[ESP32_IP]
 2. ✅ Web page loads successfully
@@ -536,7 +536,7 @@ curl -X POST http://192.168.1.100/api/config \
 
 #### Test 2.7.3: WiFi Management
 
-**Các bước:**
+**Steps:**
 
 1. Access /api/wifi/scan
 2. ✅ Returns list of WiFi networks
@@ -554,12 +554,12 @@ curl -X POST http://192.168.1.100/api/config \
 
 #### Test 2.7.4: WebSocket Real-time Updates
 
-**Các bước:**
+**Steps:**
 
 1. Open web interface → DMX Monitor page
 2. Open WebSocket connection to /ws/dmx/1
-3. Send DMX data từ Art-Net controller
-4. ✅ DMX levels update real-time trên web page
+3. Send DMX data from an Art-Net controller
+4. ✅ DMX levels update in real time on the web page
 
 **Test cases:**
 
@@ -574,12 +574,12 @@ curl -X POST http://192.168.1.100/api/config \
 
 #### Test 2.8.1: Configuration Persistence
 
-**Các bước:**
+**Steps:**
 
 1. Change configuration qua web interface
 2. Reboot device (power cycle)
 3. ✅ Configuration retained sau reboot
-4. Verify từ /api/config
+4. Verify via /api/config
 
 **Test cases:**
 
@@ -590,11 +590,11 @@ curl -X POST http://192.168.1.100/api/config \
 
 #### Test 2.8.2: Factory Reset
 
-**Các bước:**
+**Steps:**
 
 1. Call /api/system/factory-reset
 2. Device reboots
-3. ✅ All settings trở về mặc định
+3. ✅ All settings return to their defaults
 4. WiFi AP mode active (no saved profiles)
 
 **Test cases:**
@@ -606,7 +606,7 @@ curl -X POST http://192.168.1.100/api/config \
 
 ---
 
-## 3. TÍCH HỢP TESTING (INTEGRATION)
+## 3. INTEGRATION TESTING
 
 ### 3.1. Full System Test
 
@@ -618,7 +618,7 @@ curl -X POST http://192.168.1.100/api/config \
 - 2 DMX fixtures on Port 1 and Port 2
 - QLC+ with 2 universes
 
-**Các bước:**
+**Steps:**
 
 1. **Network**: Verify Ethernet connected
 2. **Art-Net**: QLC+ sends to Universe 0, 1
@@ -645,7 +645,7 @@ curl -X POST http://192.168.1.100/api/config \
 - Both send to Universe 0
 - Merge Mode = HTP
 
-**Các bước:**
+**Steps:**
 
 1. Source 1: Ch1-10 = 100
 2. Source 2: Ch11-20 = 200
@@ -666,13 +666,13 @@ curl -X POST http://192.168.1.100/api/config \
 
 ### 4.1. Maximum Packet Rate
 
-**Mục tiêu:** Verify device có thể handle high packet rate
+**Goal:** Verify the device can handle a high packet rate
 
 **Test:**
 
 1. QLC+ send Art-Net at max rate (44 Hz per universe)
-2. Monitor với Wireshark
-3. Check DMX output không bị drop frames
+2. Monitor with Wireshark
+3. Check the DMX output does not drop frames
 
 **Metrics:**
 
@@ -686,9 +686,9 @@ curl -X POST http://192.168.1.100/api/config \
 **Test:**
 
 1. Send data to Universe 0-9 (10 universes)
-2. Device chỉ subscribe Universe 0, 1
-3. ✅ Device không bị overload
-4. Port 1, 2 vẫn stable
+2. The device subscribes only to Universe 0, 1
+3. ✅ The device is not overloaded
+4. Ports 1 and 2 stay stable
 
 **Metrics:**
 
@@ -701,7 +701,7 @@ curl -X POST http://192.168.1.100/api/config \
 
 **Test:**
 
-1. Chạy liên tục 24 giờ
+1. Run continuously for 24 hours
 2. Monitor memory usage
 3. Check uptime
 
@@ -732,8 +732,8 @@ curl -X POST http://192.168.1.100/api/config \
 **Test:**
 
 1. Device running
-2. Ngắt nguồn đột ngột
-3. Cấp nguồn lại
+2. Cut the power suddenly
+3. Power it back up
 4. ✅ Device boots, loads config
 5. Reconnects to network
 6. Resumes DMX output
@@ -754,14 +754,14 @@ curl -X POST http://192.168.1.100/api/config \
 
 | Symptom                             | Possible Cause                 | Solution                                      |
 | ----------------------------------- | ------------------------------ | --------------------------------------------- |
-| LED đỏ nhấp nhanh                   | System error, boot fail        | Check serial log, reflash firmware            |
-| Không có LED                        | Power issue, GPIO 48 fail      | Check power supply, check WS2812 connection   |
-| Không connect WiFi                  | Wrong password, out of range   | Check WiFi credentials, move closer to AP     |
-| Không nhận Art-Net                  | Wrong universe, firewall       | Check universe config, disable firewall       |
-| DMX fixture không respond           | Cable issue, wrong universe    | Check DMX cable, verify universe mapping      |
+| LED blinks red fast                 | System error, boot fail        | Check serial log, reflash firmware            |
+| No LED                              | Power issue, GPIO 48 fail      | Check power supply, check WS2812 connection   |
+| Does not connect to WiFi            | Wrong password, out of range   | Check WiFi credentials, move closer to AP     |
+| No Art-Net received                 | Wrong universe, firewall       | Check universe config, disable firewall       |
+| DMX fixture does not respond        | Cable issue, wrong universe    | Check DMX cable, verify universe mapping      |
 | DMX flickering                      | Packet loss, merge timeout     | Check network quality, increase merge timeout |
-| Web interface không load            | Network issue, server crash    | Check IP address, reboot device               |
-| RDM discovery không tìm thấy device | RDM not supported, cable issue | Verify device supports RDM, check cable       |
+| Web interface does not load         | Network issue, server crash    | Check IP address, reboot device               |
+| RDM discovery finds no device       | RDM not supported, cable issue | Verify device supports RDM, check cable       |
 
 ### Debug Tools
 
@@ -901,6 +901,6 @@ PERFORMANCE (Optional)
 
 ---
 
-**KẾT THÚC HƯỚNG DẪN TESTING**
+**END OF TESTING GUIDE**
 
-Tuân thủ testing procedure này đảm bảo firmware hoạt động ổn định và đúng spec trước khi release!
+Following this testing procedure makes sure the firmware is stable and meets the spec before release!

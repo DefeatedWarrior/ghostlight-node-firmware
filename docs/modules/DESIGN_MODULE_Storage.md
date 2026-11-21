@@ -1,16 +1,16 @@
-# THIẾT KẾ MODULE: Storage
+# MODULE DESIGN: Storage
 
-**Dự án:** Artnet-Node-2RDM  
+**Project:** Artnet-Node-2RDM  
 **Module:** Storage Management (LittleFS & NVS)  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## 1. Mục đích
+## 1. Purpose
 
-Module Storage quản lý lưu trữ dữ liệu persistent:
-- **LittleFS**: File system cho config.json và web files
+The Storage module manages persistent data storage:
+- **LittleFS**: file system for config.json and the web files
 - **NVS**: Non-Volatile Storage cho binary config backup
 - **OTA**: Firmware update partitions
 
@@ -64,26 +64,26 @@ littlefs,   data, spiffs,   0x620000, 0x100000,
 
 ```c
 /**
- * Khởi tạo Storage module
- * @return ESP_OK nếu thành công
+ * Initialize the Storage module
+ * @return ESP_OK on success
  */
 esp_err_t storage_init(void);
 
 /**
  * Mount LittleFS
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_mount_littlefs(void);
 
 /**
  * Unmount LittleFS
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_unmount_littlefs(void);
 
 /**
  * Format LittleFS partition
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_format_littlefs(void);
 ```
@@ -105,14 +105,14 @@ int storage_read_file(const char *path, uint8_t *buffer, size_t max_size);
  * @param path File path
  * @param data Data to write
  * @param size Data size
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_write_file(const char *path, const uint8_t *data, size_t size);
 
 /**
  * Delete file from LittleFS
  * @param path File path
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_delete_file(const char *path);
 
@@ -140,7 +140,7 @@ int storage_get_file_size(const char *path);
  * @param key Key name
  * @param data Data to write
  * @param size Data size
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_nvs_write(const char *namespace, const char *key,
                             const void *data, size_t size);
@@ -151,7 +151,7 @@ esp_err_t storage_nvs_write(const char *namespace, const char *key,
  * @param key Key name
  * @param data Buffer to store data
  * @param size Buffer size
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_nvs_read(const char *namespace, const char *key,
                            void *data, size_t *size);
@@ -160,14 +160,14 @@ esp_err_t storage_nvs_read(const char *namespace, const char *key,
  * Delete key from NVS
  * @param namespace NVS namespace
  * @param key Key name
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_nvs_delete(const char *namespace, const char *key);
 
 /**
  * Erase NVS namespace
  * @param namespace NVS namespace
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_nvs_erase_namespace(const char *namespace);
 ```
@@ -179,26 +179,26 @@ esp_err_t storage_nvs_erase_namespace(const char *namespace);
  * Load configuration from storage
  * Priority: NVS -> LittleFS -> Defaults
  * @param config Buffer to store configuration
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_load_config(system_config_t *config);
 
 /**
  * Save configuration to storage (both NVS and LittleFS)
  * @param config Configuration to save
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_save_config(const system_config_t *config);
 
 /**
  * Backup current config file
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_backup_config(void);
 
 /**
  * Restore config from backup
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_restore_config_backup(void);
 ```
@@ -210,7 +210,7 @@ esp_err_t storage_restore_config_backup(void);
  * Get LittleFS usage statistics
  * @param total_bytes Total partition size
  * @param used_bytes Used space
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_get_usage(size_t *total_bytes, size_t *used_bytes);
 
@@ -219,7 +219,7 @@ esp_err_t storage_get_usage(size_t *total_bytes, size_t *used_bytes);
  * @param namespace NVS namespace
  * @param used_entries Used entries
  * @param free_entries Free entries
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t storage_nvs_get_stats(const char *namespace,
                                size_t *used_entries,

@@ -1,15 +1,15 @@
-# THIẾT KẾ MODULE: Art-Net Receiver
+# MODULE DESIGN: Art-Net Receiver
 
-**Dự án:** Artnet-Node-2RDM  
+**Project:** Artnet-Node-2RDM  
 **Module:** Art-Net Protocol Receiver  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## 1. Mục đích
+## 1. Purpose
 
-Module Art-Net Receiver nhận và xử lý các gói tin Art-Net từ mạng:
+The Art-Net Receiver module receives and handles Art-Net packets from the network:
 - ArtDmx: DMX data packets
 - ArtPoll: Discovery requests
 - ArtPollReply: Node information
@@ -89,24 +89,24 @@ typedef struct {
 
 ## 4. API Public
 
-### 4.1. Khởi tạo
+### 4.1. Initialization
 
 ```c
 /**
- * Khởi tạo Art-Net Receiver
- * @return ESP_OK nếu thành công
+ * Initialize the Art-Net Receiver
+ * @return ESP_OK on success
  */
 esp_err_t artnet_init(void);
 
 /**
  * Start Art-Net receiver
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t artnet_start(void);
 
 /**
  * Stop Art-Net receiver
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t artnet_stop(void);
 ```
@@ -118,7 +118,7 @@ esp_err_t artnet_stop(void);
  * Set node information
  * @param short_name Short name (max 17 chars)
  * @param long_name Long name (max 63 chars)
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t artnet_set_node_info(const char *short_name, const char *long_name);
 
@@ -126,7 +126,7 @@ esp_err_t artnet_set_node_info(const char *short_name, const char *long_name);
  * Set output universe for a port
  * @param port Port number (1 or 2)
  * @param universe Universe (0-32767)
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t artnet_set_output_universe(uint8_t port, uint16_t universe);
 
@@ -134,7 +134,7 @@ esp_err_t artnet_set_output_universe(uint8_t port, uint16_t universe);
  * Enable/disable a port
  * @param port Port number (1 or 2)
  * @param enabled true to enable
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t artnet_set_port_enabled(uint8_t port, bool enabled);
 ```
@@ -143,7 +143,7 @@ esp_err_t artnet_set_port_enabled(uint8_t port, bool enabled);
 
 ```c
 /**
- * Đăng ký callback khi nhận ArtDmx
+ * Register a callback for received ArtDmx
  * @param callback Callback function
  * @param user_data User data
  */
@@ -151,7 +151,7 @@ void artnet_register_dmx_callback(artnet_dmx_callback_t callback,
                                   void *user_data);
 
 /**
- * Đăng ký callback khi nhận ArtPoll
+ * Register a callback for received ArtPoll
  * @param callback Callback function
  */
 void artnet_register_poll_callback(artnet_poll_callback_t callback);
@@ -161,15 +161,15 @@ void artnet_register_poll_callback(artnet_poll_callback_t callback);
 
 ```c
 /**
- * Lấy thống kê Art-Net
+ * Get Art-Net statistics
  * @param stats Buffer to store statistics
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t artnet_get_stats(artnet_stats_t *stats);
 
 /**
  * Reset statistics
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t artnet_reset_stats(void);
 ```
@@ -423,7 +423,7 @@ static void parse_universe(uint16_t universe, uint8_t *net,
 
 ## 8. Error Handling
 
-| Lỗi | Hành động |
+| Error | Action |
 |-----|-----------|
 | Socket create fail | Retry 3 times, log error |
 | Bind fail | Log error, disable Art-Net |

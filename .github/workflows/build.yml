@@ -1,0 +1,50 @@
+# Builds the firmware for every board in boards/, plus a "minimal" build per
+# chip with every optional feature switched off (tools/ci/minimal.defaults),
+# so code behind each feature switch keeps compiling both ways. ESP-IDF's own
+# size check fails the build if an app no longer fits its partition.
+# See docs/DEVELOPING.md.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ghostlight-rev1,       board: ghostlight-rev1, target: esp32s3 }
+          - { name: esp-node-2rdm,         board: esp-node-2rdm,   target: esp32s3 }
+          - { name: esp32-devkitc,         board: esp32-devkitc,   target: esp32 }
+          - { name: esp-node-2rdm-minimal, board: esp-node-2rdm,   target: esp32s3, extra: tools/ci/minimal.defaults }
+          - { name: esp32-devkitc-minimal, board: esp32-devkitc,   target: esp32,   extra: tools/ci/minimal.defaults }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.2.6
+          target: ${{ matrix.target }}
+          command: >-
+            BUILD_DIR=build-${{ matrix.name }}
+            EXTRA_DEFAULTS=${{ matrix.extra }}
+            tools/build.sh ${{ matrix.board }} build size
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ matrix.name }}
+          path: |
+            build-${{ matrix.name }}/*.bin
+            build-${{ matrix.name }}/bootloader/bootloader.bin
+            build-${{ matrix.name }}/partition_table/partition-table.bin
+            build-${{ matrix.name }}/flasher_args.json
+            build-${{ matrix.name }}/sdkconfig
+          if-no-files-found: error

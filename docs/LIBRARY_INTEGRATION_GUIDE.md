@@ -1,14 +1,14 @@
-# HƯỚNG DẪN TÍCH HỢP THƯ VIỆN
-**Dự án: ESP-NODE-2RDM**
+# LIBRARY INTEGRATION GUIDE
+**Project: ESP-NODE-2RDM**
 
-**Phiên bản:** 1.0  
-**Ngày:** 25/12/2025
+**Version:** 1.0  
+**Date:** 25/12/2025
 
 ---
 
-## MỤC LỤC
-1. [Tổng quan](#1-tổng-quan)
-2. [Thư viện ESP-IDF chính thức](#2-thư-viện-esp-idf-chính-thức)
+## CONTENTS
+1. [Overview](#1-overview)
+2. [Official ESP-IDF libraries](#2-official-esp-idf-libraries)
 3. [esp-dmx - DMX512/RDM](#3-esp-dmx---dmx512rdm)
 4. [libe131 - sACN Receiver](#4-libe131---sacn-receiver)
 5. [Art-Net Implementation](#5-art-net-implementation)
@@ -17,30 +17,30 @@
 
 ---
 
-## 1. TỔNG QUAN
+## 1. OVERVIEW
 
-Tài liệu này mô tả chi tiết cách tích hợp từng thư viện vào dự án, bao gồm:
-- Cách thêm thư viện vào project
-- Cấu hình CMakeLists.txt
-- API sử dụng chính
-- Ví dụ code
+This document describes in detail how each library is integrated into the project, including:
+- How to add the library to the project
+- CMakeLists.txt configuration
+- The main API used
+- Code examples
 - Troubleshooting
 
-### 1.1. Nguyên tắc chọn thư viện
+### 1.1. How libraries are chosen
 
-✅ **Ưu tiên cao nhất:**
-1. Thư viện chính thức ESP-IDF
-2. Thư viện được maintain tốt (commit trong 6 tháng gần)
-3. Thư viện có documentation đầy đủ
-4. Thư viện đã được test với ESP32-S3
+✅ **Highest priority:**
+1. Official ESP-IDF libraries
+2. Well-maintained libraries (commits in the last 6 months)
+3. Libraries with complete documentation
+4. Libraries tested on the ESP32-S3
 
-❌ **Tránh:**
-1. Thư viện Arduino-only (khó port)
-2. Thư viện abandoned (> 2 năm không update)
-3. Thư viện có dependency phức tạp
-4. Thư viện closed-source
+❌ **Avoid:**
+1. Arduino-only libraries (hard to port)
+2. Abandoned libraries (no update for > 2 years)
+3. Libraries with complicated dependencies
+4. Closed-source libraries
 
-### 1.2. Cấu trúc thư viện trong project
+### 1.2. Library layout in the project
 
 ```
 ESP-NODE-2RDM/
@@ -58,15 +58,15 @@ ESP-NODE-2RDM/
 
 ---
 
-## 2. THƯ VIỆN ESP-IDF CHÍNH THỨC
+## 2. OFFICIAL ESP-IDF LIBRARIES
 
-Các thư viện này đã có sẵn khi cài ESP-IDF, chỉ cần khai báo trong CMakeLists.txt.
+These libraries come with ESP-IDF; they only need to be listed in CMakeLists.txt.
 
 ### 2.1. esp_eth - Ethernet Driver
 
-**Mục đích:** Driver cho W5500 Ethernet controller qua SPI
+**Purpose:** driver for the W5500 Ethernet controller over SPI
 
-**Thêm vào CMakeLists.txt:**
+**Add to CMakeLists.txt:**
 ```cmake
 idf_component_register(
     SRCS "network_manager.c"
@@ -75,7 +75,7 @@ idf_component_register(
 )
 ```
 
-**API chính:**
+**Main API:**
 ```c
 #include "esp_eth.h"
 #include "esp_eth_driver.h"
@@ -112,14 +112,14 @@ https://docs.espressif.com/projects/esp-idf/en/v5.2.6/esp32s3/api-reference/netw
 
 ### 2.2. esp_wifi - WiFi Driver
 
-**Mục đích:** WiFi Station và Access Point modes
+**Purpose:** WiFi Station and Access Point modes
 
-**Thêm vào CMakeLists.txt:**
+**Add to CMakeLists.txt:**
 ```cmake
 REQUIRES esp_wifi esp_netif nvs_flash
 ```
 
-**API chính (STA mode):**
+**Main API (STA mode):**
 ```c
 #include "esp_wifi.h"
 
@@ -139,7 +139,7 @@ esp_wifi_start();
 esp_wifi_connect();
 ```
 
-**API chính (AP mode):**
+**Main API (AP mode):**
 ```c
 wifi_config_t ap_config = {
     .ap = {
@@ -162,14 +162,14 @@ https://docs.espressif.com/projects/esp-idf/en/v5.2.6/esp32s3/api-reference/netw
 
 ### 2.3. esp_http_server - HTTP Server + WebSocket
 
-**Mục đích:** Web server cho configuration interface
+**Purpose:** web server for the configuration interface
 
-**Thêm vào CMakeLists.txt:**
+**Add to CMakeLists.txt:**
 ```cmake
 REQUIRES esp_http_server
 ```
 
-**API chính:**
+**Main API:**
 ```c
 #include "esp_http_server.h"
 
@@ -232,14 +232,14 @@ https://docs.espressif.com/projects/esp-idf/en/v5.2.6/esp32s3/api-reference/prot
 
 ### 2.4. led_strip - WS2812 LED Control
 
-**Mục đích:** Điều khiển WS2812 LED status
+**Purpose:** drive the WS2812 status LED
 
-**Thêm vào CMakeLists.txt:**
+**Add to CMakeLists.txt:**
 ```cmake
 REQUIRES led_strip
 ```
 
-**API chính:**
+**Main API:**
 ```c
 #include "led_strip.h"
 
@@ -273,14 +273,14 @@ https://github.com/espressif/idf-extra-components/tree/master/led_strip
 
 ### 2.5. cJSON - JSON Parsing
 
-**Mục đích:** Parse và generate JSON cho configuration
+**Purpose:** parse and generate JSON for the configuration
 
-**Thêm vào CMakeLists.txt:**
+**Add to CMakeLists.txt:**
 ```cmake
 REQUIRES json
 ```
 
-**API chính:**
+**Main API:**
 ```c
 #include "cJSON.h"
 
@@ -309,14 +309,14 @@ https://github.com/DaveGamble/cJSON
 
 ### 2.6. nvs_flash - Non-Volatile Storage
 
-**Mục đích:** Lưu trữ config cơ bản (fallback nếu LittleFS lỗi)
+**Purpose:** store the basic config (fallback if LittleFS fails)
 
-**Thêm vào CMakeLists.txt:**
+**Add to CMakeLists.txt:**
 ```cmake
 REQUIRES nvs_flash
 ```
 
-**API chính:**
+**Main API:**
 ```c
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -368,7 +368,7 @@ git submodule update --init --recursive
 
 ### 3.2. CMakeLists.txt
 
-Trong component sử dụng DMX (e.g., `dmx_handler/CMakeLists.txt`):
+In a component that uses DMX (e.g., `dmx_handler/CMakeLists.txt`):
 ```cmake
 idf_component_register(
     SRCS "dmx_handler.c"
@@ -494,17 +494,17 @@ static void dmx_output_task(void *arg) {
 
 ### 3.6. Troubleshooting
 
-**Problem:** DMX không output
+**Problem:** no DMX output
 - Check GPIO configuration
 - Verify RS485 transceiver wiring
 - Check TX enable pin (EN/DIR)
-- Use oscilloscope để verify signal
+- Use an oscilloscope to verify the signal
 
-**Problem:** RDM không hoạt động
-- RDM cần bidirectional communication
+**Problem:** RDM does not work
+- RDM needs bidirectional communication
 - Check RX pin connection
 - Verify timing (esp-dmx handles this)
-- Some devices không support RDM
+- Some devices do not support RDM
 
 **Documentation:**
 https://github.com/someweisguy/esp-dmx
@@ -527,7 +527,7 @@ git clone https://github.com/hhromic/libe131.git libe131
 
 ### 4.2. CMakeLists.txt Setup
 
-Tạo `components/libe131/CMakeLists.txt`:
+Create `components/libe131/CMakeLists.txt`:
 ```cmake
 idf_component_register(
     SRCS "src/e131.c"
@@ -656,7 +656,7 @@ CONFIG_LWIP_RECV_BUFSIZE_DEFAULT=16384
 
 ### 4.7. Troubleshooting
 
-**Problem:** Không nhận được sACN packets
+**Problem:** no sACN packets received
 - Check multicast join (use Wireshark)
 - Verify IGMP enabled in lwIP
 - Check firewall/router settings
@@ -674,7 +674,7 @@ https://github.com/hhromic/libe131
 
 ## 5. ART-NET IMPLEMENTATION
 
-Art-Net đơn giản hơn sACN, có 2 options:
+Art-Net is simpler than sACN; there are 2 options:
 
 ### Option 1: Port existing library (e.g., hideakitai/ArtNet)
 ### Option 2: Custom minimal implementation (Recommended)
@@ -843,11 +843,11 @@ void app_main(void) {
 
 ### 5.4. Troubleshooting
 
-**Problem:** Không nhận Art-Net packets
+**Problem:** no Art-Net packets received
 - Verify UDP port 6454 open
 - Check broadcast/unicast address
-- Use Wireshark để capture packets
-- Some software gửi broadcast (255.255.255.255)
+- Use Wireshark to capture packets
+- Some software sends broadcast (255.255.255.255)
 
 ---
 
@@ -993,17 +993,17 @@ git pull origin main
 
 ---
 
-## PHỤ LỤC: CHECKLIST TÍCH HỢP THƯ VIỆN
+## APPENDIX: LIBRARY INTEGRATION CHECKLIST
 
-- [ ] esp-dmx cloned vào components/
-- [ ] libe131 cloned và tạo CMakeLists.txt
-- [ ] Partition table có LittleFS partition
-- [ ] sdkconfig.defaults có đầy đủ config
-- [ ] Tất cả REQUIRES được khai báo trong CMakeLists.txt
-- [ ] Build thành công không có warnings
-- [ ] Test từng thư viện độc lập
+- [ ] esp-dmx cloned into components/
+- [ ] libe131 cloned, with a CMakeLists.txt created
+- [ ] Partition table has a LittleFS partition
+- [ ] sdkconfig.defaults has the complete config
+- [ ] Every REQUIRES is declared in CMakeLists.txt
+- [ ] Builds successfully with no warnings
+- [ ] Each library tested on its own
 - [ ] Verify API documentation
 
 ---
 
-**Tài liệu này cập nhật theo tiến độ phát triển.**
+**This document is updated as development progresses.**

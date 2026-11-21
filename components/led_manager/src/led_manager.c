@@ -179,10 +179,10 @@ esp_err_t led_manager_init(void) {
     }
 
     // ============================================================
-    // Khởi tạo trạng thái mặc định với ưu tiên thấp nhất
+    // Start in the default state with the lowest priority
     // ============================================================
     memset(&current_state, 0, sizeof(led_event_t));
-    current_state.priority = LED_PRIORITY_LOWEST; // Giá trị là 255
+    current_state.priority = LED_PRIORITY_LOWEST; // value 255
     // ============================================================
 
     // 3. Task
@@ -260,8 +260,8 @@ esp_err_t led_manager_clear(void) {
     
     led_event_t event = {
         .state = LED_STATE_MAX,
-        .priority = 0,           // Ưu tiên cao nhất để chiếm quyền
-        .duration_ms = 1,        // Chỉ tồn tại 1ms rồi biến mất
+        .priority = 0,           // highest priority, to take over
+        .duration_ms = 1,        // lasts only 1 ms, then goes away
         .behavior = LED_BEHAVIOR_STATIC
     };
     

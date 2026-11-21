@@ -1,18 +1,18 @@
-# THIẾT KẾ MODULE: sACN Receiver
+# MODULE DESIGN: sACN Receiver
 
-**Dự án:** Artnet-Node-2RDM  
+**Project:** Artnet-Node-2RDM  
 **Module:** sACN (E1.31) Protocol Receiver  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## 1. Mục đích
+## 1. Purpose
 
-Module sACN Receiver nhận và xử lý các gói tin sACN (Streaming ACN / E1.31) từ mạng:
-- Nhận DMX data qua multicast
-- Hỗ trợ priority
-- Hỗ trợ preview data
+The sACN Receiver module receives and handles sACN (Streaming ACN / E1.31) packets from the network:
+- Receives DMX data over multicast
+- Supports priority
+- Supports preview data
 - Source name tracking
 - Sequence number checking
 
@@ -77,24 +77,24 @@ typedef struct {
 
 ## 4. API Public
 
-### 4.1. Khởi tạo
+### 4.1. Initialization
 
 ```c
 /**
- * Khởi tạo sACN Receiver
- * @return ESP_OK nếu thành công
+ * Initialize the sACN Receiver
+ * @return ESP_OK on success
  */
 esp_err_t sacn_init(void);
 
 /**
  * Start sACN receiver
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t sacn_start(void);
 
 /**
  * Stop sACN receiver
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t sacn_stop(void);
 ```
@@ -105,20 +105,20 @@ esp_err_t sacn_stop(void);
 /**
  * Subscribe to a universe
  * @param universe Universe number (1-63999)
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t sacn_subscribe_universe(uint16_t universe);
 
 /**
  * Unsubscribe from a universe
  * @param universe Universe number
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t sacn_unsubscribe_universe(uint16_t universe);
 
 /**
  * Subscribe to universes for both ports
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t sacn_subscribe_configured_universes(void);
 ```
@@ -127,7 +127,7 @@ esp_err_t sacn_subscribe_configured_universes(void);
 
 ```c
 /**
- * Đăng ký callback khi nhận sACN data
+ * Register a callback for received sACN data
  * @param callback Callback function
  * @param user_data User data
  */
@@ -139,15 +139,15 @@ void sacn_register_data_callback(sacn_data_callback_t callback,
 
 ```c
 /**
- * Lấy thống kê sACN
+ * Get sACN statistics
  * @param stats Buffer to store statistics
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t sacn_get_stats(sacn_stats_t *stats);
 
 /**
  * Reset statistics
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t sacn_reset_stats(void);
 
@@ -464,16 +464,16 @@ sACN priority (0-200):
 - 100: Default priority
 - 200: Highest priority
 
-Priority được sử dụng trong Merge Engine để quyết định nguồn nào được ưu tiên.
+The Merge Engine uses the priority to decide which source wins.
 
 ---
 
 ## 7. Sequence Number
 
 - 8-bit counter (0-255)
-- Tăng dần cho mỗi packet
-- Wrap around từ 255 về 0
-- Dùng để phát hiện packet loss và out-of-order
+- Increments with every packet
+- Wraps around from 255 to 0
+- Used to detect packet loss and out-of-order packets
 
 ---
 
@@ -491,7 +491,7 @@ Priority được sử dụng trong Merge Engine để quyết định nguồn n
 
 ## 9. Error Handling
 
-| Lỗi | Hành động |
+| Error | Action |
 |-----|-----------|
 | Socket create fail | Retry 3 times, log error |
 | Multicast join fail | Log error, continue |

@@ -1,15 +1,15 @@
-# LỘ TRÌNH TRIỂN KHAI FIRMWARE
+# FIRMWARE IMPLEMENTATION ROADMAP
 
-**Dự án: ESP-NODE-2RDM**
+**Project: ESP-NODE-2RDM**
 
-**Phiên bản:** 1.0  
-**Ngày:** 25/12/2025
+**Version:** 1.0  
+**Date:** 25/12/2025
 
 ---
 
-## MỤC LỤC
+## CONTENTS
 
-1. [Tổng quan](#1-tổng-quan)
+1. [Overview](#1-overview)
 2. [Sprint 0: Project Setup](#sprint-0-project-setup)
 3. [Sprint 1: Storage & Configuration](#sprint-1-storage--configuration)
 4. [Sprint 2: LED Manager](#sprint-2-led-manager)
@@ -23,47 +23,47 @@
 
 ---
 
-## 1. TỔNG QUAN
+## 1. OVERVIEW
 
-### 1.1. Phương pháp phát triển
+### 1.1. Development approach
 
 **Approach:** Bottom-up + Incremental  
-**Duration:** 15 sprints (không ước lượng thời gian cụ thể)  
-**Testing:** Continuous integration testing sau mỗi sprint
+**Duration:** 15 sprints (no specific time estimates)  
+**Testing:** continuous integration testing after every sprint
 
-### 1.2. Mục tiêu từng phase
+### 1.2. Goals of each phase
 
 | Phase | Module      | Deliverable                             |
 | ----- | ----------- | --------------------------------------- |
 | 0     | Setup       | ESP-IDF project structure, build system |
 | 1     | Storage     | LittleFS + Config management            |
 | 2     | LED         | WS2812 status indicator                 |
-| 3-4   | Network     | Ethernet + WiFi với fallback            |
-| 5-6   | DMX/RDM     | 2 cổng DMX512/RDM functional            |
+| 3-4   | Network     | Ethernet + WiFi with fallback           |
+| 5-6   | DMX/RDM     | 2 working DMX512/RDM ports              |
 | 7-8   | Protocols   | Art-Net + sACN receivers                |
-| 9-10  | Merge       | Data merging với HTP/LTP/etc            |
+| 9-10  | Merge       | Data merging with HTP/LTP/etc           |
 | 11-12 | Web         | HTTP + WebSocket interface              |
 | 13    | Integration | Full system integration                 |
 | 14-15 | Testing     | Performance tuning + stability          |
 
 ### 1.3. Success Criteria
 
-Sau mỗi sprint:
+After every sprint:
 
 - ✅ Code builds without warnings
 - ✅ Module tests passed
 - ✅ Documentation updated
-- ✅ Git commit với clear message
+- ✅ Git commit with a clear message
 
 ---
 
 ## SPRINT 0: PROJECT SETUP
 
-### Mục tiêu
+### Goals
 
-Tạo cấu trúc project ESP-IDF hoàn chỉnh, có thể build thành công.
+Create a complete ESP-IDF project structure that builds successfully.
 
-### Công việc chi tiết
+### Detailed tasks
 
 #### Task 0.1: Create ESP-IDF Project
 
@@ -88,7 +88,7 @@ mkdir -p tools/test_scripts
 
 #### Task 0.3: Create Partition Table
 
-**Tạo `partitions.csv`:**
+**Create `partitions.csv`:**
 
 ```csv
 # Name,     Type, SubType,  Offset,   Size,     Flags
@@ -101,7 +101,7 @@ littlefs,   data, spiffs,   0x210000, 0x100000,
 
 #### Task 0.4: Configure sdkconfig.defaults
 
-**Tạo `sdkconfig.defaults`:**
+**Create `sdkconfig.defaults`:**
 
 ```ini
 # Target
@@ -162,7 +162,7 @@ CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=n
 
 #### Task 0.5: Setup Root CMakeLists.txt
 
-**Tạo `CMakeLists.txt`:**
+**Create `CMakeLists.txt`:**
 
 ```cmake
 # Minimum CMake version
@@ -182,7 +182,7 @@ project(esp-node-2rdm)
 
 #### Task 0.6: Create Main Component
 
-**Tạo `main/CMakeLists.txt`:**
+**Create `main/CMakeLists.txt`:**
 
 ```cmake
 idf_component_register(
@@ -191,7 +191,7 @@ idf_component_register(
 )
 ```
 
-**Tạo `main/main.c`:**
+**Create `main/main.c`:**
 
 ```c
 #include <stdio.h>
@@ -225,7 +225,7 @@ void app_main(void)
 
 #### Task 0.7: Setup .gitignore
 
-**Tạo `.gitignore`:**
+**Create `.gitignore`:**
 
 ```gitignore
 # ESP-IDF build artifacts
@@ -292,11 +292,11 @@ idf.py build
 
 ## SPRINT 1: STORAGE & CONFIGURATION
 
-### Mục tiêu
+### Goals
 
-Triển khai LittleFS storage và configuration management với JSON.
+Implement LittleFS storage and configuration management with JSON.
 
-### Công việc chi tiết
+### Detailed tasks
 
 #### Task 1.1: Add LittleFS Component
 
@@ -668,9 +668,9 @@ void app_main(void)
 
 ### Deliverables
 
-- [ ] LittleFS integrated và mounted
+- [ ] LittleFS integrated and mounted
 - [ ] Storage manager API functional
-- [ ] Config manager với full JSON support
+- [ ] Config manager with full JSON support
 - [ ] Default config loads successfully
 - [ ] Save/load persistence verified
 
@@ -698,11 +698,11 @@ idf.py -p COM3 flash monitor
 
 ## SPRINT 2: LED MANAGER
 
-### Mục tiêu
+### Goals
 
-Triển khai WS2812 LED status indicator.
+Implement the WS2812 LED status indicator.
 
-### Công việc chi tiết
+### Detailed tasks
 
 #### Task 2.1: Create LED Manager Component
 
@@ -755,7 +755,7 @@ esp_err_t led_manager_pulse(void); // Quick flash for packet receive
 
 ```bash
 # Test all LED states sequentially
-# Verify colors với eyes or multimeter
+# Verify the colors by eye or with a multimeter
 # Check timing accuracy
 ```
 
@@ -763,11 +763,11 @@ esp_err_t led_manager_pulse(void); // Quick flash for packet receive
 
 ## SPRINT 3-4: NETWORK MANAGER
 
-### Mục tiêu
+### Goals
 
-Triển khai Ethernet W5500 và WiFi với auto-fallback.
+Implement W5500 Ethernet and WiFi with auto-fallback.
 
-### Công việc chi tiết
+### Detailed tasks
 
 See FIRMWARE_DEVELOPMENT_PLAN.md Phase 3 for detailed implementation.
 
@@ -791,11 +791,11 @@ See FIRMWARE_DEVELOPMENT_PLAN.md Phase 3 for detailed implementation.
 
 ## SPRINT 5-6: DMX/RDM HANDLER
 
-### Mục tiêu
+### Goals
 
-Triển khai 2 cổng DMX512/RDM độc lập.
+Implement 2 independent DMX512/RDM ports.
 
-### Công việc chi tiết
+### Detailed tasks
 
 #### Task 5.1: Add esp-dmx Library
 
@@ -818,8 +818,8 @@ See FIRMWARE_DEVELOPMENT_PLAN.md Phase 4 for detailed API.
 
 ### Testing
 
-- DMX output với DMX tester/oscilloscope
-- RDM discovery với real devices
+- DMX output with a DMX tester/oscilloscope
+- RDM discovery with real devices
 - Timing verification
 - Cross-port independence
 
@@ -827,11 +827,11 @@ See FIRMWARE_DEVELOPMENT_PLAN.md Phase 4 for detailed API.
 
 ## SPRINT 7-8: PROTOCOL RECEIVERS
 
-### Mục tiêu
+### Goals
 
-Triển khai Art-Net và sACN receivers.
+Implement the Art-Net and sACN receivers.
 
-### Công việc chi tiết
+### Detailed tasks
 
 #### Task 7.1: Implement Art-Net Receiver
 
@@ -868,11 +868,11 @@ See LIBRARY_INTEGRATION_GUIDE.md Section 4.
 
 ## SPRINT 9-10: MERGE ENGINE
 
-### Mục tiêu
+### Goals
 
-Triển khai merge logic cho multi-source.
+Implement the merge logic for multiple sources.
 
-### Công việc chi tiết
+### Detailed tasks
 
 See FIRMWARE_DEVELOPMENT_PLAN.md Phase 6.
 
@@ -887,7 +887,7 @@ See FIRMWARE_DEVELOPMENT_PLAN.md Phase 6.
 
 ### Testing
 
-- Test HTP với 2 sources
+- Test HTP with 2 sources
 - Test backup failover
 - Timeout verification
 - Performance profiling
@@ -896,11 +896,11 @@ See FIRMWARE_DEVELOPMENT_PLAN.md Phase 6.
 
 ## SPRINT 11-12: WEB SERVER
 
-### Mục tiêu
+### Goals
 
-Triển khai HTTP API và WebSocket interface.
+Implement the HTTP API and WebSocket interface.
 
-### Công việc chi tiết
+### Detailed tasks
 
 See FIRMWARE_DEVELOPMENT_PLAN.md Phase 7.
 
@@ -924,11 +924,11 @@ See FIRMWARE_DEVELOPMENT_PLAN.md Phase 7.
 
 ## SPRINT 13: INTEGRATION
 
-### Mục tiêu
+### Goals
 
-Tích hợp tất cả modules thành firmware hoàn chỉnh.
+Integrate all modules into complete firmware.
 
-### Công việc chi tiết
+### Detailed tasks
 
 See FIRMWARE_DEVELOPMENT_PLAN.md Phase 8.
 
@@ -951,11 +951,11 @@ See FIRMWARE_DEVELOPMENT_PLAN.md Phase 8.
 
 ## SPRINT 14-15: TESTING & OPTIMIZATION
 
-### Mục tiêu
+### Goals
 
 Performance tuning, stability testing, documentation.
 
-### Công việc chi tiết
+### Detailed tasks
 
 #### Task 14.1: Performance Testing
 
@@ -995,7 +995,7 @@ Performance tuning, stability testing, documentation.
 
 ---
 
-## PHỤ LỤC: TESTING CHECKLIST
+## APPENDIX: TESTING CHECKLIST
 
 ### Per-Sprint Testing
 
@@ -1023,4 +1023,4 @@ Performance tuning, stability testing, documentation.
 
 ---
 
-**Tài liệu này sẽ được cập nhật theo tiến độ thực tế.**
+**This document will be updated as the work actually progresses.**

@@ -2,8 +2,9 @@
 
 This guide covers building for each board, switching features on and off,
 how the code is laid out, and how to add a board or a feature. Every path
-and command here is relative to the `firmware/` folder of the
-ghostlight-node repository.
+and command here is relative to the top of this repository. The Ghostlight
+Node hardware (KiCad, BOM, docs) is in a separate repository,
+[ghostlight-node](https://github.com/DefeatedWarrior/ghostlight-node).
 
 ## Building
 
@@ -44,7 +45,7 @@ can't replace a real build.
 | Board (`tools/build.sh …`) | Chip | Flash / PSRAM | Partition table | Pin header | Status |
 |---|---|---|---|---|---|
 | `esp-node-2rdm` | ESP32-S3 | 16 MB / 8 MB octal | `partitions_16mb.csv` | `boards/esp_node_2rdm.h` | prototype, in use |
-| `ghostlight-rev1` | ESP32-S3 (WROOM-1-N8) | 8 MB / none | `partitions_8mb.csv` | `boards/ghostlight_rev1.h` | PCB in this repository (`../hardware/`), not run yet |
+| `ghostlight-rev1` | ESP32-S3 (WROOM-1-N8) | 8 MB / none | `partitions_8mb.csv` | `boards/ghostlight_rev1.h` | PCB in [ghostlight-node](https://github.com/DefeatedWarrior/ghostlight-node), not run yet |
 | `esp32-devkitc` | ESP32 (WROOM-32) | 4 MB / none | `partitions_4mb.csv` | `boards/esp32_devkitc.h` | builds, **never run on hardware** |
 
 Pin headers live in `components/board/include/`. Settings files live in
@@ -165,7 +166,7 @@ embedded copy with `python3 tools/gen_web_files.py`.
    if the board has PSRAM. Reuse a `partitions_*mb.csv` that matches the flash
    size, or add a new one.
 5. Run `tools/build.sh <your-board>`, then add the board to the matrix in
-   `.github/workflows/firmware.yml` (at the top of the repository).
+   `.github/workflows/build.yml`.
 
 Pin notes:
 
@@ -187,7 +188,7 @@ Single-core chips work. `BOARD_CORE_DMX` puts the DMX tasks on core 0 there.
 
 ## Continuous integration
 
-`.github/workflows/firmware.yml` (at the top of the repository) builds every
+`.github/workflows/build.yml` builds every
 board, plus `esp-node-2rdm-minimal` and `esp32-devkitc-minimal` (every
 feature off), in the `espressif/idf:v5.2.6` container. It runs `tools/build.sh` exactly as
 above. ESP-IDF's own size check fails a build when the app no longer fits its

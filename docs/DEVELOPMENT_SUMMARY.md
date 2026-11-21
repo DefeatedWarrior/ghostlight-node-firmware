@@ -1,56 +1,56 @@
-# TÓM TẮT KẾ HOẠCH PHÁT TRIỂN
-**Dự án: ESP-NODE-2RDM - Art-Net/sACN to DMX512/RDM Converter**
+# DEVELOPMENT PLAN SUMMARY
+**Project: ESP-NODE-2RDM - Art-Net/sACN to DMX512/RDM Converter**
 
-**Ngày:** 25/12/2025  
-**Phiên bản:** 1.0
-
----
-
-## 📋 GIỚI THIỆU
-
-Tài liệu này là **tóm tắt tổng quan** của kế hoạch xây dựng firmware cho dự án ESP-NODE-2RDM. Đây là điểm khởi đầu để hiểu toàn bộ chiến lược phát triển.
+**Date:** 25/12/2025  
+**Version:** 1.0
 
 ---
 
-## 📚 CẤU TRÚC TÀI LIỆU
+## 📋 INTRODUCTION
 
-Dự án có **4 tài liệu chính** về kế hoạch phát triển:
+This document is a **high-level summary** of the plan for building the ESP-NODE-2RDM firmware. It is the starting point for understanding the whole development strategy.
+
+---
+
+## 📚 DOCUMENT STRUCTURE
+
+The project has **4 main documents** on the development plan:
 
 ### 1. **FIRMWARE_DEVELOPMENT_PLAN.md** (Master Plan)
-📖 **Nội dung:** Kế hoạch tổng thể, cấu trúc project, thư viện sử dụng, roadmap phase-by-phase  
-🎯 **Đối tượng:** Tất cả thành viên team  
-⏱️ **Đọc:** ~30 phút  
+📖 **Contents:** overall plan, project structure, libraries used, phase-by-phase roadmap  
+🎯 **Audience:** every team member  
+⏱️ **Reading time:** ~30 minutes  
 🔑 **Key sections:**
-- Cấu trúc project directories
+- Project directory structure
 - Partition table
-- Các thư viện ESP-IDF chính thức
+- The official ESP-IDF libraries
 - Roadmap 15 sprints
 - sdkconfig.defaults template
 
-**Đọc tài liệu này trước tiên để hiểu big picture.**
+**Read this document first to get the big picture.**
 
 ---
 
 ### 2. **LIBRARY_INTEGRATION_GUIDE.md** (Technical Deep-Dive)
-📖 **Nội dung:** Hướng dẫn chi tiết cách tích hợp từng thư viện vào project  
-🎯 **Đối tượng:** Developers triển khai code  
-⏱️ **Đọc:** ~40 phút  
+📖 **Contents:** detailed guide to integrating each library into the project  
+🎯 **Audience:** developers writing the code  
+⏱️ **Reading time:** ~40 minutes  
 🔑 **Key sections:**
-- esp-dmx API và examples
+- esp-dmx API and examples
 - libe131 integration
 - Art-Net custom implementation
 - LittleFS setup
 - esp_http_server WebSocket
 - Dependency management
 
-**Đọc khi bắt đầu implement từng module.**
+**Read it when you start implementing each module.**
 
 ---
 
 ### 3. **IMPLEMENTATION_ROADMAP.md** (Sprint Guide)
-📖 **Nội dung:** Chi tiết từng sprint, tasks cụ thể, deliverables, testing  
-🎯 **Đối tượng:** Team leads, sprint planning  
-⏱️ **Đọc:** ~25 phút  
+📖 **Contents:** each sprint in detail: specific tasks, deliverables, testing  
+🎯 **Audience:** team leads, sprint planning  
+⏱️ **Reading time:** ~25 minutes  
 🔑 **Key sections:**
 - Sprint 0: Project setup commands
 - Sprint 1: Storage + Config implementation
@@ -58,14 +58,14 @@ Dự án có **4 tài liệu chính** về kế hoạch phát triển:
 - Sprint 7-12: Protocols + Web
 - Sprint 13-15: Integration + Testing
 
-**Dùng như checklist trong mỗi sprint.**
+**Use it as a checklist in every sprint.**
 
 ---
 
 ### 4. **ALTERNATIVE_APPROACHES.md** (Decision Log)
-📖 **Nội dung:** So sánh các phương án thay thế cho mỗi module, lý do chọn solution  
-🎯 **Đối tượng:** Architects, tech leads  
-⏱️ **Đọc:** ~20 phút  
+📖 **Contents:** comparison of the alternatives for each module, and why each solution was chosen  
+🎯 **Audience:** architects, tech leads  
+⏱️ **Reading time:** ~20 minutes  
 🔑 **Key sections:**
 - DMX: esp-dmx vs custom vs Arduino port
 - sACN: libe131 vs custom
@@ -73,47 +73,47 @@ Dự án có **4 tài liệu chính** về kế hoạch phát triển:
 - Storage: LittleFS vs NVS vs SPIFFS
 - Merge algorithms comparison
 
-**Đọc khi cần hiểu "tại sao chọn X thay vì Y".**
+**Read it when you need to know "why X instead of Y".**
 
 ---
 
-## 🎯 CHIẾN LƯỢC TỔNG QUAN
+## 🎯 OVERALL STRATEGY
 
-### Nguyên Tắc Vàng: **"Library-First Approach"**
+### Golden rule: **"Library-First Approach"**
 
 ```
-Ưu tiên sử dụng thư viện có sẵn
+Prefer existing libraries
     ↓
-Chỉ tự code khi:
-- Protocol đơn giản (Art-Net)
+Only write our own code when:
+- Simple protocol (Art-Net)
 - Custom logic required (Merge Engine)
-- Không có thư viện phù hợp
+- There is no suitable library
 ```
 
-### Tỷ Lệ Code
+### Code split
 
-- **80%** Sử dụng existing libraries
+- **80%** existing libraries
 - **15%** Custom glue code (integration)
 - **5%** Custom implementation (Art-Net, Merge)
 
 ---
 
-## 🔧 CÔNG NGHỆ STACK
+## 🔧 TECHNOLOGY STACK
 
-### Thư Viện Chính
+### Main libraries
 
-| Chức năng | Thư viện | Lý do |
+| Function | Library | Reason |
 |-----------|----------|-------|
 | **DMX/RDM** | esp-dmx | Best DMX library for ESP32 |
 | **sACN** | libe131 | Lightweight, stable |
-| **Art-Net** | Custom | Protocol đơn giản, <200 lines |
+| **Art-Net** | Custom | Simple protocol, <200 lines |
 | **Storage** | LittleFS | Modern, power-fail safe |
 | **Web Server** | esp_http_server | Official, WebSocket support |
 | **LED** | led_strip | Official RMT driver |
 | **JSON** | cJSON | Lightweight |
 | **Network** | lwIP + esp_eth + esp_wifi | Built-in |
 
-### Kiến Trúc Hệ Thống
+### System architecture
 
 ```
 ┌─────────────────────────────────────────┐
@@ -149,7 +149,7 @@ Chỉ tự code khi:
 
 ---
 
-## 📊 LỘ TRÌNH PHÁT TRIỂN
+## 📊 DEVELOPMENT ROADMAP
 
 ### 15 Sprints Overview
 
@@ -184,47 +184,47 @@ Sprint 13-15: Integration + Testing
 
 ## 🚀 QUICK START GUIDE
 
-### Bước 1: Đọc tài liệu (1-2 giờ)
-1. Đọc **TÓM TẮT** này (file hiện tại)
-2. Đọc **FIRMWARE_DEVELOPMENT_PLAN.md** (big picture)
+### Step 1: Read the documents (1-2 hours)
+1. Read this **SUMMARY** (the current file)
+2. Read **FIRMWARE_DEVELOPMENT_PLAN.md** (big picture)
 3. Skim **IMPLEMENTATION_ROADMAP.md** (sprint overview)
 
-### Bước 2: Setup môi trường (0.5 giờ)
-1. Cài ESP-IDF v5.2.6
+### Step 2: Set up the environment (0.5 hours)
+1. Install ESP-IDF v5.2.6
 2. Clone repository
-3. Chạy `idf.py build` (sẽ fail - chưa có code)
+3. Run `idf.py build` (will fail: there is no code yet)
 
-### Bước 3: Sprint 0 - Project Setup (2-4 giờ)
-1. Tạo cấu trúc directories
+### Step 3: Sprint 0 - Project Setup (2-4 hours)
+1. Create the directory structure
 2. Setup CMakeLists.txt
-3. Tạo partition table
+3. Create the partition table
 4. Configure sdkconfig.defaults
 5. Create minimal main.c
 6. **Milestone:** `idf.py build` success ✅
 
-### Bước 4: Sprint 1 - Storage (4-8 giờ)
+### Step 4: Sprint 1 - Storage (4-8 hours)
 1. Clone esp_littlefs
 2. Implement storage_manager
 3. Implement config_manager
 4. Test read/write/persist
 5. **Milestone:** Config loads from LittleFS ✅
 
-### Bước 5: Continue với các sprints tiếp theo
-Follow **IMPLEMENTATION_ROADMAP.md** cho từng sprint.
+### Step 5: Continue with the following sprints
+Follow **IMPLEMENTATION_ROADMAP.md** for each sprint.
 
 ---
 
-## 📦 DELIVERABLES CUỐI CÙNG
+## 📦 FINAL DELIVERABLES
 
 ### Code
-- ✅ ESP-IDF project hoàn chỉnh
+- ✅ Complete ESP-IDF project
 - ✅ 9 components (config, storage, network, led, dmx, artnet, sacn, merge, web)
 - ✅ Firmware binary (.bin)
 - ✅ Partition table
 - ✅ Default config.json
 
 ### Documentation
-- ✅ API documentation cho mỗi module
+- ✅ API documentation for every module
 - ✅ User manual
 - ✅ Hardware setup guide
 - ✅ Troubleshooting guide
@@ -241,7 +241,7 @@ Follow **IMPLEMENTATION_ROADMAP.md** cho từng sprint.
 
 ---
 
-## 🎓 HỌC PHẦN KIẾN THỨC CẦN THIẾT
+## 🎓 KNOWLEDGE NEEDED
 
 ### ESP-IDF Basics
 - Build system (CMake)
@@ -273,29 +273,29 @@ Follow **IMPLEMENTATION_ROADMAP.md** cho từng sprint.
 
 ## 💡 KEY DECISIONS & RATIONALE
 
-### Tại Sao Dùng esp-dmx?
-- ✅ Thư viện DMX/RDM tốt nhất cho ESP32
-- ✅ Timing chính xác (hardware UART)
+### Why esp-dmx?
+- ✅ The best DMX/RDM library for the ESP32
+- ✅ Accurate timing (hardware UART)
 - ✅ RDM discovery + get/set built-in
-- ✅ Được maintain tốt
-- ❌ Custom implementation sẽ mất ~3-4 sprints và dễ bugs
+- ✅ Well maintained
+- ❌ A custom implementation would take ~3-4 sprints and be bug-prone
 
-### Tại Sao Custom Art-Net Thay Vì Port Library?
-- ✅ Art-Net đơn giản (18 byte header + data)
-- ✅ Chỉ cần handle ArtDmx packet
-- ✅ Code < 200 lines, dễ maintain
+### Why a custom Art-Net instead of porting a library?
+- ✅ Art-Net is simple (18-byte header + data)
+- ✅ Only the ArtDmx packet needs handling
+- ✅ Under 200 lines of code, easy to maintain
 - ✅ No dependencies
-- ❌ Port Arduino library khó, dependencies phức tạp
+- ❌ Porting an Arduino library is hard, with complicated dependencies
 
-### Tại Sao LittleFS Thay Vì SPIFFS?
+### Why LittleFS instead of SPIFFS?
 - ✅ Modern, power-fail safe
 - ✅ Wear leveling built-in
 - ✅ SPIFFS deprecated
 - ✅ Better performance
 
-### Tại Sao Core Pinning?
-- ✅ DMX timing critical → cần Core 1 dedicated
-- ✅ Network/Web không time-critical → Core 0
+### Why core pinning?
+- ✅ DMX timing is critical → needs a dedicated Core 1
+- ✅ Network/Web are not time-critical → Core 0
 - ✅ Predictable performance
 - ✅ Easy debug
 
@@ -382,18 +382,18 @@ Follow **IMPLEMENTATION_ROADMAP.md** cho từng sprint.
 
 ## 🎯 CONCLUSION
 
-Kế hoạch này cung cấp **roadmap hoàn chỉnh** để xây dựng firmware ESP-NODE-2RDM:
+This plan provides a **complete roadmap** for building the ESP-NODE-2RDM firmware:
 
-✅ **Chiến lược rõ ràng:** Library-first approach  
-✅ **Công nghệ stack proven:** 80% existing libraries  
-✅ **Roadmap chi tiết:** 15 sprints, bottom-up  
-✅ **Documentation đầy đủ:** 4 tài liệu chính + module designs  
-✅ **Decision rationale:** Giải thích tại sao chọn mỗi solution  
+✅ **Clear strategy:** library-first approach  
+✅ **Proven technology stack:** 80% existing libraries  
+✅ **Detailed roadmap:** 15 sprints, bottom-up  
+✅ **Complete documentation:** 4 main documents + module designs  
+✅ **Decision rationale:** explains why each solution was chosen  
 
 ### Next Steps
 
-1. **Review team:** Đọc và feedback các tài liệu này
-2. **Setup environment:** Cài ESP-IDF v5.2.6
+1. **Team review:** read these documents and give feedback
+2. **Set up the environment:** install ESP-IDF v5.2.6
 3. **Start Sprint 0:** Create project structure
 4. **Begin development:** Follow IMPLEMENTATION_ROADMAP.md
 
@@ -406,4 +406,4 @@ Kế hoạch này cung cấp **roadmap hoàn chỉnh** để xây dựng firmwar
 
 ---
 
-**Để bắt đầu, đọc tiếp: [FIRMWARE_DEVELOPMENT_PLAN.md](FIRMWARE_DEVELOPMENT_PLAN.md)**
+**To start, read next: [FIRMWARE_DEVELOPMENT_PLAN.md](FIRMWARE_DEVELOPMENT_PLAN.md)**

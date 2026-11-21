@@ -1,20 +1,20 @@
-# QUY CHUẨN LẬP TRÌNH FIRMWARE
+# FIRMWARE CODING STANDARDS
 
-**Dự án:** Artnet-Node-2RDM  
-**Tài liệu:** Coding Standards & Best Practices  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Project:** Artnet-Node-2RDM  
+**Document:** Coding Standards & Best Practices  
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## MỤC ĐÍCH
+## PURPOSE
 
-Tài liệu này quy định các tiêu chuẩn lập trình bắt buộc cho dự án ESP-NODE-2RDM nhằm:
-- Đảm bảo code quality và maintainability
-- Tránh các lỗi phổ biến và bugs
-- Đồng nhất coding style trong toàn bộ dự án
-- Tối ưu performance và memory usage
-- Đảm bảo thread safety và real-time performance
+This document sets the mandatory coding standards for the ESP-NODE-2RDM project, in order to:
+- Ensure code quality and maintainability
+- Avoid common mistakes and bugs
+- Keep a consistent coding style across the whole project
+- Optimize performance and memory usage
+- Ensure thread safety and real-time performance
 
 ---
 
@@ -23,7 +23,7 @@ Tài liệu này quy định các tiêu chuẩn lập trình bắt buộc cho d�
 ### 1.1. Files
 
 ```c
-// Modules: lowercase với underscore
+// Modules: lowercase with underscores
 config_manager.c
 config_manager.h
 dmx_handler.c
@@ -43,7 +43,7 @@ esp_err_t config_init(void);
 esp_err_t dmx_send_frame(uint8_t port, const uint8_t *data);
 bool network_is_connected(void);
 
-// Private/Static: lowercase với underscore
+// Private/Static: lowercase with underscores
 static void parse_artnet_packet(const uint8_t *buffer, size_t len);
 static int calculate_checksum(const uint8_t *data, size_t len);
 
@@ -59,16 +59,16 @@ esp_err_t dmx_set_channel(uint8_t port, uint16_t channel, uint8_t value);
 ### 1.3. Variables
 
 ```c
-// Global variables: g_prefix (TRÁNH SỬ DỤNG KHI CÓ THỂ)
+// Global variables: g_prefix (AVOID WHEN POSSIBLE)
 static system_config_t g_config;
 static bool g_is_initialized = false;
 
-// Local variables: lowercase với underscore
+// Local variables: lowercase with underscores
 uint8_t dmx_buffer[512];
 int packet_count = 0;
 bool is_connected = false;
 
-// Constants: UPPERCASE với underscore
+// Constants: UPPERCASE with underscores
 #define MAX_DMX_CHANNELS     512
 #define ARTNET_PORT          6454
 #define DEFAULT_TIMEOUT_MS   3000
@@ -128,7 +128,7 @@ typedef void (*network_state_callback_t)(network_state_t new_state);
 ### 2.1. Indentation
 
 ```c
-// 4 spaces - KHÔNG dùng tabs
+// 4 spaces - do NOT use tabs
 void function_name(void) {
     if (condition) {
         do_something();
@@ -139,7 +139,7 @@ void function_name(void) {
 ### 2.2. Braces
 
 ```c
-// K&R style - opening brace trên cùng dòng
+// K&R style - opening brace on the same line
 void function_name(void) {
     // code
 }
@@ -150,12 +150,12 @@ if (condition) {
     // code
 }
 
-// Single line if - VẪN phải có braces
+// Single-line if - braces are STILL required
 if (condition) {
     do_something();
 }
 
-// KHÔNG được viết:
+// Do NOT write:
 if (condition) do_something();  // SAI!
 ```
 
@@ -163,7 +163,7 @@ if (condition) do_something();  // SAI!
 
 ```c
 // Maximum 100 characters per line
-// Nếu dài hơn, break thành nhiều dòng
+// If longer, break it over several lines
 
 // Good:
 esp_err_t dmx_send_frame(uint8_t port, 
@@ -177,23 +177,23 @@ esp_err_t dmx_send_frame(uint8_t port, const uint8_t *data, uint16_t length, boo
 ### 2.4. Spacing
 
 ```c
-// Operators: có space xung quanh
+// Operators: spaces around them
 int result = a + b * c;
 bool condition = (x == 5) && (y != 0);
 
-// Function calls: không space trước (
+// Function calls: no space before (
 function_name(arg1, arg2);
 
-// Keywords: có space sau
+// Keywords: a space after them
 if (condition)
 for (int i = 0; i < 10; i++)
 while (running)
 
-// Pointers: * gần type
+// Pointers: * next to the type
 uint8_t *buffer;
 const char *string;
 
-// Function declarations: * gần function name
+// Function declarations: * next to the function name
 void (*callback)(int);
 ```
 
@@ -245,7 +245,7 @@ uart_set_line_inverse(uart, UART_SIGNAL_TXD_INV);
 ets_delay_us(176);  // DMX BREAK time: minimum 88µs, we use 176µs
 
 // Bad comments - stating the obvious
-i++;  // Increment i  <- KHÔNG CẦN!
+i++;  // Increment i  <- NOT NEEDED!
 ```
 
 ### 3.4. TODO/FIXME/NOTE
@@ -271,8 +271,8 @@ if (ret != ESP_OK) {
     return ret;
 }
 
-// KHÔNG được bỏ qua return value
-config_save();  // SAI! Phải check return value
+// Do NOT ignore return values
+config_save();  // WRONG! Check the return value
 ```
 
 ### 4.2. Parameter Validation
@@ -335,8 +335,8 @@ static const char *TAG = "DMX_HANDLER";
 ### 5.1. Dynamic Allocation
 
 ```c
-// TRÁNH malloc/free trong real-time tasks
-// Allocate ở init phase, deallocate ở deinit
+// AVOID malloc/free in real-time tasks
+// Allocate in the init phase, free in deinit
 
 // Good: Allocate once at init
 static uint8_t *dmx_buffer = NULL;
@@ -361,7 +361,7 @@ if (buffer == NULL) {
 ### 5.2. Stack Usage
 
 ```c
-// Tránh large arrays trên stack
+// Avoid large arrays on the stack
 void bad_function(void) {
     uint8_t buffer[4096];  // SAI! Too large for stack
     // ...
@@ -370,7 +370,7 @@ void bad_function(void) {
 // Good: Use static or heap
 void good_function(void) {
     static uint8_t buffer[4096];  // OK for static
-    // hoặc
+    // or
     uint8_t *buffer = malloc(4096);  // OK for heap
 }
 ```
@@ -481,8 +481,8 @@ void IRAM_ATTR gpio_isr_handler(void *arg) {
         portYIELD_FROM_ISR();
     }
     
-    // KHÔNG được gọi printf, malloc, ESP_LOG trong ISR
-    // KHÔNG được block (delay, mutex)
+    // Do NOT call printf, malloc or ESP_LOG in an ISR
+    // Do NOT block (delay, mutex)
 }
 ```
 
@@ -554,10 +554,10 @@ for (int i = 0; i < MAX_DEVICES; i++) {
 ### 8.1. Magic Numbers
 
 ```c
-// KHÔNG dùng magic numbers
+// Do NOT use magic numbers
 if (port == 2) { ... }  // What is 2?
 
-// Dùng constants hoặc enums
+// Use constants or enums
 #define MAX_PORTS  2
 if (port <= MAX_PORTS) { ... }
 
@@ -747,19 +747,19 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 
 ### 12.2. No Warnings Policy
 
-**QUY ĐỊNH: KHÔNG được commit code có compiler warnings!**
+**RULE: do NOT commit code with compiler warnings!**
 
-Tất cả warnings phải được fix trước khi commit.
+All warnings must be fixed before committing.
 
 ---
 
 ## SUMMARY
 
-Tuân thủ các quy chuẩn này sẽ đảm bảo:
-- ✅ Code dễ đọc, dễ maintain
-- ✅ Tránh bugs phổ biến
-- ✅ Performance tối ưu
-- ✅ Thread-safe và stable
-- ✅ Dễ dàng debug và test
+Following these standards ensures:
+- ✅ Code that is easy to read and maintain
+- ✅ Common bugs are avoided
+- ✅ Optimal performance
+- ✅ Thread-safe and stable code
+- ✅ Easy debugging and testing
 
-**LƯU Ý:** Tất cả code mới PHẢI tuân thủ 100% các quy chuẩn này!
+**NOTE:** all new code MUST follow these standards 100%!

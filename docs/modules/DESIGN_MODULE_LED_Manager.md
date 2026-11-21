@@ -1,20 +1,20 @@
-# THIẾT KẾ MODULE: LED Manager
+# MODULE DESIGN: LED Manager
 
-**Dự án:** Artnet-Node-2RDM  
+**Project:** Artnet-Node-2RDM  
 **Module:** LED Status Manager  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## 1. Mục đích
+## 1. Purpose
 
-Module LED Manager điều khiển WS2812 LED để hiển thị trạng thái hoạt động của thiết bị:
-- Trạng thái boot
-- Trạng thái mạng (Ethernet, WiFi STA, WiFi AP)
-- Hoạt động nhận/gửi DMX
+The LED Manager module drives the WS2812 LED to show the device's operating state:
+- Boot state
+- Network state (Ethernet, WiFi STA, WiFi AP)
+- DMX receive/send activity
 - RDM discovery
-- Lỗi hệ thống
+- System errors
 
 ---
 
@@ -22,7 +22,7 @@ Module LED Manager điều khiển WS2812 LED để hiển thị trạng thái h
 
 ```c
 #define WS2812_GPIO     GPIO_NUM_48
-#define WS2812_COUNT    1            // Số lượng LED
+#define WS2812_COUNT    1            // number of LEDs
 #define WS2812_RMT_CHANNEL  0        // RMT channel
 ```
 
@@ -30,9 +30,9 @@ Module LED Manager điều khiển WS2812 LED để hiển thị trạng thái h
 
 ---
 
-## 3. Kiến trúc Module
+## 3. Module architecture
 
-### 3.1. Cấu trúc dữ liệu
+### 3.1. Data structures
 
 ```c
 typedef struct {
@@ -52,10 +52,10 @@ typedef enum {
 } led_state_t;
 
 typedef enum {
-    LED_BEHAVIOR_STATIC = 0,        // Tĩnh
-    LED_BEHAVIOR_SLOW_BLINK,        // Nhấp chậm 1Hz
-    LED_BEHAVIOR_FAST_BLINK,        // Nhấp nhanh 5Hz
-    LED_BEHAVIOR_PULSE,             // Nhấp 1 lần khi có event
+    LED_BEHAVIOR_STATIC = 0,        // steady
+    LED_BEHAVIOR_SLOW_BLINK,        // slow blink 1Hz
+    LED_BEHAVIOR_FAST_BLINK,        // fast blink 5Hz
+    LED_BEHAVIOR_PULSE,             // one blink per event
     LED_BEHAVIOR_BREATH             // Breathing effect
 } led_behavior_t;
 
@@ -63,8 +63,8 @@ typedef struct {
     led_state_t state;
     rgb_color_t color;
     led_behavior_t behavior;
-    uint32_t duration_ms;           // Thời gian hiển thị (0 = vô hạn)
-    uint8_t priority;               // 0-255, càng thấp càng ưu tiên
+    uint32_t duration_ms;           // display time (0 = forever)
+    uint8_t priority;               // 0-255, lower = higher priority
 } led_event_t;
 ```
 
@@ -72,18 +72,18 @@ typedef struct {
 
 ## 4. API Public
 
-### 4.1. Khởi tạo
+### 4.1. Initialization
 
 ```c
 /**
- * Khởi tạo LED Manager
- * @return ESP_OK nếu thành công
+ * Initialize the LED Manager
+ * @return ESP_OK on success
  */
 esp_err_t led_manager_init(void);
 
 /**
- * Dừng LED Manager
- * @return ESP_OK nếu thành công
+ * Stop the LED Manager
+ * @return ESP_OK on success
  */
 esp_err_t led_manager_deinit(void);
 ```
@@ -92,19 +92,19 @@ esp_err_t led_manager_deinit(void);
 
 ```c
 /**
- * Set trạng thái LED (sử dụng preset)
- * @param state Trạng thái LED
- * @return ESP_OK nếu thành công
+ * Set the LED state (uses a preset)
+ * @param state LED state
+ * @return ESP_OK on success
  */
 esp_err_t led_manager_set_state(led_state_t state);
 
 /**
- * Set LED với màu và behavior tùy chỉnh
- * @param color Màu RGB
- * @param behavior Hành vi (static, blink, pulse, etc.)
- * @param duration_ms Thời gian hiển thị (0 = vô hạn)
- * @param priority Priority (0 = cao nhất)
- * @return ESP_OK nếu thành công
+ * Set the LED with a custom color and behavior
+ * @param color RGB color
+ * @param behavior behavior (static, blink, pulse, etc.)
+ * @param duration_ms display time (0 = forever)
+ * @param priority Priority (0 = highest)
+ * @return ESP_OK on success
  */
 esp_err_t led_manager_set_custom(rgb_color_t color,
                                  led_behavior_t behavior,
@@ -116,17 +116,17 @@ esp_err_t led_manager_set_custom(rgb_color_t color,
 
 ```c
 /**
- * Trigger LED pulse (nhấp nháy 1 lần ngắn)
- * Dùng khi có data packet, RDM response, etc.
- * @param color Màu pulse
- * @return ESP_OK nếu thành công
+ * Trigger an LED pulse (one short blink)
+ * Used for data packets, RDM responses, etc.
+ * @param color pulse color
+ * @return ESP_OK on success
  */
 esp_err_t led_manager_pulse(rgb_color_t color);
 
 /**
- * Trigger error blink (nhấp nhanh màu đỏ)
- * @param duration_ms Thời gian blink
- * @return ESP_OK nếu thành công
+ * Trigger an error blink (fast red blink)
+ * @param duration_ms blink time
+ * @return ESP_OK on success
  */
 esp_err_t led_manager_error_blink(uint32_t duration_ms);
 ```
@@ -135,15 +135,15 @@ esp_err_t led_manager_error_blink(uint32_t duration_ms);
 
 ```c
 /**
- * Set màu LED trực tiếp (bypass state machine)
- * @param color Màu RGB
- * @return ESP_OK nếu thành công
+ * Set the LED color directly (bypasses the state machine)
+ * @param color RGB color
+ * @return ESP_OK on success
  */
 esp_err_t led_manager_set_color_direct(rgb_color_t color);
 
 /**
- * Tắt LED
- * @return ESP_OK nếu thành công
+ * Turn the LED off
+ * @return ESP_OK on success
  */
 esp_err_t led_manager_off(void);
 ```
@@ -152,59 +152,59 @@ esp_err_t led_manager_off(void);
 
 ## 5. Preset LED States
 
-| State | Màu RGB | Behavior | Mô tả |
+| State | RGB color | Behavior | Description |
 |-------|---------|----------|-------|
-| BOOT | (0, 50, 100) | Static | Xanh dương nhạt |
-| ETHERNET_CONNECTED | (0, 255, 0) | Static | Xanh lá tĩnh |
-| WIFI_STA_CONNECTED | (0, 200, 0) | Slow Blink | Xanh lá nhấp chậm |
-| WIFI_AP_ACTIVE | (128, 0, 128) | Static | Tím tĩnh |
-| DATA_RECEIVING | (255, 255, 255) | Pulse | Trắng nhấp 1 lần |
-| RDM_DISCOVERY | (255, 200, 0) | Slow Blink | Vàng nhấp chậm |
-| ERROR | (255, 0, 0) | Fast Blink | Đỏ nhấp nhanh |
+| BOOT | (0, 50, 100) | Static | Light blue |
+| ETHERNET_CONNECTED | (0, 255, 0) | Static | Steady green |
+| WIFI_STA_CONNECTED | (0, 200, 0) | Slow Blink | Slow green blink |
+| WIFI_AP_ACTIVE | (128, 0, 128) | Static | Steady purple |
+| DATA_RECEIVING | (255, 255, 255) | Pulse | One white blink |
+| RDM_DISCOVERY | (255, 200, 0) | Slow Blink | Slow yellow blink |
+| ERROR | (255, 0, 0) | Fast Blink | Fast red blink |
 
 ---
 
-## 6. Luồng hoạt động
+## 6. Operation flow
 
 ### 6.1. State Machine
 
 ```
 1. Boot:
-   └─> LED = BOOT (xanh dương)
+   └─> LED = BOOT (blue)
    
 2. Network connecting:
-   └─> LED giữ nguyên BOOT
+   └─> LED stays BOOT
    
 3. Ethernet connected:
-   └─> LED = ETHERNET_CONNECTED (xanh lá tĩnh)
+   └─> LED = ETHERNET_CONNECTED (steady green)
    
 4. WiFi STA connected:
-   └─> LED = WIFI_STA_CONNECTED (xanh lá nhấp)
+   └─> LED = WIFI_STA_CONNECTED (blinking green)
    
 5. WiFi AP active:
-   └─> LED = WIFI_AP_ACTIVE (tím)
+   └─> LED = WIFI_AP_ACTIVE (purple)
    
-6. Nhận Art-Net/sACN packet:
-   └─> LED pulse trắng 50ms (max 10Hz để tránh nhấp quá nhanh)
+6. Art-Net/sACN packet received:
+   └─> 50ms white LED pulse (max 10Hz so it doesn't blink too fast)
    └─> Return to network state
    
 7. RDM discovery:
-   └─> LED = RDM_DISCOVERY (vàng nhấp) trong suốt quá trình
+   └─> LED = RDM_DISCOVERY (blinking yellow) for the whole discovery
    └─> Return to network state khi xong
    
 8. Error:
-   └─> LED = ERROR (đỏ nhấp nhanh)
+   └─> LED = ERROR (fast red blink)
    └─> Auto return to network state sau 5s
 ```
 
 ### 6.2. Priority System
 
-- LED state có priority
-- Event với priority cao hơn (số nhỏ hơn) sẽ override event hiện tại
-- Event với duration > 0 sẽ tự động expire và trở về state trước đó
+- LED states have a priority
+- An event with a higher priority (lower number) overrides the current event
+- An event with duration > 0 expires by itself and returns to the previous state
 
 **Priority levels:**
-- 0: Error (cao nhất)
+- 0: Error (highest)
 - 1: RDM Discovery
 - 2: Data Receiving (pulse)
 - 3: Network states
@@ -215,7 +215,7 @@ esp_err_t led_manager_off(void);
 ## 7. Threading Model
 
 - **LED Task** (Priority: 3, Core: 1):
-  - Chạy liên tục
+  - Runs continuously
   - Process LED state queue
   - Update WS2812 via RMT
   - Handle blinking/breathing timing
@@ -329,9 +329,9 @@ static void led_task(void *pvParameters) {
 
 ## 10. Rate Limiting
 
-- Data pulse events được rate-limited để tránh nhấp nháy quá nhanh
-- Max rate: 10 Hz (100ms giữa các pulse)
-- Sử dụng timestamp để track pulse cuối
+- Data pulse events are rate-limited so the LED doesn't blink too fast
+- Max rate: 10 Hz (100ms between pulses)
+- A timestamp tracks the last pulse
 
 ```c
 static uint32_t last_data_pulse_time = 0;
@@ -354,7 +354,7 @@ esp_err_t led_manager_pulse(rgb_color_t color) {
 
 ## 11. Error Handling
 
-| Lỗi | Hành động |
+| Error | Action |
 |-----|-----------|
 | RMT init fail | Log error, LED disabled |
 | WS2812 not responding | Log warning, continue |
@@ -399,7 +399,7 @@ esp_err_t led_manager_pulse(rgb_color_t color) {
 ## 15. Performance
 
 - LED update rate: up to 100 Hz
-- Latency: < 10ms từ event đến LED update
+- Latency: < 10ms from event to LED update
 - CPU usage: < 1%
 
 ---
@@ -413,4 +413,4 @@ esp_err_t led_manager_pulse(rgb_color_t color) {
 #define LED_BRIGHTNESS_ERROR      255
 ```
 
-Brightness có thể điều chỉnh để giảm độ sáng nếu cần.
+Brightness can be adjusted to dim the LED if needed.

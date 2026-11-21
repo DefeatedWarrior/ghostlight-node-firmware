@@ -1,70 +1,70 @@
-# KẾ HOẠCH XÂY DỰNG FIRMWARE
-**Dự án: ESP-NODE-2RDM - Art-Net/sACN to DMX512/RDM Converter**
+# FIRMWARE DEVELOPMENT PLAN
+**Project: ESP-NODE-2RDM - Art-Net/sACN to DMX512/RDM Converter**
 
-**Nền tảng:** ESP32-S3-WROOM-1-N16R8 (16MB Flash, 8MB PSRAM)  
+**Platform:** ESP32-S3-WROOM-1-N16R8 (16MB Flash, 8MB PSRAM)  
 **Framework:** ESP-IDF v5.2.6  
-**Phiên bản tài liệu:** 1.0  
-**Ngày:** 25/12/2025
+**Document version:** 1.0  
+**Date:** 25/12/2025
 
 ---
 
-## MỤC LỤC
-1. [Tổng quan dự án](#1-tổng-quan-dự-án)
-2. [Chiến lược phát triển](#2-chiến-lược-phát-triển)
-3. [Cấu trúc project](#3-cấu-trúc-project)
-4. [Các thư viện sử dụng](#4-các-thư-viện-sử-dụng)
-5. [Roadmap phát triển](#5-roadmap-phát-triển)
-6. [Tài liệu tham khảo](#6-tài-liệu-tham-khảo)
+## CONTENTS
+1. [Project overview](#1-project-overview)
+2. [Development strategy](#2-development-strategy)
+3. [Project structure](#3-project-structure)
+4. [Libraries used](#4-libraries-used)
+5. [Development roadmap](#5-development-roadmap)
+6. [References](#6-references)
 
 ---
 
-## 1. TỔNG QUAN DỰ ÁN
+## 1. PROJECT OVERVIEW
 
-### 1.1. Mục tiêu
-Xây dựng firmware hoàn chỉnh cho thiết bị chuyển đổi giao thức Art-Net/sACN sang DMX512/RDM với 2 cổng độc lập, sử dụng tối đa các thư viện có sẵn để rút ngắn thời gian phát triển và tăng độ tin cậy.
+### 1.1. Goal
+Build complete firmware for a device that converts Art-Net/sACN to DMX512/RDM on 2 independent ports, using existing libraries as much as possible to shorten development time and improve reliability.
 
-### 1.2. Yêu cầu chính
-- ✅ Hỗ trợ Art-Net v4 và sACN (E1.31)
-- ✅ 2 cổng DMX512/RDM độc lập (configurable)
-- ✅ Kết nối Ethernet W5500 (primary) + WiFi fallback
-- ✅ Merge engine với nhiều chế độ (HTP/LTP/LAST/BACKUP)
-- ✅ Giao diện web để cấu hình và giám sát
+### 1.2. Main requirements
+- ✅ Art-Net v4 and sACN (E1.31) support
+- ✅ 2 independent DMX512/RDM ports (configurable)
+- ✅ W5500 Ethernet connection (primary) + WiFi fallback
+- ✅ Merge engine with several modes (HTP/LTP/LAST/BACKUP)
+- ✅ Web interface for configuration and monitoring
 - ✅ RDM Master/Responder support
 - ✅ WS2812 LED status indicator
-- ✅ Lưu trữ cấu hình JSON trên LittleFS
+- ✅ JSON configuration stored on LittleFS
 
-### 1.3. Ưu tiên thiết kế
-1. **Sử dụng thư viện có sẵn** thay vì tự code từ đầu
-2. **Tái sử dụng** các component chính thức của ESP-IDF
-3. **Tối ưu hóa** performance với dual-core ESP32-S3
-4. **Không bảo mật** - tất cả config có thể download dạng JSON
-5. **Module hóa** code để dễ maintain và test
+### 1.3. Design priorities
+1. **Use existing libraries** instead of writing code from scratch
+2. **Reuse** the official ESP-IDF components
+3. **Optimise** performance with the dual-core ESP32-S3
+4. **No security** - the whole config can be downloaded as JSON
+5. **Modular** code that is easy to maintain and test
 
 ---
 
-## 2. CHIẾN LƯỢC PHÁT TRIỂN
+## 2. DEVELOPMENT STRATEGY
 
-### 2.1. Phương pháp tiếp cận
-**Bottom-up Development**: Xây dựng từ các module cơ bản nhất (Storage, LED) đến các module phức tạp (Protocol handlers, Merge engine).
+### 2.1. Approach
+**Bottom-up Development**: build from the most basic modules (Storage, LED) up to the complex ones (protocol handlers, merge engine).
 
-### 2.2. Nguyên tắc
-1. **Library-first**: Luôn tìm kiếm thư viện có sẵn trước khi tự code
-2. **Test từng module**: Mỗi module phải test độc lập trước khi tích hợp
-3. **Incremental**: Phát triển từng tính năng nhỏ, commit thường xuyên
-4. **Documentation**: Mỗi module phải có README và API documentation
+### 2.2. Principles
+1. **Library-first**: always look for an existing library before writing code
+2. **Test each module**: every module is tested on its own before integration
+3. **Incremental**: develop small features one at a time and commit often
+4. **Documentation**: every module needs a README and API documentation
 
-### 2.3. Công cụ và môi trường
-- **IDE**: VS Code với ESP-IDF extension
+### 2.3. Tools and environment
+- **IDE**: VS Code with the ESP-IDF extension
 - **Build system**: CMake (ESP-IDF standard)
-- **Version control**: Git với branching strategy
+- **Version control**: Git with a branching strategy
 - **Testing**: Physical hardware testing (theo TESTING_GUIDE.md)
 - **Debug**: JTAG + ESP-IDF monitor + GDB
 
 ---
 
-## 3. CẤU TRÚC PROJECT
+## 3. PROJECT STRUCTURE
 
-### 3.1. Cấu trúc thư mục
+### 3.1. Directory structure
 
 ```
 ESP-NODE-2RDM/
@@ -154,19 +154,19 @@ factory,    app,  factory,  0x10000,  0x200000,
 littlefs,   data, spiffs,   0x210000, 0x100000,
 ```
 
-**Giải thích:**
-- **nvs** (16KB): NVS storage cho thông tin cơ bản
+**Explanation:**
+- **nvs** (16KB): NVS storage for basic information
 - **factory** (2MB): Application firmware
-- **littlefs** (1MB): File system cho config.json và web files
-- **OTA** (optional): Có thể thêm partition cho OTA update sau
+- **littlefs** (1MB): file system for config.json and the web files
+- **OTA** (optional): a partition for OTA updates can be added later
 
 ---
 
-## 4. CÁC THƯ VIỆN SỬ DỤNG
+## 4. LIBRARIES USED
 
-### 4.1. Thư viện ESP-IDF chính thức (có sẵn)
+### 4.1. Official ESP-IDF libraries (built in)
 
-| Thư viện | Mục đích | Component trong CMake |
+| Library | Purpose | CMake component |
 |----------|----------|----------------------|
 | `esp_eth` | W5500 Ethernet driver | `esp_eth` |
 | `esp_wifi` | WiFi STA + AP | `esp_wifi` |
@@ -178,19 +178,19 @@ littlefs,   data, spiffs,   0x210000, 0x100000,
 | `cJSON` | JSON parsing/generation | `json` |
 | `esp_littlefs` | LittleFS file system | `esp_littlefs` |
 
-### 4.2. Thư viện bên thứ ba (cần thêm vào project)
+### 4.2. Third-party libraries (must be added to the project)
 
 #### 4.2.1. esp-dmx
 **Repository:** https://github.com/someweisguy/esp-dmx  
-**Phiên bản:** Latest stable  
-**Mục đích:** DMX512 + RDM support  
-**Lý do chọn:**
-- Thư viện DMX/RDM tốt nhất cho ESP-IDF
-- Hỗ trợ đầy đủ RDM discovery, get/set
-- Được maintain tốt, có documentation đầy đủ
-- Hỗ trợ multiple ports
+**Version:** Latest stable  
+**Purpose:** DMX512 + RDM support  
+**Why this choice:**
+- The best DMX/RDM library for ESP-IDF
+- Full RDM discovery, get/set support
+- Well maintained, with complete documentation
+- Supports multiple ports
 
-**Cách thêm vào project:**
+**How to add it to the project:**
 ```bash
 cd components
 git clone https://github.com/someweisguy/esp-dmx.git esp-dmx
@@ -207,35 +207,35 @@ idf_component_register(
 
 #### 4.2.2. libe131
 **Repository:** https://github.com/hhromic/libe131  
-**Phiên bản:** Latest stable  
-**Mục đích:** sACN (E1.31) receiver  
-**Lý do chọn:**
-- Lightweight, chỉ ~500 lines code
-- Hỗ trợ multicast join/leave
-- Dễ port sang ESP-IDF (chỉ cần lwip sockets)
+**Version:** Latest stable  
+**Purpose:** sACN (E1.31) receiver  
+**Why this choice:**
+- Lightweight, only ~500 lines of code
+- Supports multicast join/leave
+- Easy to port to ESP-IDF (only needs lwip sockets)
 
-**Cách thêm vào project:**
+**How to add it to the project:**
 ```bash
 cd components
 git clone https://github.com/hhromic/libe131.git libe131
 ```
 
-**Note:** Có thể cần tạo CMakeLists.txt wrapper cho thư viện này.
+**Note:** This library may need a CMakeLists.txt wrapper.
 
 #### 4.2.3. Art-Net Library
-**Option 1:** Fork từ https://github.com/hideakitai/ArtNet  
-**Option 2:** Tự implement minimal Art-Net (khuyến nghị)
+**Option 1:** Fork https://github.com/hideakitai/ArtNet  
+**Option 2:** Implement a minimal Art-Net ourselves (recommended)
 
-**Lý do tự implement:**
-- Art-Net protocol đơn giản hơn sACN
-- Chỉ cần handle: ArtDmx, ArtPoll, ArtPollReply, ArtAddress
-- Thư viện Arduino có thể không tối ưu cho ESP-IDF
+**Why implement it ourselves:**
+- The Art-Net protocol is simpler than sACN
+- Only ArtDmx, ArtPoll, ArtPollReply and ArtAddress need handling
+- Arduino libraries may not be optimal for ESP-IDF
 
-**Nếu dùng thư viện có sẵn:**
+**If an existing library is used:**
 ```bash
 cd components
 git clone https://github.com/hideakitai/ArtNet.git artnet
-# Cần port để dùng lwip sockets thay vì Arduino UDP
+# Needs porting to lwip sockets instead of Arduino UDP
 ```
 
 ### 4.3. Component dependencies map
@@ -267,31 +267,31 @@ main.c
 
 ---
 
-## 5. ROADMAP PHÁT TRIỂN
+## 5. DEVELOPMENT ROADMAP
 
 ### Phase 0: Project Setup (Sprint 0)
-**Mục tiêu:** Tạo project structure và build system
+**Goal:** Create the project structure and build system
 
-**Công việc:**
-1. Tạo ESP-IDF project với `idf.py create-project`
-2. Thiết lập partition table
-3. Tạo cấu trúc components như section 3.1
-4. Thêm `.gitignore` cho ESP-IDF
-5. Cấu hình sdkconfig.defaults
-6. Tạo Kconfig.projbuild cho custom config
+**Tasks:**
+1. Create the ESP-IDF project with `idf.py create-project`
+2. Set up the partition table
+3. Create the component structure from section 3.1
+4. Add a `.gitignore` for ESP-IDF
+5. Configure sdkconfig.defaults
+6. Create Kconfig.projbuild for custom config
 
-**Output:** Project có thể build thành công (empty firmware)
+**Output:** The project builds successfully (empty firmware)
 
-**Tài liệu cần tham khảo:**
+**References:**
 - ESP-IDF Build System: https://docs.espressif.com/projects/esp-idf/en/v5.2.6/esp32s3/api-guides/build-system.html
 
 ---
 
-### Phase 1: Storage và Configuration (Sprint 1)
-**Mục tiêu:** Hoàn thiện lưu trữ và quản lý cấu hình
+### Phase 1: Storage and Configuration (Sprint 1)
+**Goal:** Finish storage and configuration management
 
 #### 1.1. Storage Manager
-**Thư viện:** `esp_littlefs`  
+**Library:** `esp_littlefs`  
 **API:**
 ```c
 esp_err_t storage_init(void);
@@ -307,8 +307,8 @@ bool storage_file_exists(const char *path);
 - Verify persistence across reboot
 
 #### 1.2. Configuration Manager
-**Thư viện:** `cJSON`, `nvs_flash`, `storage_manager`  
-**Config structure:** (See TongQuan.md section 4.1)  
+**Libraries:** `cJSON`, `nvs_flash`, `storage_manager`  
+**Config structure:** (See OVERVIEW.md section 4.1)  
 **API:**
 ```c
 esp_err_t config_init(void);
@@ -354,17 +354,17 @@ config_t* config_get_current(void);
 
 **Test:**
 - Load default config
-- Modify và save
+- Modify and save
 - Verify JSON serialization/deserialization
 
-**Tài liệu:** `docs/modules/DESIGN_MODULE_Configuration.md`
+**Document:** `docs/modules/DESIGN_MODULE_Configuration.md`
 
 ---
 
 ### Phase 2: LED Manager (Sprint 2)
-**Mục tiêu:** Hiển thị trạng thái hệ thống qua WS2812
+**Goal:** Show the system state on the WS2812
 
-**Thư viện:** `led_strip` (ESP-IDF official)  
+**Library:** `led_strip` (official ESP-IDF)  
 **Hardware:** GPIO 48
 
 **API:**
@@ -385,24 +385,24 @@ esp_err_t led_manager_pulse(void); // Quick flash for packet receive
 - ERROR (Red fast blink)
 
 **Implementation notes:**
-- Sử dụng `led_strip` component từ ESP-IDF
-- Chạy task riêng để handle blinking
+- Use the ESP-IDF `led_strip` component
+- Run a separate task to handle blinking
 - Event-driven: listen cho network events, packet events
 
 **Test:**
 - Cycle through all states
-- Verify colors với multimeter/oscilloscope
+- Verify the colours with a multimeter/oscilloscope
 - Check timing accuracy
 
-**Tài liệu:** `docs/modules/DESIGN_MODULE_LED_Manager.md`
+**Document:** `docs/modules/DESIGN_MODULE_LED_Manager.md`
 
 ---
 
 ### Phase 3: Network Manager (Sprint 3-4)
-**Mục tiêu:** Thiết lập kết nối Ethernet và WiFi
+**Goal:** Set up the Ethernet and WiFi connections
 
 #### 3.1. Ethernet (W5500)
-**Thư viện:** `esp_eth`  
+**Library:** `esp_eth`  
 **Hardware:** SPI (CS: GPIO10, MOSI: GPIO11, MISO: GPIO13, SCK: GPIO12, INT: GPIO9)
 
 **API:**
@@ -446,20 +446,20 @@ static void network_task(void *pvParameters) {
 ```
 
 **Test:**
-- Ethernet connection với W5500
+- Ethernet connection with the W5500
 - WiFi STA connection
 - WiFi AP mode
 - Fallback sequence
-- IP assignment (DHCP và static)
+- IP assignment (DHCP and static)
 
-**Tài liệu:** `docs/modules/DESIGN_MODULE_Network.md`
+**Document:** `docs/modules/DESIGN_MODULE_Network.md`
 
 ---
 
 ### Phase 4: DMX/RDM Handler (Sprint 5-6)
-**Mục tiêu:** Điều khiển 2 cổng DMX512/RDM
+**Goal:** Drive the 2 DMX512/RDM ports
 
-**Thư viện:** `esp-dmx`  
+**Library:** `esp-dmx`  
 **Hardware:**
 - Port 1: TX=GPIO17, RX=GPIO16, DIR=GPIO21
 - Port 2: TX=GPIO19, RX=GPIO18, DIR=GPIO20
@@ -483,10 +483,10 @@ esp_err_t dmx_handler_rdm_set(uint8_t port, rdm_uid_t uid, uint16_t pid, const u
 - DISABLED: Turn off
 
 **Implementation notes:**
-- Sử dụng `dmx_driver_install()` từ esp-dmx
-- Chạy 2 tasks riêng cho mỗi port (Core 1)
-- Buffer 512 bytes cho mỗi universe
-- Blackout nếu không có data trong `merge_timeout`
+- Use `dmx_driver_install()` from esp-dmx
+- Run 2 separate tasks, one per port (Core 1)
+- 512-byte buffer per universe
+- Blackout if there is no data within `merge_timeout`
 
 **Example (Port 1 DMX Out):**
 ```c
@@ -508,19 +508,19 @@ while (1) {
 ```
 
 **Test:**
-- DMX output với DMX tester
-- RDM discovery với real RDM devices
+- DMX output with a DMX tester
+- RDM discovery with real RDM devices
 - Get/Set RDM parameters
 - Timing verification (44Hz)
 
-**Tài liệu:** `docs/modules/DESIGN_MODULE_DMX_RDM_Handler.md`
+**Document:** `docs/modules/DESIGN_MODULE_DMX_RDM_Handler.md`
 
 ---
 
 ### Phase 5: Protocol Receivers (Sprint 7-8)
 
 #### 5.1. Art-Net Receiver
-**Thư viện:** Custom implementation hoặc ported library  
+**Library:** custom implementation or a ported library  
 **Protocol:** Art-Net v4, UDP port 6454
 
 **Packets to handle:**
@@ -570,15 +570,15 @@ static void artnet_receive_task(void *pvParameters) {
 ```
 
 **Test:**
-- Receive Art-Net DMX từ QLC+, LightKey, etc.
+- Receive Art-Net DMX from QLC+, LightKey, etc.
 - Verify universe routing
 - ArtPoll response
 - Multiple sources
 
-**Tài liệu:** `docs/modules/DESIGN_MODULE_ArtNet_Receiver.md`
+**Document:** `docs/modules/DESIGN_MODULE_ArtNet_Receiver.md`
 
 #### 5.2. sACN Receiver
-**Thư viện:** `libe131`  
+**Library:** `libe131`  
 **Protocol:** E1.31 (sACN), multicast
 
 **API:**
@@ -614,17 +614,17 @@ while (1) {
 ```
 
 **Test:**
-- Receive sACN từ các software
+- Receive sACN from lighting software
 - Multicast join/leave
 - Priority handling
 - Sequence number check
 
-**Tài liệu:** `docs/modules/DESIGN_MODULE_sACN_Receiver.md`
+**Document:** `docs/modules/DESIGN_MODULE_sACN_Receiver.md`
 
 ---
 
 ### Phase 6: Merge Engine (Sprint 9-10)
-**Mục tiêu:** Hợp nhất data từ nhiều nguồn
+**Goal:** Merge data from several sources
 
 **Modes:**
 - **HTP** (Highest Takes Precedence): `merged[ch] = max(src1[ch], src2[ch], ...)`
@@ -681,20 +681,20 @@ void merge_engine_calculate_htp(merge_port_t *port) {
 ```
 
 **Test:**
-- HTP với 2 sources
+- HTP with 2 sources
 - LTP mode
 - Backup failover
 - Timeout handling
 - Performance (merge time < 5ms)
 
-**Tài liệu:** `docs/modules/DESIGN_MODULE_Merge_Engine.md`
+**Document:** `docs/modules/DESIGN_MODULE_Merge_Engine.md`
 
 ---
 
 ### Phase 7: Web Server (Sprint 11-12)
-**Mục tiêu:** HTTP API và WebSocket interface
+**Goal:** HTTP API and WebSocket interface
 
-**Thư viện:** `esp_http_server`, `cJSON`
+**Libraries:** `esp_http_server`, `cJSON`
 
 **Endpoints:**
 
@@ -745,7 +745,7 @@ static esp_err_t ws_handler(httpd_req_t *req) {
     }
     
     httpd_ws_frame_t ws_pkt;
-    // Receive và parse WebSocket frame
+    // Receive and parse the WebSocket frame
     // Handle dmx_test commands
     return ESP_OK;
 }
@@ -763,12 +763,12 @@ static esp_err_t ws_handler(httpd_req_t *req) {
 - DMX test via web
 - RDM control
 
-**Tài liệu:** `docs/modules/DESIGN_MODULE_Web_Server.md`
+**Document:** `docs/modules/DESIGN_MODULE_Web_Server.md`
 
 ---
 
 ### Phase 8: Main Application Integration (Sprint 13)
-**Mục tiêu:** Kết hợp tất cả modules
+**Goal:** Bring all the modules together
 
 **main.c structure:**
 ```c
@@ -865,7 +865,7 @@ void dmx_output_task(void *pvParameters) {
 ---
 
 ### Phase 9: Optimization & Testing (Sprint 14-15)
-**Mục tiêu:** Performance tuning và testing
+**Goal:** Performance tuning and testing
 
 **Performance targets:**
 - DMX refresh rate: 40-44 Hz
@@ -875,7 +875,7 @@ void dmx_output_task(void *pvParameters) {
 
 **Testing checklist:**
 - [ ] All individual modules tested
-- [ ] Integration testing với real hardware
+- [ ] Integration testing with real hardware
 - [ ] Long-term stability test (24h+)
 - [ ] Performance profiling
 - [ ] Memory leak detection
@@ -887,11 +887,11 @@ void dmx_output_task(void *pvParameters) {
 3. **Task priorities**: Ensure DMX timing
 4. **PSRAM usage**: Offload non-critical data
 
-**Tài liệu:** Follow `docs/TESTING_GUIDE.md`
+**Document:** follow `docs/TESTING_GUIDE.md`
 
 ---
 
-## 6. TÀI LIỆU THAM KHẢO
+## 6. REFERENCES
 
 ### 6.1. ESP-IDF Documentation
 - Build System: https://docs.espressif.com/projects/esp-idf/en/v5.2.6/esp32s3/api-guides/build-system.html
@@ -912,7 +912,7 @@ void dmx_output_task(void *pvParameters) {
 - RDM: https://tsp.esta.org/tsp/documents/docs/ANSI-ESTA_E1-20_2010.pdf
 
 ### 6.4. Project Documentation
-- [TongQuan.md](../TongQuan.md) - System overview
+- [OVERVIEW.md](OVERVIEW.md) - System overview
 - [CODING_STANDARDS.md](CODING_STANDARDS.md) - Coding standards
 - [TESTING_GUIDE.md](TESTING_GUIDE.md) - Testing procedures
 - [LIBRARY_INTEGRATION_GUIDE.md](LIBRARY_INTEGRATION_GUIDE.md) - Library integration details
@@ -920,7 +920,7 @@ void dmx_output_task(void *pvParameters) {
 
 ---
 
-## PHỤ LỤC A: SDKCONFIG.DEFAULTS
+## APPENDIX A: SDKCONFIG.DEFAULTS
 
 ```ini
 # ESP32-S3 Configuration
@@ -964,7 +964,7 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 ---
 
-## PHỤ LỤC B: GITIGNORE
+## APPENDIX B: GITIGNORE
 
 ```gitignore
 # ESP-IDF
@@ -990,4 +990,4 @@ test_output/
 
 ---
 
-**Tài liệu này sẽ được cập nhật liên tục trong quá trình phát triển.**
+**This document will be kept up to date during development.**

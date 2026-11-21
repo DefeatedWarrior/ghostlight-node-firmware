@@ -1,19 +1,19 @@
-# THIẾT KẾ MODULE: DMX/RDM Handler
+# MODULE DESIGN: DMX/RDM Handler
 
-**Dự án:** Artnet-Node-2RDM  
+**Project:** Artnet-Node-2RDM  
 **Module:** DMX512 & RDM Protocol Handler  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## 1. Mục đích
+## 1. Purpose
 
-Module DMX/RDM Handler quản lý 2 cổng DMX512/RDM độc lập, hỗ trợ:
-- DMX512 Output (gửi DMX frame)
-- DMX512 Input (nhận DMX frame)
+The DMX/RDM Handler module manages 2 independent DMX512/RDM ports and supports:
+- DMX512 Output (sends DMX frames)
+- DMX512 Input (receives DMX frames)
 - RDM Master mode (discovery, get/set parameters)
-- RDM Responder mode (trả lời RDM requests)
+- RDM Responder mode (answers RDM requests)
 - Port disable
 
 ---
@@ -55,9 +55,9 @@ Module DMX/RDM Handler quản lý 2 cổng DMX512/RDM độc lập, hỗ trợ:
 
 ---
 
-## 3. Kiến trúc Module
+## 3. Module architecture
 
-### 3.1. Cấu trúc dữ liệu
+### 3.1. Data structures
 
 ```c
 typedef enum {
@@ -109,28 +109,28 @@ typedef struct {
 
 ## 4. API Public
 
-### 4.1. Khởi tạo
+### 4.1. Initialization
 
 ```c
 /**
- * Khởi tạo DMX/RDM module
- * @return ESP_OK nếu thành công
+ * Initialize the DMX/RDM module
+ * @return ESP_OK on success
  */
 esp_err_t dmx_init(void);
 
 /**
- * Khởi tạo một port DMX
+ * Initialize one DMX port
  * @param port Port number (1 or 2)
  * @param mode DMX mode
  * @param universe Primary universe
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t dmx_port_init(uint8_t port, dmx_mode_t mode, uint16_t universe);
 
 /**
- * Dừng một port DMX
+ * Stop one DMX port
  * @param port Port number (1 or 2)
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t dmx_port_deinit(uint8_t port);
 ```
@@ -139,29 +139,29 @@ esp_err_t dmx_port_deinit(uint8_t port);
 
 ```c
 /**
- * Gửi DMX frame
+ * Send a DMX frame
  * @param port Port number (1 or 2)
  * @param data Pointer to 512-byte DMX data
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t dmx_send_frame(uint8_t port, const uint8_t *data);
 
 /**
- * Update một kênh DMX
+ * Update one DMX channel
  * @param port Port number
  * @param channel Channel number (1-512)
  * @param value Channel value (0-255)
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t dmx_set_channel(uint8_t port, uint16_t channel, uint8_t value);
 
 /**
- * Update nhiều kênh DMX
+ * Update several DMX channels
  * @param port Port number
  * @param start_channel Start channel (1-512)
  * @param data Pointer to data
  * @param length Number of channels
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t dmx_set_channels(uint8_t port, uint16_t start_channel, 
                            const uint8_t *data, uint16_t length);
@@ -169,7 +169,7 @@ esp_err_t dmx_set_channels(uint8_t port, uint16_t start_channel,
 /**
  * Blackout (set all channels to 0)
  * @param port Port number
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t dmx_blackout(uint8_t port);
 ```
@@ -178,16 +178,16 @@ esp_err_t dmx_blackout(uint8_t port);
 
 ```c
 /**
- * Đọc DMX frame từ input
+ * Read a DMX frame from an input
  * @param port Port number (1 or 2)
  * @param data Buffer to store 512-byte DMX data
  * @param timeout_ms Timeout in milliseconds
- * @return ESP_OK nếu có frame mới
+ * @return ESP_OK if there is a new frame
  */
 esp_err_t dmx_receive_frame(uint8_t port, uint8_t *data, uint32_t timeout_ms);
 
 /**
- * Đăng ký callback khi nhận được DMX frame
+ * Register a callback for received DMX frames
  * @param port Port number
  * @param callback Callback function
  * @param user_data User data
@@ -200,10 +200,10 @@ void dmx_register_rx_callback(uint8_t port, dmx_rx_callback_t callback,
 
 ```c
 /**
- * Bắt đầu RDM discovery trên port
+ * Start RDM discovery on a port
  * @param port Port number
- * @param callback Callback khi tìm thấy device
- * @return ESP_OK nếu thành công
+ * @param callback Callback when a device is found
+ * @return ESP_OK on success
  */
 esp_err_t rdm_start_discovery(uint8_t port, rdm_discovery_callback_t callback);
 
@@ -213,7 +213,7 @@ esp_err_t rdm_start_discovery(uint8_t port, rdm_discovery_callback_t callback);
  * @param uid Target device UID
  * @param pid Parameter ID
  * @param response Buffer to store response
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t rdm_get(uint8_t port, const uint8_t uid[6], uint16_t pid, 
                  rdm_message_t *response);
@@ -225,13 +225,13 @@ esp_err_t rdm_get(uint8_t port, const uint8_t uid[6], uint16_t pid,
  * @param pid Parameter ID
  * @param data Parameter data
  * @param data_len Data length
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t rdm_set(uint8_t port, const uint8_t uid[6], uint16_t pid,
                  const uint8_t *data, uint8_t data_len);
 
 /**
- * Lấy danh sách RDM devices đã discover
+ * Get the list of discovered RDM devices
  * @param port Port number
  * @param devices Buffer to store devices
  * @param max_devices Maximum number of devices
@@ -248,7 +248,7 @@ uint16_t rdm_get_devices(uint8_t port, rdm_device_t *devices,
  * Set RDM Responder UID
  * @param port Port number
  * @param uid Device UID (6 bytes)
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t rdm_responder_set_uid(uint8_t port, const uint8_t uid[6]);
 
@@ -258,13 +258,13 @@ esp_err_t rdm_responder_set_uid(uint8_t port, const uint8_t uid[6]);
  * @param pid Parameter ID
  * @param data Parameter data
  * @param data_len Data length
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t rdm_responder_set_param(uint8_t port, uint16_t pid,
                                   const uint8_t *data, uint8_t data_len);
 
 /**
- * Đăng ký handler cho RDM GET request
+ * Register a handler for RDM GET requests
  * @param port Port number
  * @param pid Parameter ID
  * @param handler Handler function
@@ -273,7 +273,7 @@ void rdm_responder_register_get_handler(uint8_t port, uint16_t pid,
                                        rdm_get_handler_t handler);
 
 /**
- * Đăng ký handler cho RDM SET request
+ * Register a handler for RDM SET requests
  * @param port Port number
  * @param pid Parameter ID
  * @param handler Handler function
@@ -286,17 +286,17 @@ void rdm_responder_register_set_handler(uint8_t port, uint16_t pid,
 
 ```c
 /**
- * Lấy trạng thái port
+ * Get the port status
  * @param port Port number
  * @param status Buffer to store status
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t dmx_get_port_status(uint8_t port, dmx_port_t *status);
 
 /**
  * Reset statistics counter
  * @param port Port number
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t dmx_reset_stats(uint8_t port);
 ```
@@ -500,22 +500,22 @@ static void rdm_discovery_recursive(uint8_t port,
 ## 7. Threading Model
 
 - **DMX Output Task** (Priority: 10, Core: 1, Stack: 4KB) × 2 ports
-  - Liên tục gửi DMX frames
+  - Sends DMX frames continuously
   - Rate: ~44 Hz
 
 - **DMX Input Task** (Priority: 10, Core: 1, Stack: 4KB) × 2 ports
-  - Nhận DMX frames từ UART
+  - Receives DMX frames from the UART
   - Process RDM packets
 
 - **RDM Discovery Task** (Priority: 8, Core: 1, Stack: 8KB)
-  - Chạy khi triggered
-  - Tự động terminate khi xong
+  - Runs when triggered
+  - Ends itself when finished
 
 ---
 
 ## 8. Error Handling
 
-| Lỗi | Hành động |
+| Error | Action |
 |-----|-----------|
 | UART init fail | Log error, disable port |
 | DMX framing error | Skip frame, continue |

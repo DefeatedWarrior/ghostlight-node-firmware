@@ -1,26 +1,26 @@
-# THIẾT KẾ MODULE: Configuration
+# MODULE DESIGN: Configuration
 
-**Dự án:** Artnet-Node-2RDM  
+**Project:** Artnet-Node-2RDM  
 **Module:** Configuration Management  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## 1. Mục đích
+## 1. Purpose
 
-Module Configuration chịu trách nhiệm quản lý toàn bộ thông số cấu hình của hệ thống, bao gồm:
-- Thông số mạng (Ethernet, WiFi)
-- Cấu hình cổng DMX/RDM
-- Cấu hình giao thức (Art-Net, sACN)
-- Cấu hình Merge Engine
-- Thông tin thiết bị (node name, ID)
+The Configuration module manages all of the system's configuration settings, including:
+- Network settings (Ethernet, WiFi)
+- DMX/RDM port configuration
+- Protocol configuration (Art-Net, sACN)
+- Merge Engine configuration
+- Device information (node name, ID)
 
 ---
 
-## 2. Kiến trúc Module
+## 2. Module architecture
 
-### 2.1. Cấu trúc dữ liệu chính
+### 2.1. Main data structures
 
 ```c
 typedef struct {
@@ -99,23 +99,23 @@ typedef enum {
 
 ## 3. API Public
 
-### 3.1. Khởi tạo và Load Configuration
+### 3.1. Initializing and loading the configuration
 
 ```c
 /**
- * Khởi tạo module Configuration
- * @return ESP_OK nếu thành công
+ * Initialize the Configuration module
+ * @return ESP_OK on success
  */
 esp_err_t config_init(void);
 
 /**
- * Load cấu hình từ storage (NVS hoặc LittleFS)
- * @return ESP_OK nếu thành công
+ * Load the configuration from storage (NVS or LittleFS)
+ * @return ESP_OK on success
  */
 esp_err_t config_load(void);
 
 /**
- * Load cấu hình mặc định
+ * Load the default configuration
  */
 void config_load_defaults(void);
 ```
@@ -124,15 +124,15 @@ void config_load_defaults(void);
 
 ```c
 /**
- * Lưu cấu hình vào storage
- * @return ESP_OK nếu thành công
+ * Save the configuration to storage
+ * @return ESP_OK on success
  */
 esp_err_t config_save(void);
 
 /**
- * Lưu cấu hình vào file JSON
- * @param filename Tên file
- * @return ESP_OK nếu thành công
+ * Save the configuration to a JSON file
+ * @param filename file name
+ * @return ESP_OK on success
  */
 esp_err_t config_save_to_json(const char *filename);
 ```
@@ -141,33 +141,33 @@ esp_err_t config_save_to_json(const char *filename);
 
 ```c
 /**
- * Lấy con trỏ đến cấu hình hiện tại (read-only)
+ * Get a pointer to the current configuration (read-only)
  * @return Pointer to system_config_t
  */
 const system_config_t* config_get(void);
 
 /**
- * Lấy bản sao cấu hình hiện tại
- * @param config Pointer để lưu cấu hình
- * @return ESP_OK nếu thành công
+ * Get a copy of the current configuration
+ * @param config pointer to store the configuration in
+ * @return ESP_OK on success
  */
 esp_err_t config_get_copy(system_config_t *config);
 
 /**
- * Cập nhật toàn bộ cấu hình
- * @param config Cấu hình mới
- * @return ESP_OK nếu thành công
+ * Update the whole configuration
+ * @param config the new configuration
+ * @return ESP_OK on success
  */
 esp_err_t config_set(const system_config_t *config);
 
 /**
- * Cập nhật cấu hình một cổng DMX
- * @param port_num Số cổng (1 hoặc 2)
+ * Update the configuration of one DMX port
+ * @param port_num port number (1 or 2)
  * @param mode DMX mode
- * @param primary_universe Universe chính
- * @param secondary_universe Universe phụ (-1 để tắt)
+ * @param primary_universe primary universe
+ * @param secondary_universe secondary universe (-1 to disable)
  * @param offset Universe offset
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t config_set_port(uint8_t port_num, 
                           dmx_mode_t mode,
@@ -180,60 +180,60 @@ esp_err_t config_set_port(uint8_t port_num,
 
 ```c
 /**
- * Kiểm tra tính hợp lệ của cấu hình
- * @param config Cấu hình cần kiểm tra
- * @return true nếu hợp lệ
+ * Check that a configuration is valid
+ * @param config the configuration to check
+ * @return true if valid
  */
 bool config_validate(const system_config_t *config);
 
 /**
- * Kiểm tra tính hợp lệ của WiFi profile
+ * Check that a WiFi profile is valid
  * @param profile WiFi profile
- * @return true nếu hợp lệ
+ * @return true if valid
  */
 bool config_validate_wifi_profile(const wifi_profile_t *profile);
 ```
 
 ---
 
-## 4. Luồng hoạt động
+## 4. Operation flow
 
 ### 4.1. Boot sequence
 
 ```
 1. config_init()
-   └─> Khởi tạo mutex/semaphore
-   └─> Cấp phát bộ nhớ cho config
+   └─> Create the mutex/semaphore
+   └─> Allocate memory for the config
 
 2. config_load()
-   └─> Thử đọc từ NVS
-   └─> Nếu fail, thử đọc từ LittleFS (config.json)
-   └─> Nếu fail, load defaults
+   └─> Try reading from NVS
+   └─> If that fails, try reading from LittleFS (config.json)
+   └─> If that fails, load the defaults
    └─> Validate config
-   └─> Nếu invalid, load defaults
+   └─> If invalid, load the defaults
 
-3. Các module khác gọi config_get() để lấy cấu hình
+3. Other modules call config_get() to get the configuration
 ```
 
 ### 4.2. Runtime update
 
 ```
-1. Web Server nhận request thay đổi config
-2. Parse JSON từ HTTP POST
-3. Validate config mới
-4. config_set() để update
-5. config_save() để lưu vào storage
-6. Trigger các module liên quan reload config
+1. The Web Server receives a request to change the config
+2. Parse the JSON from the HTTP POST
+3. Validate the new config
+4. config_set() to update it
+5. config_save() to write it to storage
+6. Trigger the related modules to reload the config
 ```
 
 ---
 
 ## 5. Thread Safety
 
-- Module sử dụng **mutex** để bảo vệ truy cập đồng thời
-- Các hàm get/set đều thread-safe
-- config_get() trả về const pointer → không cho phép sửa trực tiếp
-- Mọi thay đổi phải qua config_set()
+- The module uses a **mutex** to protect concurrent access
+- The get/set functions are all thread-safe
+- config_get() returns a const pointer, so it cannot be changed directly
+- Every change must go through config_set()
 
 ---
 
@@ -241,25 +241,25 @@ bool config_validate_wifi_profile(const wifi_profile_t *profile);
 
 ### 6.1. NVS (Non-Volatile Storage)
 
-- Lưu trữ nhị phân, nhanh
-- Sử dụng namespace: "config"
+- Binary storage, fast
+- Uses the namespace "config"
 - Key: "system_config"
 
 ### 6.2. LittleFS (JSON)
 
-- Lưu trữ dạng text (JSON), dễ debug
+- Text storage (JSON), easy to debug
 - File: `/littlefs/config.json`
 - Backup khi save: `config.json.bak`
 
 ### 6.3. Priority
 
-1. Thử đọc NVS trước
-2. Nếu NVS không có hoặc lỗi, đọc LittleFS
-3. Nếu cả hai đều fail, dùng defaults
+1. Try reading NVS first
+2. If NVS has nothing or fails, read LittleFS
+3. If both fail, use the defaults
 
 ---
 
-## 7. Cấu hình mặc định
+## 7. Default configuration
 
 ```c
 static const system_config_t DEFAULT_CONFIG = {
@@ -294,21 +294,21 @@ static const system_config_t DEFAULT_CONFIG = {
 
 ---
 
-## 8. Xử lý lỗi
+## 8. Error handling
 
-| Lỗi | Hành động |
+| Error | Action |
 |------|-----------|
-| NVS read fail | Thử đọc LittleFS |
+| NVS read fail | Try reading LittleFS |
 | LittleFS read fail | Load defaults |
 | Config invalid | Load defaults |
-| Save fail | Retry 3 lần, log error |
+| Save fail | Retry 3 times, log an error |
 | JSON parse error | Load defaults |
 
 ---
 
 ## 9. Dependencies
 
-- **ESP-IDF NVS**: Lưu trữ nhị phân
+- **ESP-IDF NVS**: binary storage
 - **LittleFS**: File system
 - **cJSON**: Parse/generate JSON
 - **FreeRTOS**: Mutex, semaphore
@@ -317,9 +317,9 @@ static const system_config_t DEFAULT_CONFIG = {
 
 ## 10. Testing Points
 
-1. Load defaults khi không có config
-2. Load từ NVS thành công
-3. Load từ LittleFS khi NVS fail
+1. Load the defaults when there is no config
+2. Load from NVS successfully
+3. Load from LittleFS when NVS fails
 4. Validate config - reject invalid values
 5. Save/Load cycle - data integrity
 6. Thread-safe concurrent access

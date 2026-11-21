@@ -1,31 +1,31 @@
-# THIẾT KẾ MODULE: Network
+# MODULE DESIGN: Network
 
-**Dự án:** Artnet-Node-2RDM  
+**Project:** Artnet-Node-2RDM  
 **Module:** Network Management  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## 1. Mục đích
+## 1. Purpose
 
-Module Network quản lý kết nối mạng của thiết bị, bao gồm:
+The Network module manages the device's network connections, including:
 - Ethernet (W5500 SPI)
-- WiFi Station mode (kết nối đến AP)
-- WiFi Access Point mode (tạo AP riêng)
-- Auto-fallback giữa các phương thức
+- WiFi Station mode (connects to an AP)
+- WiFi Access Point mode (creates its own AP)
+- Auto-fallback between the methods
 
 ---
 
-## 2. Kiến trúc Module
+## 2. Module architecture
 
-### 2.1. Cấu trúc dữ liệu
+### 2.1. Data structures
 
 ```c
 typedef struct {
     char ssid[32];
     char password[64];
-    uint8_t priority;  // 0-255, càng nhỏ càng ưu tiên
+    uint8_t priority;  // 0-255, lower = higher priority
     bool use_static_ip;
     ip_config_t static_ip;
 } wifi_profile_t;
@@ -66,24 +66,24 @@ typedef struct {
 
 ## 3. API Public
 
-### 3.1. Khởi tạo
+### 3.1. Initialization
 
 ```c
 /**
- * Khởi tạo module Network
- * @return ESP_OK nếu thành công
+ * Initialize the Network module
+ * @return ESP_OK on success
  */
 esp_err_t network_init(void);
 
 /**
- * Start network connection theo cấu hình
- * @return ESP_OK nếu thành công
+ * Start the network connection according to the configuration
+ * @return ESP_OK on success
  */
 esp_err_t network_start(void);
 
 /**
- * Stop tất cả network interfaces
- * @return ESP_OK nếu thành công
+ * Stop all network interfaces
+ * @return ESP_OK on success
  */
 esp_err_t network_stop(void);
 ```
@@ -92,21 +92,21 @@ esp_err_t network_stop(void);
 
 ```c
 /**
- * Khởi tạo và kết nối Ethernet W5500
+ * Initialize and connect the W5500 Ethernet
  * @param config IP configuration
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t network_ethernet_connect(const ip_config_t *config);
 
 /**
- * Ngắt kết nối Ethernet
- * @return ESP_OK nếu thành công
+ * Disconnect Ethernet
+ * @return ESP_OK on success
  */
 esp_err_t network_ethernet_disconnect(void);
 
 /**
- * Kiểm tra trạng thái link Ethernet
- * @return true nếu link up
+ * Check the Ethernet link state
+ * @return true if the link is up
  */
 bool network_ethernet_is_link_up(void);
 ```
@@ -115,23 +115,23 @@ bool network_ethernet_is_link_up(void);
 
 ```c
 /**
- * Kết nối đến WiFi AP theo profile
+ * Connect to a WiFi AP using a profile
  * @param profile WiFi profile
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t network_wifi_sta_connect(const wifi_profile_t *profile);
 
 /**
- * Ngắt kết nối WiFi STA
- * @return ESP_OK nếu thành công
+ * Disconnect WiFi STA
+ * @return ESP_OK on success
  */
 esp_err_t network_wifi_sta_disconnect(void);
 
 /**
- * Scan các WiFi network xung quanh
- * @param scan_result Buffer để lưu kết quả
- * @param max_aps Số lượng AP tối đa
- * @return Số lượng AP tìm thấy
+ * Scan the WiFi networks around
+ * @param scan_result buffer for the results
+ * @param max_aps maximum number of APs
+ * @return number of APs found
  */
 uint16_t network_wifi_scan(wifi_ap_record_t *scan_result, uint16_t max_aps);
 ```
@@ -140,12 +140,12 @@ uint16_t network_wifi_scan(wifi_ap_record_t *scan_result, uint16_t max_aps);
 
 ```c
 /**
- * Tạo WiFi Access Point
- * @param ssid SSID của AP
- * @param password Password (min 8 ký tự)
+ * Create a WiFi Access Point
+ * @param ssid SSID of the AP
+ * @param password Password (min 8 characters)
  * @param channel Channel (1-13)
  * @param config IP configuration
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t network_wifi_ap_start(const char *ssid, 
                                 const char *password,
@@ -153,16 +153,16 @@ esp_err_t network_wifi_ap_start(const char *ssid,
                                 const ip_config_t *config);
 
 /**
- * Dừng WiFi Access Point
- * @return ESP_OK nếu thành công
+ * Stop the WiFi Access Point
+ * @return ESP_OK on success
  */
 esp_err_t network_wifi_ap_stop(void);
 
 /**
- * Lấy danh sách các station đang kết nối
- * @param stations Buffer để lưu danh sách
- * @param max_stations Số lượng tối đa
- * @return Số lượng station đang kết nối
+ * Get the list of connected stations
+ * @param stations buffer for the list
+ * @param max_stations maximum number
+ * @return number of connected stations
  */
 uint16_t network_wifi_ap_get_stations(wifi_sta_info_t *stations, 
                                        uint16_t max_stations);
@@ -172,22 +172,22 @@ uint16_t network_wifi_ap_get_stations(wifi_sta_info_t *stations,
 
 ```c
 /**
- * Lấy trạng thái mạng hiện tại
- * @param status Buffer để lưu status
- * @return ESP_OK nếu thành công
+ * Get the current network state
+ * @param status buffer for the status
+ * @return ESP_OK on success
  */
 esp_err_t network_get_status(network_status_t *status);
 
 /**
- * Lấy địa chỉ IP hiện tại
- * @return String IP address hoặc NULL nếu không kết nối
+ * Get the current IP address
+ * @return IP address string, or NULL if not connected
  */
 const char* network_get_ip_address(void);
 
 /**
- * Lấy địa chỉ MAC
- * @param mac Buffer 6 bytes để lưu MAC
- * @return ESP_OK nếu thành công
+ * Get the MAC address
+ * @param mac 6-byte buffer for the MAC
+ * @return ESP_OK on success
  */
 esp_err_t network_get_mac_address(uint8_t mac[6]);
 ```
@@ -196,7 +196,7 @@ esp_err_t network_get_mac_address(uint8_t mac[6]);
 
 ```c
 /**
- * Đăng ký callback khi network state thay đổi
+ * Register a callback for network state changes
  * @param callback Function callback
  * @param user_data User data
  */
@@ -206,34 +206,34 @@ void network_register_state_callback(network_state_callback_t callback,
 
 ---
 
-## 4. Luồng hoạt động
+## 4. Operation flow
 
 ### 4.1. Auto-connect Sequence
 
 ```
 1. network_start()
-   └─> Đọc config (use_ethernet, wifi_profiles, ap_config)
+   └─> Read the config (use_ethernet, wifi_profiles, ap_config)
    
-2. Nếu use_ethernet == true:
+2. If use_ethernet == true:
    └─> network_ethernet_connect()
-       └─> Thử kết nối (timeout 10s)
-       └─> Retry 3 lần
-       └─> Nếu thành công → DONE
-       └─> Nếu fail → Continue to WiFi
+       └─> Try to connect (timeout 10s)
+       └─> Retry 3 times
+       └─> If successful → DONE
+       └─> If it fails → continue to WiFi
    
-3. Nếu Ethernet fail hoặc disabled:
-   └─> Sắp xếp wifi_profiles theo priority
+3. If Ethernet fails or is disabled:
+   └─> Sort wifi_profiles by priority
    └─> For each profile (high to low priority):
        └─> network_wifi_sta_connect(profile)
        └─> Timeout 15s
-       └─> Nếu thành công → DONE
-       └─> Nếu fail → Try next profile
+       └─> If successful → DONE
+       └─> If it fails → try the next profile
    
-4. Nếu tất cả WiFi STA profiles fail:
+4. If every WiFi STA profile fails:
    └─> network_wifi_ap_start()
-       └─> Tạo AP với SSID từ config
-       └─> Password từ config hoặc mặc định
-       └─> IP mặc định: 192.168.4.1
+       └─> Create an AP with the SSID from the config
+       └─> Password from the config, or the default
+       └─> Default IP: 192.168.4.1
 ```
 
 ### 4.2. State Machine
@@ -282,19 +282,19 @@ WIFI_AP_ACTIVE
 #define W5500_SPI_MODE       0
 ```
 
-**Sequence khởi tạo W5500:**
+**W5500 initialization sequence:**
 1. Init SPI bus
-2. Reset W5500 (toggle reset pin nếu có)
+2. Reset the W5500 (toggle the reset pin if there is one)
 3. Check chip version (register 0x0039)
 4. Configure MAC address
 5. Configure IP/Netmask/Gateway
-6. Open sockets cho Art-Net (UDP 6454) và sACN
+6. Open sockets for Art-Net (UDP 6454) and sACN
 
 ### 5.2. WiFi
 
-- Sử dụng ESP-IDF WiFi driver
-- Cấu hình antenna: Internal PCB antenna
-- Power save mode: NONE (luôn bật để độ trễ thấp)
+- Uses the ESP-IDF WiFi driver
+- Antenna: internal PCB antenna
+- Power save mode: NONE (always on, for low latency)
 
 ---
 
@@ -315,10 +315,10 @@ WIFI_AP_ACTIVE
 
 ## 7. Error Handling
 
-| Lỗi | Hành động |
+| Error | Action |
 |-----|-----------|
 | Ethernet hardware not found | Log warning, fallback WiFi |
-| Ethernet link down | Retry 3 lần, sau đó fallback WiFi |
+| Ethernet link down | Retry 3 times, then fall back to WiFi |
 | WiFi STA connect timeout | Try next profile |
 | WiFi STA password wrong | Skip profile, try next |
 | WiFi AP start fail | Log error, retry with default config |
@@ -328,7 +328,7 @@ WIFI_AP_ACTIVE
 
 ## 8. Configuration Examples
 
-### 8.1. Ethernet với DHCP
+### 8.1. Ethernet with DHCP
 
 ```json
 {
@@ -339,7 +339,7 @@ WIFI_AP_ACTIVE
 }
 ```
 
-### 8.2. Ethernet với Static IP
+### 8.2. Ethernet with a static IP
 
 ```json
 {
@@ -354,7 +354,7 @@ WIFI_AP_ACTIVE
 }
 ```
 
-### 8.3. WiFi Station với Multiple Profiles
+### 8.3. WiFi Station with multiple profiles
 
 ```json
 {
@@ -393,7 +393,7 @@ WIFI_AP_ACTIVE
   - driver (SPI, GPIO)
 
 - **External Libraries**:
-  - W5500 driver (custom hoặc esp_eth)
+  - W5500 driver (custom or esp_eth)
 
 ---
 
@@ -440,4 +440,4 @@ WIFI_AP_ACTIVE
 
 - Ethernet: ~150 mA active
 - WiFi: ~80-200 mA (depending on TX power)
-- Power save mode disabled để giảm latency
+- Power save mode disabled to reduce latency

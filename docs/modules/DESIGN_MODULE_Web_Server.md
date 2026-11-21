@@ -1,17 +1,17 @@
-# THIẾT KẾ MODULE: Web Server
+# MODULE DESIGN: Web Server
 
-**Dự án:** Artnet-Node-2RDM  
+**Project:** Artnet-Node-2RDM  
 **Module:** HTTP Web Server & WebSocket  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## 1. Mục đích
+## 1. Purpose
 
-Module Web Server cung cấp giao diện web để:
-- Cấu hình thiết bị
-- Monitor trạng thái real-time
+The Web Server module provides a web interface to:
+- Configure the device
+- Monitor status in real time
 - Test DMX channels
 - RDM device control
 - WiFi management
@@ -19,7 +19,7 @@ Module Web Server cung cấp giao diện web để:
 
 ---
 
-## 2. Kiến trúc Module
+## 2. Module architecture
 
 ### 2.1. Technology Stack
 

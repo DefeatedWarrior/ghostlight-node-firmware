@@ -1,27 +1,27 @@
-# THIẾT KẾ MODULE: Merge Engine
+# MODULE DESIGN: Merge Engine
 
-**Dự án:** Artnet-Node-2RDM  
+**Project:** Artnet-Node-2RDM  
 **Module:** Data Merge Engine  
-**Phiên bản:** 1.0  
-**Ngày tạo:** 25/12/2025
+**Version:** 1.0  
+**Created:** 25/12/2025
 
 ---
 
-## 1. Mục đích
+## 1. Purpose
 
-Module Merge Engine hợp nhất dữ liệu DMX từ nhiều nguồn khác nhau:
-- Nhiều Art-Net sources
-- Nhiều sACN sources
-- Nhiều universes (primary + secondary)
-- Các giao thức khác nhau (Art-Net + sACN)
+The Merge Engine module combines DMX data from several different sources:
+- Several Art-Net sources
+- Several sACN sources
+- Several universes (primary + secondary)
+- Different protocols (Art-Net + sACN)
 
-Merge Engine áp dụng các thuật toán merge khác nhau và xử lý timeout.
+The Merge Engine applies different merge algorithms and handles timeouts.
 
 ---
 
-## 2. Kiến trúc Module
+## 2. Module architecture
 
-### 2.1. Cấu trúc dữ liệu
+### 2.1. Data structures
 
 ```c
 typedef enum {
@@ -69,21 +69,21 @@ typedef struct {
 
 ## 3. API Public
 
-### 3.1. Khởi tạo
+### 3.1. Initialization
 
 ```c
 /**
- * Khởi tạo Merge Engine
- * @return ESP_OK nếu thành công
+ * Initialize the Merge Engine
+ * @return ESP_OK on success
  */
 esp_err_t merge_engine_init(void);
 
 /**
- * Cấu hình merge cho một port
+ * Configure merging for one port
  * @param port Port number (1 or 2)
  * @param mode Merge mode
  * @param timeout_ms Timeout in milliseconds
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t merge_engine_config(uint8_t port, merge_mode_t mode, 
                               uint32_t timeout_ms);
@@ -93,20 +93,20 @@ esp_err_t merge_engine_config(uint8_t port, merge_mode_t mode,
 
 ```c
 /**
- * Đưa dữ liệu từ Art-Net vào merge engine
+ * Feed Art-Net data into the merge engine
  * @param port Port number
  * @param universe Universe number
  * @param data DMX data (512 bytes)
  * @param sequence Sequence number
  * @param source_ip Source IP address
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t merge_engine_push_artnet(uint8_t port, uint16_t universe,
                                    const uint8_t *data, uint8_t sequence,
                                    uint32_t source_ip);
 
 /**
- * Đưa dữ liệu từ sACN vào merge engine
+ * Feed sACN data into the merge engine
  * @param port Port number
  * @param universe Universe number
  * @param data DMX data (512 bytes)
@@ -114,7 +114,7 @@ esp_err_t merge_engine_push_artnet(uint8_t port, uint16_t universe,
  * @param priority Priority (0-200)
  * @param source_name Source name
  * @param source_ip Source IP address
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t merge_engine_push_sacn(uint8_t port, uint16_t universe,
                                  const uint8_t *data, uint8_t sequence,
@@ -122,10 +122,10 @@ esp_err_t merge_engine_push_sacn(uint8_t port, uint16_t universe,
                                  uint32_t source_ip);
 
 /**
- * Đưa dữ liệu từ DMX Input vào merge engine
+ * Feed DMX Input data into the merge engine
  * @param port Port number
  * @param data DMX data (512 bytes)
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t merge_engine_push_dmx_in(uint8_t port, const uint8_t *data);
 ```
@@ -134,24 +134,24 @@ esp_err_t merge_engine_push_dmx_in(uint8_t port, const uint8_t *data);
 
 ```c
 /**
- * Lấy dữ liệu đã merge cho một port
+ * Get the merged data for one port
  * @param port Port number
  * @param data Buffer to store merged data (512 bytes)
- * @return ESP_OK nếu có data, ESP_ERR_TIMEOUT nếu timeout
+ * @return ESP_OK if there is data, ESP_ERR_TIMEOUT on timeout
  */
 esp_err_t merge_engine_get_output(uint8_t port, uint8_t *data);
 
 /**
- * Kiểm tra xem output có active không
+ * Check whether the output is active
  * @param port Port number
- * @return true nếu có data trong timeout period
+ * @return true if there was data within the timeout period
  */
 bool merge_engine_is_output_active(uint8_t port);
 
 /**
  * Force blackout (clear all sources)
  * @param port Port number
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t merge_engine_blackout(uint8_t port);
 ```
@@ -160,7 +160,7 @@ esp_err_t merge_engine_blackout(uint8_t port);
 
 ```c
 /**
- * Lấy thông tin các sources đang active
+ * Get information about the active sources
  * @param port Port number
  * @param sources Buffer to store source info
  * @param max_sources Maximum number of sources
@@ -173,7 +173,7 @@ uint8_t merge_engine_get_active_sources(uint8_t port,
 /**
  * Reset merge statistics
  * @param port Port number
- * @return ESP_OK nếu thành công
+ * @return ESP_OK on success
  */
 esp_err_t merge_engine_reset_stats(uint8_t port);
 ```
@@ -203,7 +203,7 @@ static void merge_htp(merge_context_t *ctx) {
 }
 ```
 
-**Ứng dụng:** Dùng cho lighting control, nhiều console cùng điều khiển.
+**Use:** lighting control with several consoles controlling at once.
 
 ### 4.2. LTP (Lowest Takes Precedence)
 
@@ -226,7 +226,7 @@ static void merge_ltp(merge_context_t *ctx) {
 }
 ```
 
-**Ứng dụng:** Hiếm dùng, nhưng có thể dùng cho special effects.
+**Use:** rarely used, but possible for special effects.
 
 ### 4.3. LAST (Last Packet Wins)
 
@@ -255,7 +255,7 @@ static void merge_last(merge_context_t *ctx) {
 }
 ```
 
-**Ứng dụng:** Nhiều backup systems, chuyển đổi nhanh giữa các nguồn.
+**Use:** several backup systems, fast switching between sources.
 
 ### 4.4. BACKUP (Primary + Backup)
 
@@ -292,7 +292,7 @@ static void merge_backup(merge_context_t *ctx) {
 }
 ```
 
-**Ứng dụng:** Critical systems với redundant controllers.
+**Use:** critical systems with redundant controllers.
 
 ### 4.5. DISABLE (No Merge)
 
@@ -320,7 +320,7 @@ static void merge_disable(merge_context_t *ctx) {
 }
 ```
 
-**Ứng dụng:** Single source only, no merging.
+**Use:** single source only, no merging.
 
 ---
 
@@ -391,23 +391,23 @@ static void cleanup_timeout_sources(merge_context_t *ctx) {
 
 ### 6.1. Art-Net Priority
 
-Art-Net không có priority field trong gói tin. Priority được xác định theo:
-1. Cấu hình protocol mode (ARTNET_PRIORITY)
-2. IP address (nếu equal priority)
+Art-Net has no priority field in its packets. The priority is set by:
+1. The protocol mode setting (ARTNET_PRIORITY)
+2. The IP address (if the priorities are equal)
 
 ### 6.2. sACN Priority
 
-sACN có priority field (0-200) trong gói tin:
+sACN has a priority field (0-200) in its packets:
 - 0: Lowest
 - 100: Default
 - 200: Highest
 
 ### 6.3. Protocol Priority
 
-Khi merge giữa Art-Net và sACN:
-- ARTNET_PRIORITY: Art-Net được ưu tiên
-- SACN_PRIORITY: sACN được ưu tiên
-- MERGE_BOTH: Merge theo priority của sACN, Art-Net = 100
+When merging Art-Net and sACN:
+- ARTNET_PRIORITY: Art-Net wins
+- SACN_PRIORITY: sACN wins
+- MERGE_BOTH: merge by the sACN priority, Art-Net = 100
 
 ```c
 static uint8_t get_source_priority(dmx_source_data_t *source, 
@@ -432,9 +432,9 @@ static uint8_t get_source_priority(dmx_source_data_t *source,
 ## 7. Threading Model
 
 - **Merge Task** (Priority: 9, Core: 1, Stack: 4KB) × 2 ports
-  - Chạy liên tục với rate 50 Hz
-  - Merge data từ sources
-  - Push output đến DMX Handler
+  - Runs continuously at 50 Hz
+  - Merges the data from the sources
+  - Pushes the output to the DMX Handler
   - Cleanup timeout sources
 
 ```c
@@ -489,19 +489,19 @@ static void merge_task(void *pvParameters) {
 
 ### 8.1. Lock-free Input
 
-- Sử dụng double buffering cho input data
-- Input functions không block merge task
+- Double buffering for input data
+- Input functions do not block the merge task
 
 ### 8.2. SIMD Operations
 
-- Có thể sử dụng ESP32-S3 SIMD instructions cho HTP/LTP
-- Tối ưu hóa memcpy với DMA
+- Could use ESP32-S3 SIMD instructions for HTP/LTP
+- Optimize memcpy with DMA
 
 ---
 
 ## 9. Error Handling
 
-| Lỗi | Hành động |
+| Error | Action |
 |-----|-----------|
 | Invalid data pointer | Return error, log warning |
 | Source buffer full | Replace oldest timeout source |

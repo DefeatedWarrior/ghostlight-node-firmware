@@ -1,13 +1,13 @@
-# PHƯƠNG ÁN THAY THẾ VÀ SO SÁNH
-**Dự án: ESP-NODE-2RDM**
+# ALTERNATIVE APPROACHES AND COMPARISON
+**Project: ESP-NODE-2RDM**
 
-**Phiên bản:** 1.0  
-**Ngày:** 25/12/2025
+**Version:** 1.0  
+**Date:** 25/12/2025
 
 ---
 
-## MỤC LỤC
-1. [Tổng quan](#1-tổng-quan)
+## CONTENTS
+1. [Overview](#1-overview)
 2. [DMX/RDM Implementation](#2-dmxrdm-implementation)
 3. [sACN Implementation](#3-sacn-implementation)
 4. [Art-Net Implementation](#4-art-net-implementation)
@@ -16,71 +16,71 @@
 7. [Network Stack](#7-network-stack)
 8. [Merge Engine Algorithms](#8-merge-engine-algorithms)
 9. [Task Architecture](#9-task-architecture)
-10. [Khuyến nghị cuối cùng](#10-khuyến-nghị-cuối-cùng)
+10. [Final recommendation](#10-final-recommendation)
 
 ---
 
-## 1. TỔNG QUAN
+## 1. OVERVIEW
 
-Tài liệu này so sánh các phương án triển khai khác nhau cho từng module trong dự án, bao gồm:
-- Ưu điểm / Nhược điểm
-- Độ phức tạp
+This document compares the different ways each module in the project could be implemented, covering:
+- Pros / Cons
+- Complexity
 - Performance
 - Maintainability
-- Khuyến nghị
+- Recommendation
 
 ---
 
 ## 2. DMX/RDM IMPLEMENTATION
 
-### Option 1: esp-dmx Library (KHUYẾN NGHỊ)
+### Option 1: esp-dmx Library (RECOMMENDED)
 
 **Repository:** https://github.com/someweisguy/esp-dmx
 
-**Ưu điểm:**
-- ✅ Thư viện chuyên dụng, được maintain tốt
-- ✅ Hỗ trợ đầy đủ DMX512 + RDM
-- ✅ Timing chính xác (hardware UART)
-- ✅ API đơn giản, dễ sử dụng
-- ✅ Đã được test với nhiều RDM devices
-- ✅ Documentation đầy đủ
-- ✅ Hỗ trợ multiple ports
+**Pros:**
+- ✅ Dedicated library, well maintained
+- ✅ Full DMX512 + RDM support
+- ✅ Accurate timing (hardware UART)
+- ✅ Simple, easy-to-use API
+- ✅ Already tested with many RDM devices
+- ✅ Complete documentation
+- ✅ Supports multiple ports
 
-**Nhược điểm:**
-- ❌ Dependency vào external library
-- ❌ Cần hiểu RDM protocol để debug
+**Cons:**
+- ❌ Depends on an external library
+- ❌ You need to understand the RDM protocol to debug it
 
-**Độ phức tạp:** Thấp  
+**Complexity:** Low  
 **Performance:** Excellent (hardware UART)  
 **Maintainability:** Cao (well-maintained library)
 
-**Use case:** Tất cả các dự án DMX/RDM nghiêm túc
+**Use case:** Every serious DMX/RDM project
 
 ---
 
 ### Option 2: Custom DMX Implementation
 
-**Approach:** Tự code DMX driver sử dụng UART HAL
+**Approach:** Write our own DMX driver on the UART HAL
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Full control over implementation
 - ✅ No external dependencies
-- ✅ Có thể optimize cho use case cụ thể
+- ✅ Can be optimised for a specific use case
 
-**Nhược điểm:**
-- ❌ Phức tạp cao (DMX timing critical)
-- ❌ RDM rất phức tạp (discovery, collision detection)
-- ❌ Phải tự test với nhiều devices
-- ❌ Mất nhiều thời gian phát triển
-- ❌ Dễ có bugs timing
+**Cons:**
+- ❌ Very complex (DMX timing is critical)
+- ❌ RDM is very complex (discovery, collision detection)
+- ❌ Must be tested against many devices ourselves
+- ❌ Takes a long time to develop
+- ❌ Timing bugs are easy to introduce
 
-**Độ phức tạp:** Rất cao  
-**Performance:** Tùy implementation  
-**Maintainability:** Thấp (custom code)
+**Complexity:** Very high  
+**Performance:** Depends on the implementation  
+**Maintainability:** Low (custom code)
 
-**Use case:** Chỉ khi có yêu cầu đặc biệt mà esp-dmx không đáp ứng
+**Use case:** Only for special requirements that esp-dmx cannot meet
 
-**Kết luận:** ❌ KHÔNG khuyến nghị - esp-dmx đã đủ tốt
+**Conclusion:** ❌ NOT recommended - esp-dmx is good enough
 
 ---
 
@@ -88,38 +88,38 @@ Tài liệu này so sánh các phương án triển khai khác nhau cho từng m
 
 **Examples:** DMXSerial, DmxSimple
 
-**Ưu điểm:**
-- ✅ Nhiều libraries có sẵn
-- ✅ Đơn giản cho basic DMX output
+**Pros:**
+- ✅ Many libraries available
+- ✅ Simple for basic DMX output
 
-**Nhược điểm:**
-- ❌ Arduino libraries khó port sang ESP-IDF
-- ❌ Thường không hỗ trợ RDM
-- ❌ Performance không tối ưu
-- ❌ Dependencies vào Arduino framework
+**Cons:**
+- ❌ Arduino libraries are hard to port to ESP-IDF
+- ❌ Usually no RDM support
+- ❌ Performance is not optimal
+- ❌ Depends on the Arduino framework
 
-**Kết luận:** ❌ KHÔNG phù hợp cho ESP-IDF project
+**Conclusion:** ❌ NOT suitable for an ESP-IDF project
 
 ---
 
 ## 3. sACN IMPLEMENTATION
 
-### Option 1: libe131 (KHUYẾN NGHỊ)
+### Option 1: libe131 (RECOMMENDED)
 
 **Repository:** https://github.com/hhromic/libe131
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Lightweight (~500 lines)
-- ✅ Pure C, dễ port
-- ✅ Hỗ trợ multicast đầy đủ
+- ✅ Pure C, easy to port
+- ✅ Full multicast support
 - ✅ Packet validation built-in
-- ✅ API đơn giản
+- ✅ Simple API
 
-**Nhược điểm:**
-- ❌ Cần tạo CMakeLists.txt wrapper
-- ❌ Documentation hơi sparse
+**Cons:**
+- ❌ Needs a CMakeLists.txt wrapper
+- ❌ Documentation is a bit sparse
 
-**Độ phức tạp:** Thấp  
+**Complexity:** Low  
 **Performance:** Excellent  
 **Maintainability:** Cao
 
@@ -129,7 +129,7 @@ Tài liệu này so sánh các phương án triển khai khác nhau cho từng m
 
 ### Option 2: Custom sACN Implementation
 
-**Approach:** Tự implement E1.31 protocol
+**Approach:** Implement the E1.31 protocol ourselves
 
 **sACN packet structure:**
 ```c
@@ -164,42 +164,42 @@ typedef struct {
 } __attribute__((packed)) sacn_packet_t;
 ```
 
-**Ưu điểm:**
+**Pros:**
 - ✅ No dependencies
 - ✅ Full control
-- ✅ Có thể optimize cho specific use case
+- ✅ Can be optimised for a specific use case
 
-**Nhược điểm:**
-- ❌ Protocol khá phức tạp (3 layers)
-- ❌ Phải handle multicast join/leave
-- ❌ Validation logic cần careful implementation
-- ❌ Mất thời gian development
+**Cons:**
+- ❌ The protocol is fairly complex (3 layers)
+- ❌ Multicast join/leave has to be handled
+- ❌ The validation logic needs careful implementation
+- ❌ Takes development time
 
-**Độ phức tạp:** Trung bình  
-**Performance:** Tùy implementation
+**Complexity:** Medium  
+**Performance:** Depends on the implementation
 
-**Kết luận:** ⚠️ Chỉ nên dùng nếu libe131 có vấn đề
+**Conclusion:** ⚠️ Only use this if libe131 has problems
 
 ---
 
 ### Option 3: ESP-IDF Examples
 
-**Source:** ESP-IDF không có sẵn sACN example
+**Source:** ESP-IDF has no sACN example
 
-**Kết luận:** ❌ Không có
+**Conclusion:** ❌ Not available
 
 ---
 
 ## 4. ART-NET IMPLEMENTATION
 
-### Option 1: Custom Minimal Implementation (KHUYẾN NGHỊ)
+### Option 1: Custom Minimal Implementation (RECOMMENDED)
 
-**Approach:** Tự code minimal Art-Net receiver
+**Approach:** Write a minimal Art-Net receiver ourselves
 
-**Lý do khuyến nghị:**
-- ✅ Art-Net đơn giản hơn sACN rất nhiều
-- ✅ Chỉ cần handle ArtDmx packet (18 bytes header + 512 data)
-- ✅ Không có dependencies
+**Why it is recommended:**
+- ✅ Art-Net is much simpler than sACN
+- ✅ Only the ArtDmx packet needs handling (18-byte header + 512 data)
+- ✅ No dependencies
 - ✅ Full control
 - ✅ Code < 200 lines
 
@@ -229,7 +229,7 @@ while (1) {
 }
 ```
 
-**Độ phức tạp:** Thấp  
+**Complexity:** Low  
 **Development time:** ~4 hours
 
 ---
@@ -238,17 +238,17 @@ while (1) {
 
 **Repository:** https://github.com/hideakitai/ArtNet
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Full Art-Net v4 support
 - ✅ Handles ArtPoll, ArtPollReply, etc.
 
-**Nhược điểm:**
-- ❌ Arduino library, cần port
-- ❌ Dependencies phức tạp
+**Cons:**
+- ❌ Arduino library, needs porting
+- ❌ Complicated dependencies
 - ❌ Overkill cho simple receiver
-- ❌ Mất thời gian port
+- ❌ Porting takes time
 
-**Kết luận:** ❌ Không khuyến nghị - custom implementation đơn giản hơn nhiều
+**Conclusion:** ❌ Not recommended - a custom implementation is much simpler
 
 ---
 
@@ -256,26 +256,26 @@ while (1) {
 
 **Repository:** https://github.com/OpenLightingProject/libartnet
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Production-quality
 - ✅ Full protocol support
 
-**Nhược điểm:**
+**Cons:**
 - ❌ Heavy library
 - ❌ Designed for Linux
-- ❌ Khó port sang ESP32
+- ❌ Hard to port to the ESP32
 
-**Kết luận:** ❌ Không phù hợp cho embedded
+**Conclusion:** ❌ Not suitable for embedded use
 
 ---
 
 ## 5. STORAGE SOLUTIONS
 
-### Option 1: LittleFS (KHUYẾN NGHỊ)
+### Option 1: LittleFS (RECOMMENDED)
 
 **Component:** esp_littlefs
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Modern file system
 - ✅ Wear leveling built-in
 - ✅ Power-fail safe
@@ -283,9 +283,9 @@ while (1) {
 - ✅ Standard file I/O API (fopen, fread, fwrite)
 - ✅ Support large files
 
-**Nhược điểm:**
-- ❌ Hơi chậm hơn NVS cho small data
-- ❌ Cần partition riêng
+**Cons:**
+- ❌ A little slower than NVS for small data
+- ❌ Needs its own partition
 
 **Use case:** Config files, web files, logs
 
@@ -293,15 +293,15 @@ while (1) {
 
 ### Option 2: NVS (Non-Volatile Storage)
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Built-in ESP-IDF
-- ✅ Rất nhanh cho key-value
-- ✅ Không cần partition lớn
+- ✅ Very fast for key-value data
+- ✅ Does not need a large partition
 
-**Nhược điểm:**
-- ❌ Chỉ key-value, không phải file system
-- ❌ Khó lưu large JSON
-- ❌ API phức tạp hơn
+**Cons:**
+- ❌ Key-value only, not a file system
+- ❌ Hard to store large JSON
+- ❌ More complicated API
 
 **Use case:** Backup storage cho critical config (WiFi credentials, etc.)
 
@@ -309,34 +309,34 @@ while (1) {
 
 ### Option 3: SPIFFS
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Legacy support
 
-**Nhược điểm:**
+**Cons:**
 - ❌ Deprecated trong ESP-IDF
-- ❌ Bugs nhiều hơn LittleFS
-- ❌ Không power-fail safe
+- ❌ More bugs than LittleFS
+- ❌ Not power-fail safe
 
-**Kết luận:** ❌ KHÔNG khuyến nghị - dùng LittleFS thay thế
+**Conclusion:** ❌ NOT recommended - use LittleFS instead
 
 ---
 
 ### Option 4: FAT File System
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Compatible with PC
-- ✅ Dễ debug (mount trên PC)
+- ✅ Easy to debug (mount it on a PC)
 
-**Nhược điểm:**
-- ❌ Không tối ưu cho flash
+**Cons:**
+- ❌ Not optimised for flash
 - ❌ No wear leveling
-- ❌ Lãng phí space
+- ❌ Wastes space
 
-**Kết luận:** ❌ Không phù hợp
+**Conclusion:** ❌ Not suitable
 
 ---
 
-**Khuyến nghị tổng hợp:**
+**Overall recommendation:**
 - **Primary storage:** LittleFS (config.json, web files)
 - **Backup storage:** NVS (critical WiFi credentials)
 
@@ -344,20 +344,20 @@ while (1) {
 
 ## 6. WEB SERVER OPTIONS
 
-### Option 1: esp_http_server (KHUYẾN NGHỊ)
+### Option 1: esp_http_server (RECOMMENDED)
 
 **Component:** ESP-IDF official
 
-**Ưu điểm:**
-- ✅ Chính thức, ổn định
+**Pros:**
+- ✅ Official, stable
 - ✅ WebSocket support built-in
 - ✅ Chunked transfer encoding
 - ✅ Multi-threading support
-- ✅ Documentation đầy đủ
+- ✅ Complete documentation
 
-**Nhược điểm:**
-- ❌ API hơi verbose
-- ❌ Cần handle buffer manually
+**Cons:**
+- ❌ The API is a bit verbose
+- ❌ Buffers must be handled manually
 
 **Use case:** Default choice
 
@@ -367,18 +367,18 @@ while (1) {
 
 **Repository:** External library
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Asynchronous
 - ✅ Better performance cho concurrent requests
 - ✅ Elegant API
 
-**Nhược điểm:**
+**Cons:**
 - ❌ Not official
 - ❌ Complex dependency chain
 - ❌ Harder to debug
 - ❌ Overkill cho this project
 
-**Kết luận:** ⚠️ Chỉ dùng nếu cần high-performance concurrent web
+**Conclusion:** ⚠️ Only use this if high-performance concurrent web serving is needed
 
 ---
 
@@ -386,23 +386,23 @@ while (1) {
 
 **Approach:** Raw sockets + HTTP parsing
 
-**Kết luận:** ❌ Absolutely NO - đừng reinvent the wheel
+**Conclusion:** ❌ Absolutely NO - don't reinvent the wheel
 
 ---
 
 ## 7. NETWORK STACK
 
-### Option 1: lwIP (ESP-IDF Default) (KHUYẾN NGHỊ)
+### Option 1: lwIP (ESP-IDF Default) (RECOMMENDED)
 
-**Ưu điểm:**
+**Pros:**
 - ✅ Built-in ESP-IDF
 - ✅ Mature, stable
 - ✅ Full TCP/IP stack
 - ✅ IGMP multicast support
 - ✅ Good performance
 
-**Nhược điểm:**
-- ❌ Configuration có thể phức tạp
+**Cons:**
+- ❌ Configuration can be complicated
 
 **Use case:** Always use this
 
@@ -410,7 +410,7 @@ while (1) {
 
 ### Option 2: Custom TCP/IP
 
-**Kết luận:** ❌ Never - this is insane
+**Conclusion:** ❌ Never - this is insane
 
 ---
 
@@ -533,13 +533,13 @@ void merge_backup(uint8_t *output, merge_source_t sources[], int num_sources, ui
 | LAST | O(n) | <0.5ms |
 | BACKUP | O(1) | <0.1ms |
 
-**Khuyến nghị:** Implement all modes, let user choose
+**Recommendation:** Implement all modes, let the user choose
 
 ---
 
 ## 9. TASK ARCHITECTURE
 
-### Option 1: Core Pinning (KHUYẾN NGHỊ)
+### Option 1: Core Pinning (RECOMMENDED)
 
 **Approach:** Pin time-critical tasks to Core 1
 
@@ -554,19 +554,19 @@ Core 0 (Protocol)              Core 1 (DMX Output)
 └── Merge engine
 ```
 
-**Ưu điểm:**
-- ✅ DMX timing không bị interrupt bởi network
+**Pros:**
+- ✅ DMX timing is not interrupted by the network
 - ✅ Predictable performance
 - ✅ Easy to debug
 
-**Nhược điểm:**
-- ❌ Phải careful với inter-core communication
+**Cons:**
+- ❌ Inter-core communication needs care
 
 ---
 
 ### Option 2: Single-core (Not for ESP32-S3)
 
-**Kết luận:** ❌ Waste of dual-core capability
+**Conclusion:** ❌ Waste of dual-core capability
 
 ---
 
@@ -574,15 +574,15 @@ Core 0 (Protocol)              Core 1 (DMX Output)
 
 **Approach:** FreeRTOS automatic scheduling
 
-**Nhược điểm:**
+**Cons:**
 - ❌ Unpredictable DMX timing
 - ❌ Hard to debug performance issues
 
-**Kết luận:** ❌ Không khuyến nghị cho real-time DMX
+**Conclusion:** ❌ Not recommended for real-time DMX
 
 ---
 
-## 10. KHUYẾN NGHỊ CUỐI CÙNG
+## 10. FINAL RECOMMENDATION
 
 ### Must-Use Libraries
 
@@ -620,9 +620,9 @@ Infrastructure
 
 ### Why This Stack?
 
-1. **Maximum Library Reuse:** 80% sử dụng existing libraries
-2. **Minimal Custom Code:** Chỉ tự code Art-Net receiver và merge engine (đơn giản)
-3. **Production Quality:** Tất cả libraries đã được proven
+1. **Maximum Library Reuse:** 80% existing libraries
+2. **Minimal Custom Code:** only the Art-Net receiver and the merge engine are written ourselves (both simple)
+3. **Production Quality:** every library is proven
 4. **Easy Maintenance:** Well-documented components
 5. **Good Performance:** Hardware-accelerated where possible
 
@@ -642,28 +642,28 @@ Infrastructure
 | Integration | Medium | Task coordination |
 | Testing | High | Physical hardware testing |
 
-**Total:** ~15 sprints (không ước lượng thời gian cụ thể)
+**Total:** ~15 sprints (no specific time estimate)
 
 ---
 
-## KẾT LUẬN
+## CONCLUSION
 
-Chiến lược **"Library-First"** là optimal choice:
-- ✅ Rút ngắn development time
-- ✅ Tăng reliability (proven code)
-- ✅ Dễ maintain
-- ✅ Focus vào business logic thay vì reinvent
+The **"Library-First"** strategy is the optimal choice:
+- ✅ Shorter development time
+- ✅ Higher reliability (proven code)
+- ✅ Easy to maintain
+- ✅ Focus on the business logic instead of reinventing
 
-**Chỉ tự code khi:**
-- Protocol đơn giản (Art-Net)
+**Only write our own code when:**
+- Simple protocol (Art-Net)
 - Custom logic required (Merge Engine)
 - No suitable library exists
 
-**Tránh:**
+**Avoid:**
 - ❌ Reinvent TCP/IP stack
-- ❌ Custom DMX driver (esp-dmx đã excellent)
-- ❌ Port Arduino libraries (khó và không tối ưu)
+- ❌ A custom DMX driver (esp-dmx is already excellent)
+- ❌ Porting Arduino libraries (hard and not optimal)
 
 ---
 
-**Tài liệu này là kết quả phân tích các phương án khả thi. Khuyến nghị cuối cùng đã được tích hợp vào FIRMWARE_DEVELOPMENT_PLAN.md.**
+**This document is the result of analysing the feasible options. The final recommendation has been folded into FIRMWARE_DEVELOPMENT_PLAN.md.**
