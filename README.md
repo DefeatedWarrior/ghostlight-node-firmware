@@ -283,6 +283,11 @@ flash at 0x0 with any ESP flashing tool.
 3. **Access Web Interface**:
    - Ethernet/WiFi STA: `http://[device-ip]`
    - WiFi AP mode: `http://192.168.4.1`
+   - **First-run setup** asks for an admin password for the web UI
+     (username `admin`) and a new password for the node's own Wi-Fi. You can
+     skip either one: tick **No password for this page** (anyone on the
+     network can then change settings) or **Open access point**. Both can be
+     changed later, under System > Admin password and Network > Access point.
 4. **Configure Device**:
    - Set network preferences (static IP, WiFi credentials)
    - Configure DMX port modes (Output/Input/RDM)

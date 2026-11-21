@@ -280,6 +280,7 @@ const app = {
         this.setupNetworkForms();
         window.addEventListener('hashchange', () => this.go(location.hash.slice(1), false));
         const auth = await this.fetchAuthStatus();
+        this.drawLogin();
         if (auth && auth.setup_required) { this.showSetup(auth); return; }
         if (auth && auth.locked) {
             this.setConn(false, 'Locked');
@@ -348,6 +349,7 @@ const app = {
             if (!r.ok) return null;
             const data = await r.json();
             this.wsToken = data.ws_token || null;
+            if (typeof data.login_required === 'boolean') this.loginRequired = data.login_required;
             return data;
         } catch (_) {
             return null;
@@ -374,20 +376,35 @@ const app = {
         this.stopActivity();
         if (auth && auth.ap_ssid) setText('setupApSsid', auth.ap_ssid);
         $('setupOverlay').hidden = false;
+        this.showSetupChoices();
         const first = document.querySelector('#setupForm input[name="password"]');
         if (first) first.focus();
+    },
+
+    /** Setup form: hide the password fields the "no password" boxes replace. */
+    showSetupChoices() {
+        const f = $('setupForm');
+        const noPw = f.elements.no_password.checked;
+        const open = f.elements.ap_open.checked;
+        $('setupPwFields').hidden = noPw;
+        f.elements.password.disabled = noPw;
+        f.elements.password_confirm.disabled = noPw;
+        $('setupApField').hidden = open;
+        f.elements.ap_password.disabled = open;
     },
 
     async submitSetup(event) {
         event.preventDefault();
         const f = new FormData(event.target);
+        const noPw = f.get('no_password') === 'on';
+        const open = f.get('ap_open') === 'on';
         const pw = f.get('password') || '';
-        const ap = f.get('ap_password') || '';
+        const ap = open ? '' : (f.get('ap_password') || '');
         const err = $('setupError');
         let problem = '';
-        if (pw.length < 8 || pw.length > 63) problem = 'The admin password must be 8–63 characters.';
-        else if (pw !== f.get('password_confirm')) problem = 'The admin passwords do not match.';
-        else problem = this.apPasswordProblem(ap);
+        if (!noPw && (pw.length < 8 || pw.length > 63)) problem = 'The admin password must be 8–63 characters.';
+        else if (!noPw && pw !== f.get('password_confirm')) problem = 'The admin passwords do not match.';
+        else if (!open) problem = this.apPasswordProblem(ap);
         err.textContent = problem;
         if (problem) return false;
 
@@ -397,14 +414,15 @@ const app = {
             const r = await fetch('/api/setup', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-                body: JSON.stringify({ password: pw, ap_password: ap })
+                body: JSON.stringify(noPw ? { no_password: true, ap_password: ap } : { password: pw, ap_password: ap })
             });
             const body = await r.json().catch(() => ({}));
             if (!r.ok) throw new Error(body.message || `HTTP ${r.status}`);
             err.textContent = '';
             event.target.reset();
             event.target.hidden = true;
-            setText('setupText', 'Saved. The node is restarting and this page reloads in 10 seconds. Sign in as "admin" with your new password.');
+            setText('setupText', 'Saved. The node is restarting and this page reloads in 10 seconds.' +
+                (noPw ? '' : ' Sign in as "admin" with your new password.'));
             setTimeout(() => window.location.reload(), 10000);
         } catch (e) {
             err.textContent = 'Setup failed: ' + e.message;
@@ -413,28 +431,60 @@ const app = {
         return false;
     },
 
-    /** Same rule as the firmware: WPA2 length, not the factory default. */
+    /** Same rule as the firmware: WPA2 length, not the factory default.
+     *  (An empty password, an open network, is chosen with its own box.) */
     apPasswordProblem(ap) {
         if (ap.length < 8 || ap.length > 63) return 'The access point password must be 8–63 characters.';
         if (ap === '12345678') return 'Choose an access point password other than the factory default.';
         return '';
     },
 
+    /** System page password card: change it, or turn sign-in on or off. */
+    drawLogin() {
+        const f = $('passwordForm');
+        if (!f) return;
+        const on = this.loginRequired !== false;
+        $('loginOffNote').hidden = on;
+        $('curPwField').hidden = !on;
+        f.elements.current_password.disabled = !on;
+        $('loginOffBtn').hidden = !on;
+        setText('pwSubmit', on ? 'Change password' : 'Turn on sign-in');
+        setText('pwAgain', on ? 'again' : 'with it');
+    },
+
     async changePassword(event) {
         event.preventDefault();
         const form = event.target;
         const f = new FormData(form);
+        const on = this.loginRequired !== false;
         const pw = f.get('new_password') || '';
         if (pw.length < 8 || pw.length > 63) { this.toast('The new password must be 8–63 characters', 'error'); return false; }
         if (pw !== f.get('confirm_password')) { this.toast('The new passwords do not match', 'error'); return false; }
+        const body = { new_password: pw };
+        if (on) body.current_password = f.get('current_password') || '';
         try {
-            await this.post('/api/auth/password', { current_password: f.get('current_password') || '', new_password: pw });
+            await this.post('/api/auth/password', body);
             form.reset();
-            this.toast('Password changed. Sign in again with the new one.', 'success');
+            this.toast(on ? 'Password changed. Sign in again with the new one.'
+                          : 'Sign-in is on. Sign in as "admin" with the new password.', 'success');
             this.authReloading = true;
             setTimeout(() => window.location.reload(), 2000);
         } catch (_) { /* toast already shown */ }
         return false;
+    },
+
+    async turnLoginOff() {
+        const f = $('passwordForm');
+        const cur = f.elements.current_password.value;
+        if (!cur) { this.toast('Enter the current password first', 'error'); f.elements.current_password.focus(); return; }
+        if (!confirm('Turn off sign-in?\n\nAnyone who can reach this node on the network will be able to change its settings.')) return;
+        try {
+            await this.post('/api/auth/password', { current_password: cur, no_password: true });
+            f.reset();
+            this.loginRequired = false;
+            this.drawLogin();
+            this.toast('Sign-in is off', 'success');
+        } catch (_) { /* toast already shown */ }
     },
 
     // ------------------------------------------------------------------------
@@ -2165,7 +2215,9 @@ const app = {
         if (af) {
             af.elements.ap_ssid.value = net.ap_ssid || '';
             af.elements.ap_password.value = '';
+            af.elements.ap_open.checked = !!net.ap_open;
             af.elements.ap_channel.value = net.ap_channel || 1;
+            this.showApOpen();
         }
         const profiles = Array.isArray(net.wifi_profiles) ? net.wifi_profiles.map(p => ({ ...p })) : [];
         profiles.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
@@ -2676,31 +2728,58 @@ const app = {
         return false;
     },
 
+    /** AP form: no password field while "Open network" is ticked. */
+    showApOpen() {
+        const f = $('apForm');
+        const open = f.elements.ap_open.checked;
+        const wasOpen = !!(this.netCfg && this.netCfg.ap_open);
+        $('apPwField').hidden = open;
+        f.elements.ap_password.disabled = open;
+        f.elements.ap_password.placeholder = wasOpen ? 'none' : 'unchanged';
+        setText('apPwHelp', wasOpen ? '8–63 characters. The network is open now: enter one to close it.'
+                                    : '8–63 characters. Leave empty to keep the current one.');
+    },
+
     async saveAp(event) {
         event.preventDefault();
         const f = event.target;
         const ssid = f.elements.ap_ssid.value.trim();
-        const pw = f.elements.ap_password.value;
+        const open = f.elements.ap_open.checked;
+        const wasOpen = !!(this.netCfg && this.netCfg.ap_open);
+        const pw = open ? '' : f.elements.ap_password.value;
         const ch = parseInt(f.elements.ap_channel.value);
         if (!ssid) { this.toast('Enter a name for the access point', 'error'); return false; }
         if (new TextEncoder().encode(ssid).length > 31) { this.toast('The access point name is at most 31 bytes long', 'error'); return false; }
         if (pw) {
             const problem = this.apPasswordProblem(pw);
             if (problem) { this.toast(problem, 'error'); return false; }
+        } else if (!open && wasOpen) {
+            this.toast('Enter a password for the access point, or keep it open', 'error');
+            return false;
         }
         if (!(ch >= 1 && ch <= 13)) { this.toast('The channel must be 1–13', 'error'); return false; }
         const net = { ap_ssid: ssid, ap_channel: ch };
-        if (pw) net.ap_password = pw;
-        const changedLogin = pw || (this.netCfg && this.netCfg.ap_ssid !== ssid);
-        if (this.browserVia(this.netStatus) === 'ap' && changedLogin &&
-            !confirm('This page is open over the access point. Devices on it disconnect and must join again' +
-                     (pw ? ' with the new password.' : ` as "${ssid}".`) + '\n\nApply?')) {
-            return false;
+        if (pw || open !== wasOpen) net.ap_password = pw;
+        const changedLogin = 'ap_password' in net || (this.netCfg && this.netCfg.ap_ssid !== ssid);
+        const warn = [];
+        if (open && !wasOpen) {
+            warn.push('Anyone nearby will be able to join the access point' +
+                      (this.loginRequired === false ? ' and change settings: sign-in is off too.' : '.'));
         }
+        if (this.browserVia(this.netStatus) === 'ap' && changedLogin) {
+            warn.push('This page is open over the access point. Devices on it disconnect and must join again' +
+                      (pw ? ' with the new password.' : open ? ` (open network "${ssid}").` : ` as "${ssid}".`));
+        }
+        if (warn.length && !confirm(warn.join('\n\n') + '\n\nApply?')) return false;
         try {
             await this.post('/api/config', { network: net });
-            if (this.netCfg) { this.netCfg.ap_ssid = ssid; this.netCfg.ap_channel = ch; }
+            if (this.netCfg) {
+                this.netCfg.ap_ssid = ssid;
+                this.netCfg.ap_channel = ch;
+                if ('ap_password' in net) this.netCfg.ap_open = open;
+            }
             f.elements.ap_password.value = '';
+            this.showApOpen();
             this.toast('Access point settings applied', 'success');
             setTimeout(() => this.refreshNet(), 1500);
         } catch (_) { /* toast shown */ }

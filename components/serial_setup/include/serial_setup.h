@@ -22,12 +22,16 @@
  * inside one.
  *
  * Commands:
- *   info                    firmware, board, chip, features, MAC, whether the
- *                           admin password is set, tester mode, network status
+ *   info                    firmware, board, chip, features, MAC, whether
+ *                           setup is done and the web UI asks for a password,
+ *                           tester mode, network status
  *   get                     the settings (config_to_public_json(): no passwords)
  *   set {"config":{...}}    apply settings: the document POST /api/config takes
+ *                           (network.ap_password "" = open access point)
  *   password {"password"}   set the web UI admin password (8-63 characters);
  *                           also replaces one that was forgotten
+ *   password {"no_password":true}
+ *                           run the web UI without a password
  *   scan                    Wi-Fi networks in range
  *   connect {"ssid"}        try a saved Wi-Fi network now
  *   restart                 restart in 0.5 s ("restarting": true)

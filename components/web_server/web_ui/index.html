@@ -604,13 +604,15 @@ td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
                     <div class="card-head"><h2>Access point</h2></div>
                     <form id="apForm" onsubmit="return app.saveAp(event)">
                         <div class="field"><label>Name (SSID)</label><input type="text" name="ap_ssid" maxlength="31" required autocomplete="off"></div>
-                        <div class="field">
+                        <label class="check"><input type="checkbox" name="ap_open" onchange="app.showApOpen()"><span><strong>Open network (no password)</strong>
+                            <small>Anyone nearby can join the node's own Wi-Fi and reach this page.</small></span></label>
+                        <div class="field" id="apPwField">
                             <label>Password</label>
                             <div class="input-row">
                                 <input type="password" name="ap_password" maxlength="63" placeholder="unchanged" autocomplete="new-password">
                                 <button type="button" class="btn" onclick="app.togglePw(this)">Show</button>
                             </div>
-                            <small class="help">8–63 characters. Leave empty to keep the current one.</small>
+                            <small class="help" id="apPwHelp">8–63 characters. Leave empty to keep the current one.</small>
                         </div>
                         <div class="field"><label>Channel</label><input type="number" name="ap_channel" min="1" max="13" value="1"></div>
                         <div class="btn-row"><button type="submit" class="btn primary">Apply</button></div>
@@ -783,13 +785,17 @@ td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
                 </div>
                 <div class="card">
                     <div class="card-head"><h2>Admin password</h2></div>
+                    <div class="note warn" id="loginOffNote" style="margin-bottom:12px" hidden>Sign-in is off: anyone who can reach this node on the network can change its settings. Set a password to turn it on.</div>
                     <form id="passwordForm" onsubmit="return app.changePassword(event)">
                         <input type="text" name="username" value="admin" autocomplete="username" hidden>
-                        <div class="field"><label>Current password</label><input type="password" name="current_password" required autocomplete="current-password"></div>
+                        <div class="field" id="curPwField"><label>Current password</label><input type="password" name="current_password" required autocomplete="current-password"></div>
                         <div class="field"><label>New password</label><input type="password" name="new_password" required minlength="8" maxlength="63" autocomplete="new-password"></div>
                         <div class="field"><label>Confirm new password</label><input type="password" name="confirm_password" required minlength="8" maxlength="63" autocomplete="new-password">
-                            <small class="help">The username is <strong>admin</strong>. Your browser asks you to sign in again.</small></div>
-                        <div class="btn-row"><button type="submit" class="btn primary">Change password</button></div>
+                            <small class="help">The username is <strong>admin</strong>. Your browser asks you to sign in <span id="pwAgain">again</span>.</small></div>
+                        <div class="btn-row">
+                            <button type="submit" class="btn primary" id="pwSubmit">Change password</button>
+                            <button type="button" class="btn" id="loginOffBtn" onclick="app.turnLoginOff()">Turn off sign-in</button>
+                        </div>
                     </form>
                 </div>
                 <div class="card">
@@ -839,15 +845,21 @@ td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
 <!-- First-run setup -->
 <div class="overlay" id="setupOverlay" hidden>
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
-        <h2 id="setupTitle">Welcome. Secure this node first.</h2>
-        <p id="setupText">Set a password for this page (username <strong>admin</strong>) and replace the factory Wi-Fi access point password. The node restarts when you save.</p>
+        <h2 id="setupTitle">Welcome. Set up this node first.</h2>
+        <p id="setupText">Set a password for this page (username <strong>admin</strong>) and replace the factory Wi-Fi access point password, or choose to run without them. The node restarts when you save.</p>
         <form id="setupForm" onsubmit="return app.submitSetup(event)">
             <input type="text" name="username" value="admin" autocomplete="username" hidden>
-            <div class="field"><label>Admin password</label><input type="password" name="password" required minlength="8" maxlength="63" autocomplete="new-password"></div>
-            <div class="field"><label>Confirm admin password</label><input type="password" name="password_confirm" required minlength="8" maxlength="63" autocomplete="new-password"></div>
-            <div class="field"><label>Access point password (<span id="setupApSsid">the node's own Wi-Fi</span>)</label>
+            <div id="setupPwFields">
+                <div class="field"><label>Admin password</label><input type="password" name="password" required minlength="8" maxlength="63" autocomplete="new-password"></div>
+                <div class="field"><label>Confirm admin password</label><input type="password" name="password_confirm" required minlength="8" maxlength="63" autocomplete="new-password"></div>
+            </div>
+            <label class="check"><input type="checkbox" name="no_password" onchange="app.showSetupChoices()"><span><strong>No password for this page</strong>
+                <small>Anyone who can reach the node on the network can change its settings. You can set a password later under System.</small></span></label>
+            <div class="field" id="setupApField"><label>Access point password (<span id="setupApSsid">the node's own Wi-Fi</span>)</label>
                 <input type="password" name="ap_password" required minlength="8" maxlength="63" autocomplete="off">
                 <small class="help">8–63 characters, not 12345678. If you are on the node's own Wi-Fi, join it again with this password after the restart.</small></div>
+            <label class="check"><input type="checkbox" name="ap_open" onchange="app.showSetupChoices()"><span><strong>Open access point (no password)</strong>
+                <small>Anyone nearby can join the node's own Wi-Fi. You can set a password later under Network.</small></span></label>
             <div class="form-error" id="setupError"></div>
             <div class="btn-row"><button type="submit" class="btn primary" id="setupSubmit">Save and restart</button></div>
         </form>

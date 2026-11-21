@@ -11,6 +11,7 @@ every 45 s), Art-Net sources on the outputs, RDM fixtures and a log.
     python3 tools/ui_mock.py --tester        # start in DMX tester mode
     python3 tools/ui_mock.py --no-ethernet --ports 4 --off rdm,scenes
     python3 tools/ui_mock.py --setup         # first-run setup screen
+    python3 tools/ui_mock.py --no-login      # sign-in turned off
 
 Switching modes, restarting and factory reset take the mock "down" for a
 few seconds like the real node. No sign-in is asked for. Standard library only.
@@ -42,6 +43,7 @@ ap.add_argument('--tester', action='store_true', help='start in DMX tester mode'
 ap.add_argument('--no-ethernet', action='store_true', help='firmware built without Ethernet')
 ap.add_argument('--off', default='', help='comma-separated features to leave out: ' + ','.join(FEATURES))
 ap.add_argument('--setup', action='store_true', help='show the first-run setup')
+ap.add_argument('--no-login', action='store_true', help='sign-in turned off (setup done without a password)')
 ap.add_argument('--root', default=ROOT, help='folder with index.html and main.js (default: the firmware\'s web_ui)')
 args = ap.parse_args()
 ROOT = args.root
@@ -69,7 +71,7 @@ def default_port(n):
 def default_config():
     c = {
         'network': {
-            'mode': 0, 'ap_always': False, 'ap_ssid': 'ESP-NODE-1A2B', 'ap_channel': 6,
+            'mode': 0, 'ap_always': False, 'ap_ssid': 'ESP-NODE-1A2B', 'ap_open': False, 'ap_channel': 6,
             'wifi_profiles': [
                 {'ssid': 'Theatre-Tech', 'priority': 0, 'use_static_ip': False, 'static_ip': '', 'netmask': '255.255.255.0', 'gateway': '', 'has_password': True},
                 {'ssid': 'Home', 'priority': 1, 'use_static_ip': True, 'static_ip': '192.168.1.60', 'netmask': '255.255.255.0', 'gateway': '192.168.1.1', 'has_password': True},
@@ -103,6 +105,7 @@ S = {
     'config': default_config(),
     'tester': args.tester,          # mode running now (read at "boot")
     'setup': args.setup,
+    'login': not args.no_login,     # the web UI asks for a password
     'down_until': 0,
     'levels': [bytearray(512) for _ in range(NP)],       # what each port outputs / receives
     'tester_levels': [bytearray(512) for _ in range(NP)],
@@ -572,17 +575,32 @@ class H(SimpleHTTPRequestHandler):
 
         if p == '/api/auth/status':
             return {'authenticated': not S['setup'], 'setup_required': S['setup'], 'locked': False,
+                    'login_required': S['login'] and not S['setup'],
                     'username': 'admin', 'ws_token': 'mock', 'ap_ssid': cfg['network']['ap_ssid']}
         if S['setup'] and p != '/api/setup':
             self.send_json({'error': 'setup_required', 'message': 'Set a password first'}, 403)
             return None
         if p == '/api/setup':
+            no_pw = b.get('no_password') is True
+            ap_pw = b.get('ap_password')
+            if not no_pw and not 8 <= len(b.get('password') or '') <= 63:
+                raise Err(400, 'Admin password must be 8-63 characters')
+            if not isinstance(ap_pw, str) or (ap_pw and not 8 <= len(ap_pw) <= 63) or ap_pw == '12345678':
+                raise Err(400, 'AP password must be 8-63 characters (or empty for an open network)')
             S['setup'] = False
+            S['login'] = not no_pw
+            cfg['network']['ap_open'] = ap_pw == ''
             restart(4)
             return {'status': 'ok'}
         if p == '/api/auth/password':
-            if len(b.get('current_password', '')) < 1:
-                raise Err(403, 'The current password is wrong')
+            if S['login'] and len(b.get('current_password', '')) < 1:
+                raise Err(403, 'Current password is wrong')
+            if b.get('no_password') is True:
+                S['login'] = False
+            elif not 8 <= len(b.get('new_password') or '') <= 63:
+                raise Err(400, 'New password must be 8-63 characters')
+            else:
+                S['login'] = True
             return {'status': 'ok'}
 
         if p == '/api/system/info':
@@ -626,7 +644,8 @@ class H(SimpleHTTPRequestHandler):
                 cfg['network']['wifi_profiles'] = profs
                 b['network'] = {k: v for k, v in b['network'].items() if k != 'wifi_profiles'}
             if 'network' in b:
-                b['network'].pop('ap_password', None)
+                if 'ap_password' in b['network']:
+                    b['network']['ap_open'] = b['network'].pop('ap_password') == ''
                 if not FEAT['ethernet'] and b['network'].get('mode') == 1:
                     b['network']['mode'] = 0
             merge(cfg, b)

@@ -128,7 +128,8 @@ typedef struct {
 #define CONFIG_WIFI_PROFILES_MAX   5
 
 /* Factory AP password. It is only accepted until the first-run setup, which
- * requires a different one. */
+ * requires a different one (or none: an empty AP password is an open
+ * network). */
 #define CONFIG_DEFAULT_AP_PASSWORD "12345678"
 #define CONFIG_ADMIN_USER          "admin"
 #define CONFIG_ADMIN_HASH_HEX      64   /* PBKDF2-HMAC-SHA256 output, hex */
@@ -172,12 +173,14 @@ typedef struct {
     } tester;
 
     /* Web UI admin credentials. Only ever read from / written to the config
-     * file: config_from_json() (the web API) cannot change them. An empty
-     * hash means first-run setup has not been done yet. */
+     * file: config_from_json() (the web API) cannot change them. First-run
+     * setup is done once there is a hash (sign-in required) or no_login is
+     * set (the owner chose to run without a password); never both. */
     struct {
         char admin_hash[CONFIG_ADMIN_HASH_HEX + 1];
         char admin_salt[CONFIG_ADMIN_SALT_HEX + 1];
         uint32_t admin_iterations;
+        bool no_login;
     } security;
 } config_t;
 
@@ -246,7 +249,7 @@ struct cJSON *config_port_to_json(const port_config_t *p);
 struct cJSON *config_to_public_json(const config_t *c);
 
 /** Why @p pw can't be the AP password (8-63 characters, not the factory
- *  default), or NULL if it is fine */
+ *  default; empty is fine and means an open network), or NULL if it is fine */
 const char *config_ap_password_problem(const char *pw);
 
 /**
@@ -274,15 +277,34 @@ void config_tester_port_settings(const config_t *c, int port, port_config_t *out
 bool config_sanitize(config_t *cfg);
 
 /**
- * @brief True once an admin password has been set (first-run setup done)
+ * @brief True once an admin password has been set
  */
 bool config_admin_password_set(void);
 
 /**
+ * @brief True once first-run setup is done: an admin password is set, or the
+ *        owner chose to run without one (config_set_no_login())
+ */
+bool config_setup_done(void);
+
+/**
+ * @brief True if the web UI asks for the admin password
+ *        (setup done and not running without a password)
+ */
+bool config_login_required(void);
+
+/**
  * @brief Store a new admin password (salted PBKDF2) and save the config.
- *        @p password must be 8-63 characters.
+ *        @p password must be 8-63 characters. Turns sign-in on.
  */
 esp_err_t config_set_admin_password(const char *password);
+
+/**
+ * @brief Run without a web UI password: forget the stored one, mark first-run
+ *        setup as done, and save. Anyone who can reach the node can then
+ *        change its settings.
+ */
+esp_err_t config_set_no_login(void);
 
 /**
  * @brief Check @p password against the stored admin password

@@ -358,6 +358,10 @@ bool config_sanitize(config_t *c)
         memset(&c->security, 0, sizeof(c->security));
         changed = true;
     }
+    if (c->security.admin_hash[0] != '\0' && c->security.no_login) {
+        c->security.no_login = false;   /* a stored password wins */
+        changed = true;
+    }
     return changed;
 }
 
@@ -466,6 +470,23 @@ bool config_admin_password_set(void)
     return g_config.security.admin_hash[0] != '\0';
 }
 
+bool config_setup_done(void)
+{
+    return config_admin_password_set() || g_config.security.no_login;
+}
+
+bool config_login_required(void)
+{
+    return config_admin_password_set() && !g_config.security.no_login;
+}
+
+esp_err_t config_set_no_login(void)
+{
+    memset(&g_config.security, 0, sizeof(g_config.security));
+    g_config.security.no_login = true;
+    return config_save();
+}
+
 esp_err_t config_set_admin_password(const char *password)
 {
     if (!password) return ESP_ERR_INVALID_ARG;
@@ -484,6 +505,7 @@ esp_err_t config_set_admin_password(const char *password)
     copy_str(g_config.security.admin_salt, sizeof(g_config.security.admin_salt), salt_hex);
     copy_str(g_config.security.admin_hash, sizeof(g_config.security.admin_hash), hash_hex);
     g_config.security.admin_iterations = ADMIN_PBKDF2_ITERATIONS;
+    g_config.security.no_login = false;
     return config_save();
 }
 
@@ -630,6 +652,9 @@ esp_err_t config_to_json(char **json_str)
             cJSON_AddStringToObject(security, "admin_salt", g_config.security.admin_salt);
             cJSON_AddNumberToObject(security, "admin_iterations", g_config.security.admin_iterations);
         }
+    } else if (g_config.security.no_login) {
+        cJSON *security = cJSON_AddObjectToObject(root, "security");
+        if (security) cJSON_AddBoolToObject(security, "no_login", true);
     }
 
     *json_str = cJSON_PrintUnformatted(root);
@@ -814,6 +839,7 @@ static esp_err_t parse_json(const char *json_str, bool from_file)
         json_get_str(security, "admin_hash", c->security.admin_hash, sizeof(c->security.admin_hash));
         json_get_str(security, "admin_salt", c->security.admin_salt, sizeof(c->security.admin_salt));
         if (json_get_int(security, "admin_iterations", 0, 1000000, &v)) c->security.admin_iterations = v;
+        json_get_bool(security, "no_login", &c->security.no_login);
     }
 
     cJSON_Delete(root);
@@ -835,8 +861,10 @@ esp_err_t config_from_json(const char *json_str)
 
 const char *config_ap_password_problem(const char *pw)
 {
-    size_t n = pw ? strlen(pw) : 0;
-    if (n < 8 || n > 63) return "AP password must be 8-63 characters";
+    if (!pw) return "AP password missing";
+    size_t n = strlen(pw);
+    if (n == 0) return NULL;   /* no password: an open network */
+    if (n < 8 || n > 63) return "AP password must be 8-63 characters (or empty for an open network)";
     if (strcmp(pw, CONFIG_DEFAULT_AP_PASSWORD) == 0) {
         return "Choose an AP password other than the factory default";
     }
@@ -848,7 +876,7 @@ const char *config_update_problem(const cJSON *doc)
     if (!cJSON_IsObject(doc)) return "Expected a JSON object";
     const cJSON *net = cJSON_GetObjectItemCaseSensitive(doc, "network");
     /* A new AP password must be a valid WPA2 passphrase and not the factory
-     * default (an empty one would leave the AP open). */
+     * default, or empty for an open network. */
     const cJSON *ap = cJSON_GetObjectItemCaseSensitive(net, "ap_password");
     if (ap) {
         if (!cJSON_IsString(ap)) return "AP password must be a string";
@@ -891,6 +919,7 @@ cJSON *config_to_public_json(const config_t *c)
     cJSON_AddStringToObject(net, "eth_netmask", c->network.eth_netmask);
 #endif
     cJSON_AddStringToObject(net, "ap_ssid", c->network.ap_ssid);
+    cJSON_AddBoolToObject(net, "ap_open", c->network.ap_password[0] == '\0');
     cJSON_AddNumberToObject(net, "ap_channel", c->network.ap_channel);
     cJSON_AddNumberToObject(net, "wifi_profile_count", c->network.wifi_profile_count);
     cJSON *profiles = cJSON_AddArrayToObject(net, "wifi_profiles");

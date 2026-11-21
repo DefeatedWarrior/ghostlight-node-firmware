@@ -248,8 +248,10 @@ esp_err_t web_server_init(const web_server_config_t *config)
 
     // Web UI login (see "Authentication" below)
     auth_invalidate();
-    if (!config_admin_password_set()) {
+    if (!config_setup_done()) {
         ESP_LOGW(TAG, "No admin password set - web UI is in first-run setup mode");
+    } else if (!config_login_required()) {
+        ESP_LOGW(TAG, "Web UI sign-in is off: anyone on the network can change settings");
     }
 
     server_state.initialized = true;
@@ -2638,8 +2640,11 @@ static void auth_record_success(uint32_t ip, int64_t now)
 /* Checks the request's credentials without sending anything */
 static auth_result_t auth_evaluate(httpd_req_t *req)
 {
-    if (!config_admin_password_set()) {
+    if (!config_setup_done()) {
         return AUTH_SETUP_REQUIRED;
+    }
+    if (!config_login_required()) {
+        return AUTH_OK;   /* the owner chose to run without a password */
     }
     int64_t now = esp_timer_get_time();
     uint32_t ip = client_ip(req);
@@ -2775,7 +2780,7 @@ static bool require_auth_page(httpd_req_t *req)
 /* WebSocket handshake: needs ?token=<ws_token> */
 static bool ws_token_ok(httpd_req_t *req)
 {
-    if (!config_admin_password_set()) {
+    if (!config_setup_done()) {
         return false;
     }
     char query[96], token[40];
@@ -2795,7 +2800,8 @@ static bool valid_password_len(const char *pw)
 
 /**
  * GET /api/auth/status - never challenges.
- * {setup_required, authenticated, username, ws_token (when authenticated)}
+ * {setup_required, login_required, authenticated, username,
+ *  ws_token (when authenticated)}
  */
 static esp_err_t api_auth_status_handler(httpd_req_t *req)
 {
@@ -2804,6 +2810,7 @@ static esp_err_t api_auth_status_handler(httpd_req_t *req)
 
     cJSON *json = cJSON_CreateObject();
     cJSON_AddBoolToObject(json, "setup_required", r == AUTH_SETUP_REQUIRED);
+    cJSON_AddBoolToObject(json, "login_required", config_login_required());
     cJSON_AddBoolToObject(json, "authenticated", r == AUTH_OK);
     cJSON_AddBoolToObject(json, "locked", r == AUTH_LOCKED);
     cJSON_AddStringToObject(json, "username", CONFIG_ADMIN_USER);
@@ -2820,14 +2827,15 @@ static esp_err_t api_auth_status_handler(httpd_req_t *req)
 }
 
 /**
- * POST /api/setup {password, ap_password} - first-run setup only.
- * Stores the admin password and the new AP password, then restarts so the
- * access point comes back with the new password.
+ * POST /api/setup {password | no_password:true, ap_password} - first-run
+ * setup only. Stores the admin password (or turns sign-in off) and the new AP
+ * password ("" = open network), then restarts so the access point comes back
+ * with it.
  */
 static esp_err_t api_setup_handler(httpd_req_t *req)
 {
     server_state.total_requests++;
-    if (config_admin_password_set()) {
+    if (config_setup_done()) {
         send_error_response(req, 409, "Setup has already been completed");
         return ESP_OK;
     }
@@ -2840,8 +2848,9 @@ static esp_err_t api_setup_handler(httpd_req_t *req)
 
     const cJSON *pw = cJSON_GetObjectItemCaseSensitive(json, "password");
     const cJSON *ap = cJSON_GetObjectItemCaseSensitive(json, "ap_password");
+    bool no_login = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "no_password"));
     const char *problem = NULL;
-    if (!cJSON_IsString(pw) || !valid_password_len(pw->valuestring)) {
+    if (!no_login && (!cJSON_IsString(pw) || !valid_password_len(pw->valuestring))) {
         problem = "Admin password must be 8-63 characters";
     } else if (!cJSON_IsString(ap)) {
         problem = "AP password missing";
@@ -2858,7 +2867,8 @@ static esp_err_t api_setup_handler(httpd_req_t *req)
     size_t n = strnlen(ap->valuestring, sizeof(cfg->network.ap_password) - 1);
     memcpy(cfg->network.ap_password, ap->valuestring, n);
     cfg->network.ap_password[n] = '\0';
-    esp_err_t err = config_set_admin_password(pw->valuestring);   /* also saves */
+    esp_err_t err = no_login ? config_set_no_login()               /* both save */
+                             : config_set_admin_password(pw->valuestring);
     cJSON_Delete(json);
     if (err != ESP_OK) {
         send_error_response(req, 500, "Failed to save the password");
@@ -2868,15 +2878,23 @@ static esp_err_t api_setup_handler(httpd_req_t *req)
 
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddStringToObject(resp, "status", "ok");
-    cJSON_AddStringToObject(resp, "message", "Setup complete - restarting. Sign in as \"admin\".");
+    cJSON_AddStringToObject(resp, "message", no_login
+                            ? "Setup complete - restarting."
+                            : "Setup complete - restarting. Sign in as \"admin\".");
     send_json_response(req, resp, 200);
     cJSON_Delete(resp);
-    ESP_LOGI(TAG, "First-run setup complete, restarting");
+    ESP_LOGI(TAG, "First-run setup complete (%s), restarting",
+             no_login ? "no password" : "password set");
     restart_later(3000);
     return ESP_OK;
 }
 
-/** POST /api/auth/password {current_password, new_password} */
+/**
+ * POST /api/auth/password {current_password, new_password | no_password:true}
+ * Changes the admin password, turns sign-in on (new_password while it is
+ * off) or off (no_password). current_password is needed only while sign-in
+ * is on.
+ */
 static esp_err_t api_auth_password_handler(httpd_req_t *req)
 {
     server_state.total_requests++;
@@ -2886,20 +2904,22 @@ static esp_err_t api_auth_password_handler(httpd_req_t *req)
 
     const cJSON *cur = cJSON_GetObjectItemCaseSensitive(json, "current_password");
     const cJSON *pw = cJSON_GetObjectItemCaseSensitive(json, "new_password");
+    bool no_login = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "no_password"));
+    bool was_on = config_login_required();
     int64_t now = esp_timer_get_time();
     uint32_t ip = client_ip(req);
-    if (!cJSON_IsString(cur) || !config_check_admin_password(cur->valuestring)) {
+    if (was_on && (!cJSON_IsString(cur) || !config_check_admin_password(cur->valuestring))) {
         cJSON_Delete(json);
         auth_record_failure(ip, now);
         send_error_response(req, 403, "Current password is wrong");
         return ESP_OK;
     }
-    if (!cJSON_IsString(pw) || !valid_password_len(pw->valuestring)) {
+    if (!no_login && (!cJSON_IsString(pw) || !valid_password_len(pw->valuestring))) {
         cJSON_Delete(json);
         send_error_response(req, 400, "New password must be 8-63 characters");
         return ESP_OK;
     }
-    esp_err_t err = config_set_admin_password(pw->valuestring);
+    esp_err_t err = no_login ? config_set_no_login() : config_set_admin_password(pw->valuestring);
     cJSON_Delete(json);
     if (err != ESP_OK) {
         send_error_response(req, 500, "Failed to save the password");
@@ -2907,11 +2927,15 @@ static esp_err_t api_auth_password_handler(httpd_req_t *req)
     }
     auth_invalidate();
 
+    const char *msg = no_login ? "Sign-in turned off: anyone on the network can change settings"
+                    : was_on   ? "Password changed - sign in again"
+                               : "Sign-in turned on - sign in as \"admin\"";
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddStringToObject(resp, "status", "ok");
-    cJSON_AddStringToObject(resp, "message", "Password changed - sign in again");
+    cJSON_AddStringToObject(resp, "message", msg);
     send_json_response(req, resp, 200);
     cJSON_Delete(resp);
-    ESP_LOGI(TAG, "Admin password changed");
+    ESP_LOGI(TAG, "%s", no_login ? "Web UI sign-in turned off"
+                      : was_on   ? "Admin password changed" : "Web UI sign-in turned on");
     return ESP_OK;
 }

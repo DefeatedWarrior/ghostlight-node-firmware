@@ -977,8 +977,11 @@ esp_err_t network_wifi_ap_start(const char *ssid, const char *password, uint8_t 
     size_t pw_len = password ? strnlen(password, sizeof(wc.ap.password) - 1) : 0;
     if (pw_len >= 8) {
         memcpy(wc.ap.password, password, pw_len);
+    } else if (pw_len == 0) {
+        ESP_LOGI(TAG, "No AP password set: the access point is an open network");
+        wc.ap.authmode = WIFI_AUTH_OPEN;
     } else {
-        ESP_LOGW(TAG, "AP password missing or shorter than 8 characters: AP is OPEN");
+        ESP_LOGW(TAG, "AP password shorter than 8 characters: AP is OPEN");
         wc.ap.authmode = WIFI_AUTH_OPEN;
     }
 

@@ -226,6 +226,8 @@ static void test_web_api_cannot_set_credentials(void)
                               "\"admin_salt\":\"00000000000000000000000000000000\",\"admin_iterations\":4096}}"),
              ESP_OK);
     CHECK(!config_admin_password_set());
+    CHECK_EQ(config_from_json("{\"security\":{\"no_login\":true}}"), ESP_OK);
+    CHECK(!config_setup_done());
 }
 
 static void test_admin_password(void)
@@ -241,6 +243,36 @@ static void test_admin_password(void)
     CHECK(!config_sanitize(&c));             /* a stored credential is valid */
 }
 
+static void test_no_login(void)
+{
+    CHECK(!config_setup_done());             /* factory state: first-run setup */
+    CHECK(!config_login_required());
+    CHECK_EQ(config_set_no_login(), ESP_OK);
+    CHECK(config_setup_done());
+    CHECK(!config_login_required());
+    CHECK(!config_admin_password_set());
+
+    /* survives a restart */
+    config_init();
+    CHECK(!config_setup_done());
+    CHECK_EQ(config_load(), ESP_OK);
+    CHECK(config_setup_done());
+    CHECK(!config_login_required());
+
+    /* setting a password turns sign-in back on */
+    CHECK_EQ(config_set_admin_password("correct horse"), ESP_OK);
+    CHECK(config_login_required());
+    CHECK(!cfg->security.no_login);
+    config_init();
+    CHECK_EQ(config_load(), ESP_OK);
+    CHECK(config_login_required());
+
+    /* and turning it off again forgets the password */
+    CHECK_EQ(config_set_no_login(), ESP_OK);
+    CHECK(!config_login_required());
+    CHECK(!config_check_admin_password("correct horse"));
+}
+
 /* ---- Shared checks of the web API and the USB setup -------------------- */
 
 static void test_update_problem(void)
@@ -251,7 +283,7 @@ static void test_update_problem(void)
         { "{\"network\":{\"ap_password\":\"a good one\"}}", true },
         { "{\"network\":{\"ap_password\":\"12345678\"}}", false },   /* factory default */
         { "{\"network\":{\"ap_password\":\"short\"}}", false },
-        { "{\"network\":{\"ap_password\":\"\"}}", false },           /* would leave it open */
+        { "{\"network\":{\"ap_password\":\"\"}}", true },            /* open network */
         { "{\"network\":{\"ap_password\":5}}", false },
         { "{\"network\":{\"wifi_profiles\":[{\"ssid\":\"A\",\"password\":\"\"}]}}", true },
         { "{\"network\":{\"wifi_profiles\":[{\"ssid\":\"A\",\"password\":\"1234567\"}]}}", false },
@@ -286,6 +318,7 @@ static void test_public_json_has_no_secrets(void)
     CHECK(strstr(s, "security") == NULL);
     CHECK(strstr(s, "admin_hash") == NULL);
     CHECK(strstr(s, "\"has_password\":true") != NULL);
+    CHECK(strstr(s, "\"ap_open\":false") != NULL);
     /* It is the shape config_from_json() takes: feeding it back changes nothing */
     config_t before = *cfg;
     CHECK_EQ(config_from_json(s), ESP_OK);
@@ -534,6 +567,14 @@ static void test_sanitize_credentials(void)
     c.security.admin_iterations = 4096;
     CHECK(config_sanitize(&c));
     CHECK_EQ(c.security.admin_hash[0], '\0');
+    /* a stored password and "no password" at once: the password wins */
+    snprintf(c.security.admin_salt, sizeof(c.security.admin_salt), "%032d", 0);
+    snprintf(c.security.admin_hash, sizeof(c.security.admin_hash), "%064d", 0);
+    c.security.admin_iterations = 4096;
+    c.security.no_login = true;
+    CHECK(config_sanitize(&c));
+    CHECK(!c.security.no_login);
+    CHECK(c.security.admin_hash[0] != '\0');
 }
 
 int main(void)
@@ -549,6 +590,7 @@ int main(void)
     RUN(test_long_strings_truncated);
     RUN(test_web_api_cannot_set_credentials);
     RUN(test_admin_password);
+    RUN(test_no_login);
     RUN(test_wifi_profiles);
     RUN(test_load_missing_file_saves_defaults);
     RUN(test_load_corrupt_file_uses_defaults);

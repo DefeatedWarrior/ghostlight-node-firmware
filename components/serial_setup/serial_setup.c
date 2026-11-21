@@ -188,6 +188,8 @@ static cJSON *cmd_info(void)
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     cJSON_AddStringToObject(r, "mac", macs);
     cJSON_AddBoolToObject(r, "password_set", config_admin_password_set());
+    cJSON_AddBoolToObject(r, "setup_done", config_setup_done());
+    cJSON_AddBoolToObject(r, "login_required", config_login_required());
 
     cJSON *f = cJSON_AddObjectToObject(r, "features");
     cJSON_AddBoolToObject(f, "ethernet", SETUP_HAS(CONFIG_NODE_ETHERNET));
@@ -244,8 +246,15 @@ static cJSON *cmd_set(const cJSON *req)
     return r;
 }
 
+/* {"password":"..."} sets the admin password (sign-in on);
+ * {"no_password":true} turns sign-in off */
 static cJSON *cmd_password(const cJSON *req)
 {
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(req, "no_password"))) {
+        if (config_set_no_login() != ESP_OK) return error_reply("Could not save the setting");
+        ESP_LOGW(TAG, "Web UI sign-in turned off over USB");
+        return ok_reply();
+    }
     const cJSON *pw = cJSON_GetObjectItemCaseSensitive(req, "password");
     if (!cJSON_IsString(pw)) return error_reply("\"password\" missing");
     size_t n = strlen(pw->valuestring);

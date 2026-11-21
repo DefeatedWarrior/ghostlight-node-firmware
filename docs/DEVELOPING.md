@@ -166,8 +166,9 @@ embedded copy with `python3 tools/gen_web_files.py`.
 fakes every API endpoint and the level WebSocket, with simulated DMX (a
 console on the inputs, one flickering channel, a signal loss every 45 s), RDM
 fixtures and a log. `--tester` starts in tester mode, `--no-ethernet`,
-`--ports N` and `--off rdm,scenes,...` mimic other builds, and `--setup`
-shows the first-run setup. It needs nothing beyond Python 3.
+`--ports N` and `--off rdm,scenes,...` mimic other builds, `--setup`
+shows the first-run setup and `--no-login` starts with sign-in turned off.
+It needs nothing beyond Python 3.
 
 ## USB setup
 
@@ -189,7 +190,9 @@ with a lost address or admin password back. One command per line, JSON after
 
 Commands: `info`, `get` (the settings without passwords), `set` (the same
 document `POST /api/config` takes, checked by the same code), `password`
-(admin password), `scan`, `connect` (a saved Wi-Fi network) and `restart`.
+(admin password, or `{"no_password":true}` to run the web UI without one),
+`scan`, `connect` (a saved Wi-Fi network) and `restart`. An empty
+`network.ap_password` makes the node's own access point an open network.
 The details are in `components/serial_setup/include/serial_setup.h`. You can
 try it from any serial monitor at 115200 baud. Everything else on the port is
 the normal log, which keeps working.
