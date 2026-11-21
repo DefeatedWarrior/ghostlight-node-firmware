@@ -1,0 +1,3 @@
+cJSON 1.7.18, copied unchanged from ESP-IDF v5.2.6 (components/json/cJSON),
+the same version the firmware links. MIT licence: see LICENSE.
+Used only by the host tests.

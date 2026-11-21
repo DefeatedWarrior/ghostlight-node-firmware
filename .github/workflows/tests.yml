@@ -1,0 +1,45 @@
+# Host-side unit tests and fuzzers for the network-facing and core logic
+# (Art-Net / sACN parsing, merge engine, config JSON). No ESP-IDF needed:
+# see tests/host/ and docs/DEVELOPING.md ("Tests").
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    name: Unit tests and fuzzers
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      FUZZ_CC: clang
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check clang and libFuzzer
+        run: |
+          clang --version
+          echo 'int LLVMFuzzerTestOneInput(const char *d, unsigned long n) { return 0; }' > /tmp/probe.c
+          if ! clang -fsanitize=fuzzer /tmp/probe.c -o /tmp/probe; then
+            sudo apt-get update && sudo apt-get install -y libclang-rt-dev
+          fi
+
+      - name: Unit tests (ASan + UBSan)
+        run: make -C tests/host test
+
+      - name: Build fuzzers
+        run: make -C tests/host fuzz
+
+      - name: Fuzz each target for 60 s
+        run: make -C tests/host fuzz-run FUZZ_TIME=60
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes
+          path: tests/host/build/crash-*
+          if-no-files-found: ignore

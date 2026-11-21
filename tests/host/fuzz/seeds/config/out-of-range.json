@@ -1,0 +1,1 @@
+{"version":2,"network":{"mode":-1,"ap_channel":1e300,"wifi_profiles":[{"ssid":""},7,{"ssid":"A"},{"ssid":"A"},{"ssid":"B","priority":-5}]},"port1":{"mode":3.7,"universe_primary":-1e300,"sacn_universe":70000,"out_slots":"512"},"merge":{"loss_behavior":-0.5},"security":{"admin_hash":"zz","admin_iterations":5}}
