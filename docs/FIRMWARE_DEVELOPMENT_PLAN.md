@@ -6,6 +6,8 @@
 **Document version:** 1.0  
 **Date:** 25/12/2025
 
+> **Note:** this is the original design, written for the ESP32-S3-WROOM-1-N16R8 prototype. The firmware now also runs on other ESP32-S3 and ESP32 boards, and the pins differ from board to board: see [Boards](DEVELOPING.md#boards).
+
 ---
 
 ## CONTENTS

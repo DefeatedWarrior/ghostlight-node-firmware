@@ -6,10 +6,10 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.2.6-blue.svg)](https://github.com/espressif/esp-idf)
-[![Platform](https://img.shields.io/badge/Platform-ESP32--S3-green.svg)](https://www.espressif.com/en/products/socs/esp32-s3)
+[![Platform](https://img.shields.io/badge/Platform-ESP32--S3%20%7C%20ESP32-green.svg)](#-supported-hardware)
 [![Status](https://img.shields.io/badge/Status-Hardware%20Testing-orange.svg)](docs/history/PROJECT_COMPLETION_SUMMARY.md)
 
-**2 Independent DMX/RDM Ports • ESP32-S3 • Ethernet + WiFi**
+**2 Independent DMX/RDM Ports • ESP32-S3 or ESP32 • Ethernet + WiFi**
 
 </div>
 
@@ -18,7 +18,7 @@
 ## 📖 Table of Contents
 - [Overview](#-overview)
 - [Key Features](#-key-features)
-- [Hardware Specifications](#-hardware-specifications)
+- [Supported Hardware](#-supported-hardware)
 - [Quick Start](#-quick-start)
 - [Documentation](#-documentation)
 - [Project Status](#-project-status)
@@ -27,11 +27,13 @@
 
 ## 🎯 Overview
 
-ESP-NODE-2RDM is a professional lighting control device that converts network protocols (Art-Net/sACN) to DMX512/RDM signals. Built on ESP32-S3 platform with dual network interfaces (Ethernet + WiFi) and 2 independent DMX/RDM ports.
+ESP-NODE-2RDM is a professional lighting control device that converts network protocols (Art-Net/sACN) to DMX512/RDM signals. It runs on ESP32-S3 and ESP32 boards, with Ethernet (W5500) and WiFi and 2 independent DMX/RDM ports.
 
-This is the firmware for the **Ghostlight Node**. The board itself (KiCad
-project, BOM, assembly and docs) is in
-[ghostlight-node](https://github.com/DefeatedWarrior/ghostlight-node).
+It is the firmware for the **Ghostlight Node**, whose hardware (KiCad
+project, BOM, assembly and docs) is in [ghostlight-node](https://github.com/DefeatedWarrior/ghostlight-node).
+It is not tied to that board: it also runs on ESP32-S3 and ESP32 dev boards
+with a W5500 and two RS485 transceivers, and other boards can be added. See
+[Supported Hardware](#-supported-hardware).
 
 **Perfect for:**
 - Stage lighting control systems
@@ -127,37 +129,50 @@ project, BOM, assembly and docs) is in
 5. Web server provides configuration and monitoring interface
 6. LED manager shows system status visually
 
-## 🔧 Hardware Specifications
+## 🔧 Supported Hardware
 
-| Component | Specification |
+The firmware is not tied to one board. It runs on **ESP32-S3** and original
+**ESP32** chips. Each board is a small profile (a pin header and a settings
+file) picked at build time with `tools/build.sh <board>`:
+
+| Board | Hardware | Flash / PSRAM | Status |
+|---|---|---|---|
+| `esp-node-2rdm` | ESP32-S3 dev board (N16R8) + W5500 + 2 RS485 transceivers | 16 MB / 8 MB | the prototype; runs |
+| `ghostlight-rev1` | [Ghostlight Node](https://github.com/DefeatedWarrior/ghostlight-node) rev1 PCB (ESP32-S3-WROOM-1-N8) | 8 MB / none | builds; not run on a board yet |
+| `esp32-devkitc` | ESP32 DevKitC (WROOM-32) + W5500 + 2 RS485 transceivers | 4 MB / none | builds; never run on hardware |
+
+**Your own board** needs:
+- an ESP32-S3 or ESP32 with at least 4 MB of flash (PSRAM is optional);
+- one RS485 transceiver per DMX port (MAX485, SN65HVD72 or similar), wired to
+  a UART TX pin, an RX pin and a direction pin.
+
+Everything else is optional: a W5500 on SPI for Ethernet (without one the node
+uses WiFi), a WS2812 status LED, an LED per port, switchable bus bias. A new
+profile is one pin header and one `sdkconfig.defaults` file; see
+[Adding a board](docs/DEVELOPING.md#adding-a-board).
+
+| Feature | Specification |
 |-----------|--------------|
-| **MCU** | ESP32-S3-WROOM-1-N8 |
-| **Flash Memory** | 8 MB |
-| **PSRAM** | None |
-| **Ethernet** | W5500 (SPI interface) |
-| **WiFi** | 802.11 b/g/n (2.4 GHz) |
-| **DMX Ports** | 2× RS485 transceivers |
-| **Status LED** | WS2812 RGB (GPIO 48) |
+| **Ethernet** | W5500 (SPI), optional |
+| **WiFi** | 802.11 b/g/n (2.4 GHz), station and access point |
+| **DMX Ports** | 2, each output, input or RDM controller |
 | **Development Framework** | ESP-IDF v5.2.6 |
-| **Operating Voltage** | 5V DC |
-| **Power Consumption** | ~500mA typical |
 
 ### GPIO Pinout
 
-| Function | GPIO | Notes |
-|----------|------|-------|
-| WS2812 LED Data | 48 | Status indicator |
-| DMX Port 1 TX | 17 | UART transmit |
-| DMX Port 1 RX | 16 | UART receive |
-| DMX Port 1 DIR | 21 | Direction control (HIGH=TX) |
-| DMX Port 2 TX | 19 | UART transmit |
-| DMX Port 2 RX | 18 | UART receive |
-| DMX Port 2 DIR | 20 | Direction control (HIGH=TX) |
-| W5500 CS | 10 | SPI Chip Select |
-| W5500 MOSI | 11 | SPI MOSI |
-| W5500 MISO | 13 | SPI MISO |
-| W5500 SCK | 12 | SPI Clock |
-| W5500 INT | 9 | Interrupt (optional) |
+| Function | `ghostlight-rev1` | `esp-node-2rdm` | `esp32-devkitc` |
+|---|---|---|---|
+| DMX 1 TX / RX / DIR | 17 / 16 / 39 | 17 / 16 / 39 | 17 / 16 / 21 |
+| DMX 2 TX / RX / DIR | 15 / 18 / 40 | 15 / 18 / 40 | 25 / 26 / 27 |
+| DMX bias switches | 1 / 2 | – | – |
+| Port LEDs | 5 / 6 | – | 32 / 33 |
+| W5500 SCK / MOSI / MISO | 12 / 11 / 13 | 12 / 11 / 13 | 18 / 23 / 19 |
+| W5500 CS / INT / RST | 10 / 9 / 4 | 10 / 9 / – | 5 / 4 / 22 |
+| WS2812 status LED | 48 | 48 | 13 |
+| Factory reset (hold 10 s) | 0 (BOOT) | 0 (BOOT) | 0 (BOOT) |
+
+DIR is high to transmit. The pin headers are in
+`components/board/include/boards/`.
 
 ## 🚀 Quick Start
 
@@ -179,8 +194,8 @@ project, BOM, assembly and docs) is in
 - Git
 
 **Hardware Requirements:**
-- ESP32-S3 development board with ≥8MB Flash (no PSRAM needed)
-- W5500 Ethernet module
+- One of the [supported boards](#-supported-hardware), or your own ESP32-S3 / ESP32 board with ≥4MB Flash (no PSRAM needed)
+- W5500 Ethernet module (optional: without it the node uses WiFi)
 - 2× RS485 transceivers (MAX485 or similar)
 - WS2812 RGB LED (optional, for status indication)
 - 5V power supply (≥1A recommended)

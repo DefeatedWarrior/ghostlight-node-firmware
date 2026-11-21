@@ -24,7 +24,7 @@ This document explains in detail how to test the firmware physically after flash
 
 ### Equipment needed
 
-1. **ESP32-S3 Board** with the firmware flashed
+1. **A supported board** (ESP32-S3 or ESP32, see [Boards](DEVELOPING.md#boards)) with the firmware flashed
 2. **DMX Controller/Console** (or software such as QLC+, Freestyler)
 3. **DMX Fixtures** (LED fixtures, moving heads, etc.) - at least 2 fixtures
 4. **DMX Cables** and XLR connectors
@@ -84,7 +84,7 @@ This document explains in detail how to test the firmware physically after flash
 **Troubleshooting:**
 
 - LED blinks red fast → Check the serial log; possibly a hardware fault or corrupt firmware
-- No LED → Check the power supply, check the GPIO 48 connection
+- No LED → Check the power supply, check the status LED connection (GPIO 48 on the ESP32-S3 boards, see [Boards](DEVELOPING.md#boards))
 
 ### 1.2. Serial Monitor Check
 
@@ -755,7 +755,7 @@ curl -X POST http://192.168.1.100/api/config \
 | Symptom                             | Possible Cause                 | Solution                                      |
 | ----------------------------------- | ------------------------------ | --------------------------------------------- |
 | LED blinks red fast                 | System error, boot fail        | Check serial log, reflash firmware            |
-| No LED                              | Power issue, GPIO 48 fail      | Check power supply, check WS2812 connection   |
+| No LED                              | Power issue, status LED fail   | Check power supply, check WS2812 connection   |
 | Does not connect to WiFi            | Wrong password, out of range   | Check WiFi credentials, move closer to AP     |
 | No Art-Net received                 | Wrong universe, firewall       | Check universe config, disable firewall       |
 | DMX fixture does not respond        | Cable issue, wrong universe    | Check DMX cable, verify universe mapping      |
@@ -885,14 +885,14 @@ PERFORMANCE (Optional)
 
 **Budget Setup ($100-200):**
 
-- ESP32-S3 board
+- ESP32-S3 or ESP32 board
 - 1-2 cheap DMX LED fixtures
 - Home router
 - Computer with QLC+ (free)
 
 **Professional Setup ($500-1000):**
 
-- ESP32-S3 board
+- ESP32-S3 or ESP32 board
 - 2-4 RDM-capable fixtures
 - Managed Ethernet switch
 - DMX controller/console
