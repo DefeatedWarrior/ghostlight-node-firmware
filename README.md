@@ -19,6 +19,7 @@
 - [Overview](#-overview)
 - [Key Features](#-key-features)
 - [Supported Hardware](#-supported-hardware)
+- [Install from your browser](#-install-from-your-browser)
 - [Quick Start](#-quick-start)
 - [Documentation](#-documentation)
 - [Project Status](#-project-status)
@@ -183,6 +184,21 @@ profile is one pin header and one `sdkconfig.defaults` file; see
 
 DIR is high to transmit. The pin headers are in
 `components/board/include/boards/`.
+
+## 💻 Install from your browser
+
+You don't need ESP-IDF to put the firmware on a node. Open the
+**[web flasher](https://defeatedwarrior.github.io/ghostlight-node-firmware/)**
+in Chrome or Edge on a desktop or laptop, pick your board, plug the node in
+over USB and click **Install**. Installing erases the node, including its
+settings and scenes.
+
+To update a node that already runs this firmware and keep its settings,
+download `ghostlight-node-<board>-<version>-ota.bin` from the
+[releases page](https://github.com/DefeatedWarrior/ghostlight-node-firmware/releases)
+and upload it in the node's web UI under Firmware Update. Each release also
+has `ghostlight-node-<board>-<version>-full.bin`, the complete image, to
+flash at 0x0 with any ESP flashing tool.
 
 ## 🚀 Quick Start
 

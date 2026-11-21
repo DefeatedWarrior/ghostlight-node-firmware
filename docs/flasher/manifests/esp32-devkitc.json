@@ -1,0 +1,16 @@
+{
+  "name": "Ghostlight Node firmware (esp32-devkitc)",
+  "version": "unreleased",
+  "new_install_prompt_erase": false,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "../firmware/ghostlight-node-esp32-devkitc-unreleased-full.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

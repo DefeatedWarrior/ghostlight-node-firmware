@@ -146,7 +146,8 @@ components/
   storage_manager     LittleFS mount
 boards/<board>/       per-board sdkconfig.defaults
 tools/                build.sh, idf_env.sh, check_compile.sh, gen_web_files.py,
-                      ui_mock.py (the web UI against a fake node, no hardware)
+                      ui_mock.py (the web UI against a fake node, no hardware),
+                      ci/release.py (release images, flasher manifests)
 tests/host/           unit tests and fuzzers that run on a PC (see "Tests")
 ```
 
@@ -198,7 +199,10 @@ it allocates its buffers only in tester mode. The API is in `web_tester.c`.
    if the board has PSRAM. Reuse a `partitions_*mb.csv` that matches the flash
    size, or add a new one.
 5. Run `tools/build.sh <your-board>`, then add the board to the matrix in
-   `.github/workflows/build.yml`.
+   `.github/workflows/build.yml`. The release workflow and the web flasher
+   find the new folder on their own. The flasher lists the board with the
+   first comment line of its `sdkconfig.defaults`, so make that line say
+   what the board is.
 
 Pin notes:
 
@@ -286,3 +290,57 @@ feature off), in the `espressif/idf:v5.2.6` container. It runs `tools/build.sh` 
 above. ESP-IDF's own size check fails a build when the app no longer fits its
 partition. The binaries, `flasher_args.json` and the `sdkconfig` of each build
 are uploaded as artifacts.
+
+## Making a release
+
+`.github/workflows/release.yml` builds and publishes a release when you push
+a tag that starts with `v`.
+
+1. Set the version in `CMakeLists.txt`, for example
+   `set(PROJECT_VER "1.1.0")`, and commit it. The web UI and ArtPollReply
+   show this version, so the workflow refuses a tag that doesn't match it.
+2. Tag that commit and push the tag:
+
+   ```bash
+   git tag -a v1.1.0 -m "Firmware 1.1.0"
+   git push origin v1.1.0
+   ```
+
+   A tag with a `-` in it, such as `v1.1.0-rc1`, becomes a pre-release
+   (with `PROJECT_VER "1.1.0-rc1"`).
+
+For every folder under `boards/`, the workflow builds the board with
+`tools/build.sh <board>` in ESP-IDF v5.2.6 and makes two files:
+
+| File | What it is |
+|---|---|
+| `ghostlight-node-<board>-<version>-full.bin` | bootloader, partition table, OTA data and app merged into one image, to flash at 0x0. Used for a first install. |
+| `ghostlight-node-<board>-<version>-ota.bin` | the app alone. Upload it in the web UI under Firmware Update. Settings are kept. |
+
+It then:
+
+- creates a GitHub Release for the tag with all these files and a
+  `SHA256SUMS.txt`;
+- publishes the web flasher to GitHub Pages
+  (`https://<owner>.github.io/ghostlight-node-firmware/`), with the full
+  images of this release. The flasher always serves the most recent tag.
+
+The flasher page is `docs/flasher/index.html`. It uses
+[ESP Web Tools](https://esphome.github.io/esp-web-tools/), pinned to one
+version in the page's `<script>` tag. The workflow writes one ESP Web Tools
+manifest per board (`manifests/<board>.json`, chip family taken from
+`CONFIG_IDF_TARGET`) and `boards.json`, the list the page shows, with
+`tools/ci/release.py manifests`. The copies in `docs/flasher/` say
+`unreleased`. Regenerate them after adding a board:
+
+```bash
+python3 tools/ci/release.py manifests --out docs/flasher --version unreleased
+```
+
+To try the workflow without releasing anything, run it from the Actions tab
+(**Release → Run workflow**). It builds every board and keeps the release
+files and the flasher site as workflow artifacts, named `release-<board>`
+and `github-pages`. It creates no release and deploys nothing.
+
+GitHub Pages must be switched on once: **Settings → Pages → Build and
+deployment → Source: GitHub Actions**.
