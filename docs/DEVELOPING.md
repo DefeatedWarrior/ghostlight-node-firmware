@@ -147,6 +147,7 @@ components/
 boards/<board>/       per-board sdkconfig.defaults
 tools/                build.sh, idf_env.sh, check_compile.sh, gen_web_files.py,
                       ui_mock.py (the web UI against a fake node, no hardware)
+tests/host/           unit tests and fuzzers that run on a PC (see "Tests")
 ```
 
 Callbacks from the network and DMX tasks only read the routing table
@@ -217,7 +218,67 @@ Single-core chips work. `BOARD_CORE_DMX` puts the DMX tasks on core 0 there.
 4. Add `# CONFIG_NODE_<X> is not set` to `tools/ci/minimal.defaults`.
 5. Build a board with the feature on, and a minimal build with it off.
 
+## Tests
+
+`tests/host/` has unit tests and fuzzers that run on your computer, with no
+ESP-IDF and no hardware. They cover the code that handles network input
+and the core logic:
+
+| Suite | Covers |
+|---|---|
+| `test_artnet.c` | Art-Net parsing: ArtDmx, ArtPoll/ArtPollReply, ArtAddress, ArtSync, ArtTod*, ArtRdm, ArtIpProg, bad lengths and IDs |
+| `test_sacn.c` | E1.31 parsing: data, per-address priority, sync, priorities, preview / stream-terminated, bad headers |
+| `test_merge.c` | merge engine: HTP, LTP, last source, backup, disable, priorities, timeouts, failsafe, sync |
+| `test_config.c` | `config_to_json` / `config_from_json` round trip, loading the file, `config_sanitize` |
+
+You need `make` and a C compiler (clang or gcc):
+
+```bash
+make -C tests/host test       # unit tests and the fuzz seeds, under ASan + UBSan
+```
+
+The fuzzers use libFuzzer, so they need LLVM clang. Apple's clang doesn't
+include libFuzzer. On macOS, `brew install llvm`, and the Makefile finds it.
+
+```bash
+make -C tests/host fuzz-run FUZZ_TIME=60    # each fuzzer for 60 s
+```
+
+There are three fuzzers: `fuzz_artnet`, `fuzz_sacn` (one UDP packet each)
+and `fuzz_config`, which feeds the same input to `config_from_json()` and to
+`config_load()`. Then it checks that the result is already clean and that it
+survives a JSON round trip unchanged. New corpus entries go to
+`tests/host/build/corpus/`, and crashing inputs to `tests/host/build/crash-*`.
+To reproduce a crash, run the fuzzer on that one file, for example
+`tests/host/build/fuzz_sacn tests/host/build/crash-sacn-…`.
+
+How it works:
+
+- `stubs/` replaces the ESP-IDF, FreeRTOS, lwIP and mbedTLS headers that
+  the tested components include. `fakes.c` implements them: a fake clock
+  (`host_now_us`), a `sendto()` that records packets, and an in-memory
+  `storage_manager`. The components are compiled unchanged. Don't add
+  `#ifdef TEST` or stubs inside `components/` or `main/`.
+- The Art-Net and sACN tests `#include` the component's `.c` file, so they
+  can call its static `process_packet()` the way the receive task does.
+  Packets go into a buffer the size of the firmware's receive buffer. The
+  bytes after the packet are poisoned, so ASan reports any read past it.
+- `test.h` is the assert framework (`CHECK`, `CHECK_EQ`, `RUN`). `packets.h`
+  builds valid packets for the tests and for the seed corpus.
+- Seeds: `fuzz/seeds/artnet` and `fuzz/seeds/sacn` are made by
+  `fuzz/make_seeds.c` (run `make -C tests/host seeds` after changing it).
+  `fuzz/seeds/config` holds JSON files written by hand.
+- The host build is the ESP-NODE-2RDM board (2 ports) with every feature
+  on (`stubs/sdkconfig.h`).
+
+When a fuzzer finds a bug, fix it in the component and add the input as a
+unit test, so it can't come back.
+
 ## Continuous integration
+
+`.github/workflows/tests.yml` runs `make test` and runs each fuzzer for 60 s
+on Ubuntu with clang. If a fuzzer crashes, the crashing inputs are uploaded
+as an artifact.
 
 `.github/workflows/build.yml` builds every
 board, plus `esp-node-2rdm-minimal` and `esp32-devkitc-minimal` (every

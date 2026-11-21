@@ -1,0 +1,1 @@
+{"network":{"use_ethernet":false,"ap_ssid":"Old","ap_password":"short"},"port1":{"universe_primary":3},"port2":{"universe_primary":0,"mode":7},"merge":{"timeout_seconds":120}}

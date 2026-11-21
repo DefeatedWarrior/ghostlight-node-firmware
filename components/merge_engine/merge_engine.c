@@ -290,7 +290,10 @@ bool merge_engine_in_failsafe(uint8_t port)
 esp_err_t merge_engine_push(uint8_t port, const merge_input_t *in)
 {
     port_ctx_t *ctx = ctx_for(port);
-    if (!ctx || !in || !in->data || in->length == 0 || in->length > 512) {
+    /* A Stream_Terminated packet's slots are ignored (E1.31 6.2.6), so it
+     * may carry none */
+    if (!ctx || !in || !in->data || in->length > 512 ||
+        (in->length == 0 && !in->terminated)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (in->start_code != 0x00 && in->start_code != 0xDD) {
