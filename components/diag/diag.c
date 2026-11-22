@@ -250,3 +250,44 @@ esp_err_t diag_init(void)
     }
     return ESP_OK;
 }
+
+/* ---- Memory and stack headroom ------------------------------------------- */
+
+void diag_health(diag_health_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    out->internal_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    out->internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    out->psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    out->psram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+
+#if configUSE_TRACE_FACILITY
+    /* Every task, read under the kernel lock (a task can't be deleted
+     * halfway through, unlike looking tasks up one by one by name) */
+    UBaseType_t n = uxTaskGetNumberOfTasks() + 4;
+    TaskStatus_t *st = malloc(sizeof(TaskStatus_t) * n);
+    if (!st) return;
+    n = uxTaskGetSystemState(st, n, NULL);
+    for (UBaseType_t i = 0; i < n; i++) {
+        diag_stack_t e;
+        snprintf(e.name, sizeof(e.name), "%s", st[i].pcTaskName ? st[i].pcTaskName : "?");
+        e.stack_free = (uint32_t)st[i].usStackHighWaterMark;   /* bytes in ESP-IDF */
+        /* keep the DIAG_STACKS_MAX least free, least free first */
+        int k;
+        if (out->stacks < DIAG_STACKS_MAX) {
+            k = out->stacks++;
+        } else if (e.stack_free < out->stack[DIAG_STACKS_MAX - 1].stack_free) {
+            k = DIAG_STACKS_MAX - 1;   /* replaces the roomiest */
+        } else {
+            continue;
+        }
+        while (k > 0 && out->stack[k - 1].stack_free > e.stack_free) {
+            out->stack[k] = out->stack[k - 1];
+            k--;
+        }
+        out->stack[k] = e;
+    }
+    free(st);
+#endif
+}

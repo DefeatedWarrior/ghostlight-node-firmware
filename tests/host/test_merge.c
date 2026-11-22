@@ -496,6 +496,59 @@ static void test_protocol_filter(void)
     CHECK(!merge_engine_is_output_active(1));
 }
 
+/* Another port's DMX input (main/app_routing.c feed_local_outputs): the
+ * input port number stands in for the address */
+static esp_err_t push_dmx_in(uint8_t port, uint8_t from_port, const uint8_t *data, bool terminated)
+{
+    merge_input_t in = {
+        .protocol = SOURCE_PROTOCOL_DMX_IN, .source_ip = from_port, .name = "Port 2 DMX in",
+        .priority = MERGE_ARTNET_PRIORITY, .start_code = 0x00,
+        .data = data, .length = terminated ? 0 : 512, .terminated = terminated,
+    };
+    return merge_engine_push(port, &in);
+}
+
+static void test_local_dmx_input(void)
+{
+    /* passes every protocol filter, HTP-merges with the network */
+    merge_engine_set_protocol_mode(1, PROTOCOL_SACN_ONLY);
+    CHECK_EQ(push_dmx_in(1, 2, fill(40), false), ESP_OK);
+    get(1);
+    CHECK_EQ(out[0], 40);
+    merge_engine_set_protocol_mode(1, PROTOCOL_ARTNET_ONLY);
+    get(1);
+    CHECK_EQ(out[0], 40);
+    uint8_t net[512] = {0};
+    net[0] = 90;
+    push_artnet(1, IP_A, net, 512);
+    get(1);
+    CHECK_EQ(out[0], 90);
+    CHECK_EQ(out[1], 40);
+
+    /* not mistaken for an Art-Net sender at "address" 2 */
+    push_artnet(1, 2, fill(10), 512);
+    merge_source_info_t src[MERGE_MAX_SOURCES];
+    CHECK_EQ(merge_engine_get_sources(1, src, MERGE_MAX_SOURCES), 3);
+
+    /* a second input is a source of its own */
+    uint8_t second[512] = {0};
+    second[2] = 200;
+    CHECK_EQ(push_dmx_in(1, 3, second, false), ESP_OK);
+    CHECK_EQ(merge_engine_get_sources(1, src, MERGE_MAX_SOURCES), 4);
+    get(1);
+    CHECK_EQ(out[1], 40);
+    CHECK_EQ(out[2], 200);
+
+    /* each dropped at once when the port stops taking it */
+    CHECK_EQ(push_dmx_in(1, 2, frame, true), ESP_OK);
+    CHECK_EQ(push_dmx_in(1, 3, frame, true), ESP_OK);
+    CHECK_EQ(merge_engine_get_sources(1, src, MERGE_MAX_SOURCES), 2);
+    get(1);
+    CHECK_EQ(out[0], 90);
+    CHECK_EQ(out[1], 10);
+    CHECK_EQ(out[2], 10);
+}
+
 static void test_protocol_priority_modes(void)
 {
     merge_engine_set_protocol_mode(1, PROTOCOL_SACN_PRIORITY);
@@ -669,6 +722,114 @@ static void test_blackout(void)
     CHECK(!merge_engine_is_output_active(1));
 }
 
+static void test_cancel_merge(void)
+{
+    merge_engine_config(1, MERGE_MODE_HTP, 1000);
+    push_artnet(1, IP_A, fill(200), 512);
+    push_artnet(1, IP_B, fill(50), 512);
+    get(1);
+    CHECK_EQ(out[0], 200);
+    merge_engine_cancel_merge(1);
+    get(1);
+    CHECK_EQ(out[0], 200);          /* nothing until the next ArtDmx */
+
+    push_artnet(1, IP_B, fill(50), 512);
+    get(1);
+    CHECK_EQ(out[0], 50);
+    push_artnet(1, IP_A, fill(220), 512);
+    push_artnet(1, IP_C, fill(230), 512);
+    get(1);
+    CHECK_EQ(out[0], 50);           /* other senders are discarded */
+    merge_source_info_t s[MERGE_MAX_SOURCES];
+    CHECK_EQ(merge_engine_get_sources(1, s, MERGE_MAX_SOURCES), 1);
+
+    push_sacn(1, CID_A, 120, 1, fill(90), 512);
+    host_advance_ms(900);
+    push_artnet(1, IP_B, fill(50), 512);
+    host_advance_ms(700);           /* sACN's 1.5 s hold-back is over */
+    push_artnet(1, IP_B, fill(50), 512);
+    push_sacn(1, CID_A, 120, 2, fill(90), 512);
+    get(1);
+    CHECK_EQ(out[0], 90);           /* sACN isn't part of it */
+}
+
+static void test_cancel_merge_needs_a_merge(void)
+{
+    push_artnet(1, IP_A, fill(200), 512);
+    merge_engine_cancel_merge(1);
+    push_artnet(1, IP_B, fill(50), 512);
+    push_artnet(1, IP_A, fill(200), 512);
+    get(1);
+    CHECK_EQ(out[0], 200);
+    merge_source_info_t s[MERGE_MAX_SOURCES];
+    CHECK_EQ(merge_engine_get_sources(1, s, MERGE_MAX_SOURCES), 2);
+}
+
+static void cancelled(void)
+{
+    merge_engine_config(1, MERGE_MODE_HTP, 1000);
+    push_artnet(1, IP_A, fill(200), 512);
+    push_artnet(1, IP_B, fill(50), 512);
+    merge_engine_cancel_merge(1);
+    push_artnet(1, IP_B, fill(50), 512);
+}
+
+static void test_cancel_merge_ends_when_sender_stops(void)
+{
+    cancelled();
+    host_advance_ms(1100);
+    push_artnet(1, IP_A, fill(200), 512);   /* before any output was computed */
+    get(1);
+    CHECK_EQ(out[0], 200);
+}
+
+static void test_cancel_merge_undone(void)
+{
+    cancelled();
+    merge_engine_resume_merge(1);
+    push_artnet(1, IP_A, fill(200), 512);
+    get(1);
+    CHECK_EQ(out[0], 200);
+
+    cancelled();
+    merge_engine_config(1, MERGE_MODE_LTP, 1000);
+    push_artnet(1, IP_A, fill(201), 512);
+    get(1);
+    CHECK_EQ(out[0], 201);
+
+    cancelled();
+    merge_engine_blackout(1);
+    push_artnet(1, IP_A, fill(202), 512);
+    get(1);
+    CHECK_EQ(out[0], 202);
+}
+
+static void test_cancel_merge_request_expires(void)
+{
+    merge_engine_config(1, MERGE_MODE_HTP, 1000);
+    push_artnet(1, IP_A, fill(200), 512);
+    push_artnet(1, IP_B, fill(50), 512);
+    merge_engine_cancel_merge(1);
+    host_advance_ms(1100);
+    push_artnet(1, IP_B, fill(50), 512);
+    push_artnet(1, IP_A, fill(200), 512);
+    get(1);
+    CHECK_EQ(out[0], 200);
+}
+
+static void test_cancel_merge_again(void)
+{
+    cancelled();
+    merge_engine_cancel_merge(1);   /* not merging now: nothing changes */
+    push_artnet(1, IP_A, fill(200), 512);
+    get(1);
+    CHECK_EQ(out[0], 50);
+    merge_engine_cancel_merge(2);
+    push_artnet(2, IP_A, fill(7), 512);
+    get(2);
+    CHECK_EQ(out[0], 7);            /* the other port is its own */
+}
+
 int main(void)
 {
     RUN(test_invalid_args);
@@ -694,6 +855,7 @@ int main(void)
     RUN(test_sequence_window);
     RUN(test_artnet_sequence_zero_not_checked);
     RUN(test_protocol_filter);
+    RUN(test_local_dmx_input);
     RUN(test_protocol_priority_modes);
     RUN(test_failsafe_hold_last_look);
     RUN(test_failsafe_blackout);
@@ -705,5 +867,11 @@ int main(void)
     RUN(test_artnet_sync_ignored_while_merging);
     RUN(test_sacn_sync_latches);
     RUN(test_blackout);
+    RUN(test_cancel_merge);
+    RUN(test_cancel_merge_needs_a_merge);
+    RUN(test_cancel_merge_ends_when_sender_stops);
+    RUN(test_cancel_merge_undone);
+    RUN(test_cancel_merge_request_expires);
+    RUN(test_cancel_merge_again);
     return test_summary();
 }

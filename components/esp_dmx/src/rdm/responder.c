@@ -21,12 +21,15 @@ bool rdm_send_response(dmx_port_t dmx_num) {
 
   // Get the RDM header information and update miscellaneous RDM driver fields
   bool is_rdm;
-  rdm_header_t header;
+  rdm_header_t header = {0};
   taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
   is_rdm = rdm_read_header(dmx_num, &header);
   taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
-  if (!rdm_cc_is_valid(header.cc)) {
-    is_rdm = false;  // Packet is not RDM if CC is invalid
+  /* WIFIDMX: only requests are answered. A response addressed to this
+  device used to reach an assert. */
+  if (!is_rdm || !rdm_cc_is_valid(header.cc) ||
+      !rdm_cc_is_request(header.cc)) {
+    is_rdm = false;  // Packet is not an RDM request
   }
   const rdm_uid_t *this_uid = rdm_uid_get(dmx_num);
   if (is_rdm) {
@@ -49,26 +52,41 @@ bool rdm_send_response(dmx_port_t dmx_num) {
   // Update PID of the last request to target this device
   driver->dmx.last_request_pid = header.pid;
 
+  /* WIFIDMX: everything here comes off the wire, so it is checked before it
+  is used to look anything up. Discovery is never answered with a NACK. */
+  const bool is_disc = header.cc == RDM_CC_DISC_COMMAND;
+  const int rx_size = driver->dmx.size;  // WIFIDMX: the DMX size, see below
+
   // Get parameter definition
   size_t packet_size;  // Size of the response packet
-  const rdm_parameter_definition_t *def =
-      rdm_definition_get(dmx_num, header.sub_device, header.pid);
-  if (def == NULL) {
-    // Unknown PID
-    packet_size = rdm_write_nack_reason(dmx_num, &header, RDM_NR_UNKNOWN_PID);
-  } else if ((header.sub_device >= RDM_SUB_DEVICE_MAX &&
-              header.sub_device != RDM_SUB_DEVICE_ALL) ||
-             header.pdl >= RDM_PD_SIZE_MAX) {
+  const rdm_parameter_definition_t *def;
+  if (header.pdl >= RDM_PD_SIZE_MAX || header.message_len != 24 + header.pdl) {
     // Header format is invalid
-    packet_size = rdm_write_nack_reason(dmx_num, &header, RDM_NR_FORMAT_ERROR);
+    packet_size = is_disc ? 0
+                          : rdm_write_nack_reason(dmx_num, &header,
+                                                  RDM_NR_FORMAT_ERROR);
+  } else if (header.sub_device != RDM_SUB_DEVICE_ROOT &&
+             (header.sub_device >= RDM_SUB_DEVICE_MAX ||
+              !dmx_sub_device_exists(dmx_num, header.sub_device))) {
+    // No such sub-device (ALL included: there is no way to add any)
+    packet_size = is_disc ? 0
+                          : rdm_write_nack_reason(
+                                dmx_num, &header,
+                                RDM_NR_SUB_DEVICE_OUT_OF_RANGE);
+  } else if ((def = rdm_definition_get(dmx_num, header.sub_device,
+                                       header.pid)) == NULL) {
+    // Unknown PID
+    packet_size = is_disc ? 0
+                          : rdm_write_nack_reason(dmx_num, &header,
+                                                  RDM_NR_UNKNOWN_PID);
   } else {
     // Request is valid, handle the response
 
     // Validate the header against definition information
     const rdm_pid_cc_t pid_cc = def->pid_cc;
-    if (pid_cc == RDM_CC_DISC && header.cc != RDM_CC_DISC_COMMAND) {
+    if (is_disc && pid_cc != RDM_CC_DISC) {
       packet_size = 0;  // Cannot send NACK to RDM_CC_DISC_COMMAND
-    } else if ((pid_cc == RDM_CC_GET_SET && header.cc == RDM_CC_DISC_COMMAND) ||
+    } else if ((pid_cc == RDM_CC_DISC && !is_disc) ||
                (pid_cc == RDM_CC_GET && header.cc != RDM_CC_GET_COMMAND) ||
                (pid_cc == RDM_CC_SET && header.cc != RDM_CC_SET_COMMAND)) {
       // Unsupported command class
@@ -89,7 +107,9 @@ bool rdm_send_response(dmx_port_t dmx_num) {
         // Invalid RDM_CC_DISC_COMMAND_RESPONSE packet size
         packet_size = 0;  // Silence invalid discovery responses
         rdm_set_boot_loader(dmx_num);
-      } else if (packet_size > 255 ||
+      } else if (is_disc) {
+        if (packet_size > 257) packet_size = 0;  // WIFIDMX: silence, no NACK
+      } else if (packet_size > 257 ||  // WIFIDMX: 257 is the longest (was 255)
                  (packet_size == 0 &&
                   !rdm_uid_is_broadcast(&header.dest_uid))) {
         // Response size is too large or zero after a non-broadcast request
@@ -102,14 +122,15 @@ bool rdm_send_response(dmx_port_t dmx_num) {
 
   // Do not send a response to non-discovery broadcast packets
   if (rdm_uid_is_broadcast(&header.dest_uid) &&
-      header.pid != RDM_PID_DISC_UNIQUE_BRANCH) {
+      !(is_disc && header.pid == RDM_PID_DISC_UNIQUE_BRANCH)) {
     packet_size = 0;
   }
 
   // Send the RDM response
   if (packet_size > 0) {
     if (!dmx_send_num(dmx_num, packet_size)) {
-      rdm_set_boot_loader(dmx_num);
+      /* WIFIDMX: too late is not a broken device. Upstream set the sticky
+      boot-loader flag here, which consoles show as "needs firmware". */
       // Generate information for the warning message if a response wasn't sent
       const int64_t micros_elapsed = dmx_timer_get_micros_since_boot() -
                                      driver->dmx.controller_eop_timestamp;
@@ -120,9 +141,12 @@ bool rdm_send_response(dmx_port_t dmx_num) {
           "PID 0x%04x did not send a response (cc: %s, size: %i, time: %lli "
           "us)",
           header.pid, cc_str, packet_size, micros_elapsed);
-    } else {
-      dmx_wait_sent(dmx_num, dmx_ms_to_ticks(23));
+    } else if (dmx_wait_sent(dmx_num, dmx_ms_to_ticks(23))) {
       taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+      /* WIFIDMX: back to receiving as before: the reply's length is not the
+      length of the DMX to expect, and it is not a packet that was received */
+      driver->dmx.size = rx_size;
+      driver->dmx.progress = DMX_PROGRESS_STALE;
       driver->dmx.head = DMX_HEAD_WAITING_FOR_BREAK;
       dmx_uart_set_rts(dmx_num, 1);
       taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
@@ -141,5 +165,6 @@ bool rdm_send_response(dmx_port_t dmx_num) {
     parameter->callback(dmx_num, &header, &response_header, parameter->context);
   }
 
+  xSemaphoreGiveRecursive(driver->mux);  // WIFIDMX: was never given back
   return (packet_size > 0);
 }

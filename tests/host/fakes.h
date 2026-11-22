@@ -20,12 +20,12 @@ typedef struct {
 extern host_sent_t host_sent[HOST_SENT_MAX];
 extern int host_sent_count;    /* may exceed HOST_SENT_MAX; only the first are kept */
 
-/* In-memory storage_manager: one file */
-extern char host_storage_name[64];
-extern char *host_storage_data;    /* NULL = no file */
-extern size_t host_storage_len;
-extern int host_storage_writes;
+/* In-memory storage_manager: a few files */
+extern int host_storage_writes;        /* storage_write_file() / storage_replace_file() calls */
+extern bool host_storage_formatted;    /* what storage_was_formatted() says */
 void host_storage_put(const char *name, const char *data, size_t len);
+/* The file's contents (not terminated), NULL if there is no such file */
+const char *host_storage_get(const char *name, size_t *len);
 
 /* A receive buffer like the firmware's: @p bufsize bytes (the task's
  * malloc'd RX buffer) holding @p len received bytes. The bytes after @p len

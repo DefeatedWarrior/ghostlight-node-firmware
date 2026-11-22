@@ -102,7 +102,8 @@ typedef struct {
     uint32_t pap_packets;        /**< valid 0xDD packets */
     uint32_t preview_packets;
     uint32_t terminated_packets;
-    uint32_t extended_packets;   /**< universe discovery (ignored) */
+    uint32_t extended_packets;   /**< other extended packets (ignored) */
+    uint32_t discovery_packets;  /**< valid universe discovery packets */
     uint32_t sync_packets;       /**< valid E1.31 synchronization packets */
     uint32_t own_packets;        /**< our own transmissions, ignored */
     uint32_t invalid_packets;
@@ -110,6 +111,15 @@ typedef struct {
 } sacn_stats_t;
 
 typedef void (*sacn_dmx_callback_t)(const sacn_packet_info_t *pkt, void *user_data);
+/**
+ * E1.31 universe discovery page (receive task): the universes a source says
+ * it sends, @p count big-endian 16-bit values at @p universes_be. Sources
+ * repeat it every 10 s, one page per 512 universes.
+ */
+typedef void (*sacn_discovery_callback_t)(const uint8_t *cid, const char *source_name,
+                                          uint32_t source_ip, uint8_t page, uint8_t last_page,
+                                          const uint8_t *universes_be, uint16_t count,
+                                          void *user_data);
 /** E1.31 synchronization packet for @p sync_universe (receive task) */
 typedef void (*sacn_sync_callback_t)(uint16_t sync_universe, const uint8_t *cid,
                                      uint32_t source_ip, void *user_data);
@@ -132,6 +142,8 @@ void sacn_receiver_set_local_cid(const uint8_t cid[16]);
 
 esp_err_t sacn_receiver_set_callback(sacn_dmx_callback_t callback, void *user_data);
 esp_err_t sacn_receiver_set_sync_callback(sacn_sync_callback_t callback, void *user_data);
+/** Universe discovery pages (the receiver always listens to 239.255.250.214) */
+esp_err_t sacn_receiver_set_discovery_callback(sacn_discovery_callback_t callback, void *user_data);
 esp_err_t sacn_receiver_get_stats(sacn_stats_t *stats);
 bool sacn_receiver_is_running(void);
 /** Number of groups currently joined */

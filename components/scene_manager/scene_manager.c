@@ -131,8 +131,12 @@ static esp_err_t read_scene_file(uint32_t id, dmx_scene_t *out)
     char path[SCENE_PATH_LEN];
     scene_path(id, path);
 
+    storage_lock();   /* a save can't rename over a file that is open */
     FILE *f = fopen(path, "r");
-    if (!f) return ESP_ERR_NOT_FOUND;
+    if (!f) {
+        storage_unlock();
+        return ESP_ERR_NOT_FOUND;
+    }
 
     /* Determine file size */
     fseek(f, 0, SEEK_END);
@@ -141,15 +145,17 @@ static esp_err_t read_scene_file(uint32_t id, dmx_scene_t *out)
 
     if (fsize <= 0 || fsize > 16384) {
         fclose(f);
+        storage_unlock();
         return ESP_ERR_INVALID_SIZE;
     }
 
     char *buf = malloc((size_t)fsize + 1);
-    if (!buf) { fclose(f); return ESP_ERR_NO_MEM; }
+    if (!buf) { fclose(f); storage_unlock(); return ESP_ERR_NO_MEM; }
 
     size_t got = fread(buf, 1, (size_t)fsize, f);
     buf[got] = '\0';
     fclose(f);
+    storage_unlock();
 
     cJSON *root = cJSON_Parse(buf);
     free(buf);
@@ -363,11 +369,15 @@ esp_err_t scene_delete(uint32_t scene_id)
     char path[SCENE_PATH_LEN];
     scene_path(scene_id, path);
 
-    if (remove(path) != 0) {
-        if (errno == ENOENT) {
+    storage_lock();
+    int removed = remove(path);
+    int why = errno;
+    storage_unlock();
+    if (removed != 0) {
+        if (why == ENOENT) {
             return ESP_ERR_NOT_FOUND;
         }
-        ESP_LOGE(TAG, "Failed to delete %s: %d", path, errno);
+        ESP_LOGE(TAG, "Failed to delete %s: %d", path, why);
         return ESP_FAIL;
     }
 

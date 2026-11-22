@@ -6,12 +6,14 @@
  * live by the main task (only network settings need a restart).
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "esp_ota_ops.h"
 #include "esp_app_desc.h"
 #include "esp_idf_version.h"
@@ -30,6 +32,7 @@
 #include "dmx_tester.h"
 #include "serial_setup.h"
 #include "diag.h"
+#include "source_monitor.h"
 #include "board.h"
 #include "app.h"
 
@@ -116,6 +119,35 @@ static void log_stats(void)
                  esp_get_free_heap_size(), esp_get_minimum_free_heap_size());
     }
 #endif
+
+    /* Headroom: internal RAM (drivers, Wi-Fi, lwIP need it; PSRAM can't
+     * stand in) and the tightest task stack, with a warning when low */
+    diag_health_t *h = malloc(sizeof(*h));
+    if (h) {
+        diag_health(h);
+        const char *tight = h->stacks ? h->stack[0].name : "?";
+        uint32_t tight_free = h->stacks ? h->stack[0].stack_free : 0;
+        bool low = h->internal_min_free < DIAG_INTERNAL_LOW_BYTES ||
+                   (h->stacks && tight_free < DIAG_STACK_LOW_BYTES);
+        /* The lowest figures never go back up: warn while internal RAM is
+         * low right now, and when a lowest figure first falls below its
+         * limit or falls further, not every 30 s for something long past */
+        static uint32_t warned_ram = UINT32_MAX, warned_stack = UINT32_MAX;
+        bool ram_new_low = h->internal_min_free < DIAG_INTERNAL_LOW_BYTES &&
+                           h->internal_min_free + 1024 <= warned_ram;
+        bool stack_new_low = h->stacks && tight_free < DIAG_STACK_LOW_BYTES &&
+                             tight_free < warned_stack;
+        if (ram_new_low) warned_ram = h->internal_min_free;
+        if (stack_new_low) warned_stack = tight_free;
+        bool warn = h->internal_free < DIAG_INTERNAL_LOW_BYTES || ram_new_low || stack_new_low;
+        esp_log_level_t level = warn ? ESP_LOG_WARN : ESP_LOG_INFO;
+        ESP_LOG_LEVEL(level, TAG,
+                      "Internal RAM %" PRIu32 " free (lowest %" PRIu32 ", largest block %" PRIu32 "), "
+                      "tightest stack %s %" PRIu32 " bytes free%s",
+                      h->internal_free, h->internal_min_free, h->internal_largest,
+                      tight, tight_free, low ? " - LOW" : "");
+        free(h);
+    }
 }
 
 // ============================================================================
@@ -209,11 +241,13 @@ void app_main(void)
     /* Tester mode is not a node: no Art-Net / sACN socket at all, so
      * nothing is received and controllers don't see it (no ArtPollReply) */
     if (!g_app.tester) {
+        srcmon_reset();   /* before the receivers: they report every sender */
         ESP_ERROR_CHECK(artnet_receiver_init());
         ESP_ERROR_CHECK(artnet_receiver_set_callback(app_on_artnet_dmx, NULL));
         ESP_ERROR_CHECK(artnet_receiver_set_status_callback(app_artnet_status, NULL));
         ESP_ERROR_CHECK(artnet_receiver_set_address_callback(app_artnet_address, NULL));
         ESP_ERROR_CHECK(artnet_receiver_set_sync_callback(app_on_artnet_sync, NULL));
+        ESP_ERROR_CHECK(artnet_receiver_set_poll_reply_callback(app_on_artnet_poll_reply, NULL));
         ESP_ERROR_CHECK(artnet_receiver_set_ipprog_callback(app_on_artnet_ipprog, NULL));
         ESP_ERROR_CHECK(artnet_receiver_start());
         /* ArtDmx we send uses UDP source port 6454, as the spec requires */
@@ -224,6 +258,7 @@ void app_main(void)
         sacn_receiver_set_local_cid(sacn_transmitter_get_cid());
         ESP_ERROR_CHECK(sacn_receiver_set_callback(app_on_sacn_dmx, NULL));
         ESP_ERROR_CHECK(sacn_receiver_set_sync_callback(app_on_sacn_sync, NULL));
+        ESP_ERROR_CHECK(sacn_receiver_set_discovery_callback(app_on_sacn_discovery, NULL));
         ESP_ERROR_CHECK(sacn_receiver_start());
 #endif
     }
@@ -263,7 +298,11 @@ void app_main(void)
     bool identify_was_on = false;
     int64_t last_stats = esp_timer_get_time();
 
+    /* Task watchdog: the loop wakes every second; saving, applying settings
+     * and restarting ports take well under the 10 s limit */
+    esp_task_wdt_add(NULL);
     for (;;) {
+        esp_task_wdt_reset();
         EventBits_t bits = xEventGroupWaitBits(g_app.events,
                                                EV_APPLY | EV_SAVE | EV_NET | EV_FAILREC |
                                                EV_TAKEOVER | EV_NETCFG,
@@ -301,6 +340,15 @@ void app_main(void)
         sacn_transmitter_tick();
         app_update_sacn_groups();   /* follow sync universes as sources come and go */
 #endif
+        /* Input ports sending to "the nodes that use the universe": keep the
+         * node list fresh (ArtPoll, at most every ARTNET_SELF_POLL_MS) */
+        for (int p = 0; p < NPORTS; p++) {
+            if (!g_app.tester && app_mode_is_input(g_app.route[p].mode) &&
+                g_app.route[p].send_to == SEND_TO_NODES) {
+                artnet_receiver_poll_network();
+                break;
+            }
+        }
 
         int64_t now = esp_timer_get_time();
         if (!ota_marked && now > OTA_VALID_AFTER_US) {

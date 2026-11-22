@@ -3,6 +3,7 @@
 #include "fakes.h"
 #include "cJSON.h"
 #include <stdlib.h>
+#include <string.h>
 
 static void reset(void);
 #define TEST_SETUP() reset()
@@ -65,7 +66,18 @@ static void set_everything(config_t *c)
         p->out_slots = 128;
         p->startup_scene = 7;
         p->failsafe_scene = 255;
+        p->rules[0] = (port_rule_t){ .type = PORT_RULE_PATCH, .channel = 101, .count = 10, .from = 1 };
+        p->rules[1] = (port_rule_t){ .type = PORT_RULE_LIMIT, .channel = 20, .count = 2, .level = 128 };
+        p->rules[2] = (port_rule_t){ .type = PORT_RULE_PARK, .channel = 512, .count = 1, .level = 0 };
+        p->rule_count = 3;
+        p->local_inputs = (uint8_t)(CONFIG_PORT_BITS & ~(1u << i));   /* every other port */
+        p->local_only = true;
+        p->send_to = SEND_TO_LIST;
+        p->send_count = 2;
+        CHECK(config_parse_ipv4("10.2.70.20", &p->send_list[0]));
+        CHECK(config_parse_ipv4("192.168.1.255", &p->send_list[1]));
     }
+    c->network.ap_captive = false;
     c->merge.timeout_seconds = 60;
     c->merge.loss_behavior = LOSS_SCENE;
     snprintf(c->node_info.short_name, 18, "Stage-Left-Node!!");    /* 17 */
@@ -120,7 +132,7 @@ static void test_round_trip_through_file(void)
     cfg->security.admin_iterations = 4096;
     config_t want = *cfg;
     CHECK_EQ(config_save(), ESP_OK);
-    CHECK(host_storage_data != NULL);
+    CHECK(host_storage_get("config.json", NULL) != NULL);
     config_init();
     CHECK_EQ(config_load(), ESP_OK);
     CHECK_MEM(cfg, &want, sizeof(want));
@@ -303,6 +315,360 @@ static void test_update_problem(void)
     CHECK(config_ap_password_problem(NULL) != NULL);
 }
 
+/* ---- port rules ---------------------------------------------------------- */
+
+static void test_rule_problem(void)
+{
+    struct { port_rule_t r; bool ok; } cases[] = {
+        { { .type = PORT_RULE_PATCH, .channel = 1, .count = 512, .from = 1 }, true },
+        { { .type = PORT_RULE_PATCH, .channel = 101, .count = 10, .from = 503 }, true },
+        { { .type = PORT_RULE_PATCH, .channel = 101, .count = 10, .from = 504 }, false },  /* reads 513 */
+        { { .type = PORT_RULE_PATCH, .channel = 1, .count = 1, .from = 0 }, false },
+        { { .type = PORT_RULE_LIMIT, .channel = 512, .count = 1, .level = 255 }, true },
+        { { .type = PORT_RULE_LIMIT, .channel = 512, .count = 2, .level = 9 }, false },  /* past 512 */
+        { { .type = PORT_RULE_PARK, .channel = 0, .count = 1, .level = 9 }, false },
+        { { .type = PORT_RULE_PARK, .channel = 513, .count = 1, .level = 9 }, false },
+        { { .type = PORT_RULE_PARK, .channel = 1, .count = 0, .level = 9 }, false },
+        { { .type = 0, .channel = 1, .count = 1 }, false },
+        { { .type = PORT_RULE_LAST + 1, .channel = 1, .count = 1 }, false },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const char *why = config_port_rule_problem(&cases[i].r);
+        if ((why == NULL) != cases[i].ok) printf("    case %zu -> %s\n", i, why ? why : "accepted");
+        CHECK_EQ(why == NULL, cases[i].ok);
+    }
+    CHECK(config_port_rule_problem(NULL) != NULL);
+    CHECK_STR(config_port_rule_name(PORT_RULE_PATCH), "patch");
+    CHECK_STR(config_port_rule_name(PORT_RULE_LIMIT), "limit");
+    CHECK_STR(config_port_rule_name(PORT_RULE_PARK), "park");
+}
+
+static void test_rules_sanitize(void)
+{
+    port_config_t *p = &cfg->ports[0];
+    p->rules[0] = (port_rule_t){ .type = PORT_RULE_LIMIT, .channel = 1, .count = 4, .level = 50, .from = 7 };
+    p->rules[1] = (port_rule_t){ .type = PORT_RULE_PARK, .channel = 600, .count = 1, .level = 1 };   /* bad */
+    p->rules[2] = (port_rule_t){ .type = PORT_RULE_PATCH, .channel = 9, .count = 2, .from = 1, .level = 3 };
+    p->rules[5] = (port_rule_t){ .type = PORT_RULE_PARK, .channel = 1, .count = 1 };   /* past the count */
+    p->rule_count = 3;
+    CHECK(config_sanitize(cfg));
+    CHECK_EQ(p->rule_count, 2);
+    CHECK_EQ(p->rules[0].type, PORT_RULE_LIMIT);
+    CHECK_EQ(p->rules[0].from, 0);            /* only patches read channels */
+    CHECK_EQ(p->rules[1].type, PORT_RULE_PATCH);
+    CHECK_EQ(p->rules[1].level, 0);           /* only limits and parks have a level */
+    port_rule_t zero = {0};
+    for (int i = 2; i < CONFIG_PORT_RULES_MAX; i++) CHECK_MEM(&p->rules[i], &zero, sizeof(zero));
+    CHECK(!config_sanitize(cfg));
+
+    p->rule_count = 200;
+    CHECK(config_sanitize(cfg));
+    CHECK(p->rule_count <= CONFIG_PORT_RULES_MAX);
+}
+
+static void test_rules_json(void)
+{
+    const char *json =
+        "{\"port1\":{\"rules\":[{\"type\":\"patch\",\"channel\":101,\"count\":10,\"from\":1},"
+        "{\"type\":\"limit\",\"channel\":20,\"count\":2,\"level\":128},"
+        "{\"type\":\"park\",\"channel\":5,\"count\":1,\"level\":255}]}}";
+    CHECK_EQ(config_from_json(json), ESP_OK);
+    port_config_t *p = &cfg->ports[0];
+    CHECK_EQ(p->rule_count, 3);
+    CHECK_EQ(p->rules[0].type, PORT_RULE_PATCH);
+    CHECK_EQ(p->rules[0].from, 1);
+    CHECK_EQ(p->rules[1].level, 128);
+    CHECK_EQ(p->rules[2].channel, 5);
+    CHECK_EQ(cfg->ports[1].rule_count, 0);
+
+    /* Other port fields leave the rules alone; an empty list clears them */
+    CHECK_EQ(config_from_json("{\"port1\":{\"merge_mode\":1}}"), ESP_OK);
+    CHECK_EQ(p->rule_count, 3);
+    CHECK_EQ(config_from_json("{\"port1\":{\"rules\":[]}}"), ESP_OK);
+    CHECK_EQ(p->rule_count, 0);
+
+    /* A file with bad entries keeps the good ones */
+    CHECK_EQ(config_from_json(
+        "{\"port1\":{\"rules\":[{\"type\":\"spin\",\"channel\":1,\"count\":1,\"level\":1},"
+        "{\"type\":\"park\",\"channel\":3,\"count\":2,\"level\":\"x\"},"
+        "{\"type\":\"park\",\"channel\":3,\"count\":2,\"level\":9},"
+        "{\"type\":\"limit\",\"channel\":3.5,\"count\":2,\"level\":9},"
+        "{\"type\":\"limit\",\"channel\":1,\"count\":2,\"level\":256}]}}"), ESP_OK);
+    CHECK_EQ(p->rule_count, 1);
+    CHECK_EQ(p->rules[0].level, 9);
+
+    /* Written back out the same way */
+    char *out = NULL;
+    CHECK_EQ(config_to_json(&out), ESP_OK);
+    CHECK(strstr(out, "\"rules\":[{\"type\":\"park\",\"channel\":3,\"count\":2,\"level\":9}]") != NULL);
+    CHECK(strstr(out, "\"ap_captive\":true") != NULL);
+    free(out);
+}
+
+static void test_rules_update_problem(void)
+{
+    struct { const char *json; bool ok; } cases[] = {
+        { "{\"port1\":{\"rules\":[]}}", true },
+        { "{\"port2\":{\"rules\":[{\"type\":\"park\",\"channel\":1,\"count\":512,\"level\":0}]}}", true },
+        { "{\"port1\":{\"rules\":{}}}", false },
+        { "{\"port1\":{\"rules\":[{\"type\":\"park\",\"channel\":1,\"count\":1}]}}", false },
+        { "{\"port1\":{\"rules\":[{\"type\":\"patch\",\"channel\":1,\"count\":1}]}}", false },
+        { "{\"port1\":{\"rules\":[{\"type\":\"limit\",\"channel\":1,\"count\":1,\"level\":300}]}}", false },
+        { "{\"port1\":{\"rules\":[{\"type\":\"limit\",\"channel\":500,\"count\":20,\"level\":3}]}}", false },
+        { "{\"port1\":{\"rules\":[{\"type\":\"patch\",\"channel\":1,\"count\":20,\"from\":500}]}}", false },
+        { "{\"port1\":{\"rules\":[1]}}", false },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        cJSON *doc = cJSON_Parse(cases[i].json);
+        CHECK(doc != NULL);
+        const char *problem = config_update_problem(doc);
+        if ((problem == NULL) != cases[i].ok) {
+            printf("    %s -> %s\n", cases[i].json, problem ? problem : "accepted");
+        }
+        CHECK_EQ(problem == NULL, cases[i].ok);
+        cJSON_Delete(doc);
+    }
+    /* Nine rules */
+    char json[1024] = "{\"port1\":{\"rules\":[";
+    for (int i = 0; i < 9; i++) {
+        strcat(json, i ? "," : "");
+        strcat(json, "{\"type\":\"park\",\"channel\":1,\"count\":1,\"level\":1}");
+    }
+    strcat(json, "]}}");
+    cJSON *doc = cJSON_Parse(json);
+    CHECK_STR(config_update_problem(doc), "At most 8 rules per port");
+    cJSON_Delete(doc);
+}
+
+/* Every list full and every string at its longest still fits the file,
+ * with room for a 4-port board (the host build has 2 ports) */
+/* ---- local DMX (splitter / merger) -------------------------------------- */
+
+static void test_local_dmx_json(void)
+{
+    port_config_t *p = &cfg->ports[0];
+    CHECK_EQ(p->local_inputs, 0);
+    CHECK(!p->local_only);
+    CHECK_EQ(config_from_json("{\"port1\":{\"local_inputs\":[2],\"local_only\":true}}"), ESP_OK);
+    CHECK_EQ(p->local_inputs, 0x02);
+    CHECK(p->local_only);
+    CHECK_EQ(cfg->ports[1].local_inputs, 0);
+
+    char *out = NULL;
+    CHECK_EQ(config_to_json(&out), ESP_OK);
+    CHECK(strstr(out, "\"local_inputs\":[2],\"local_only\":true") != NULL);
+    CHECK(strstr(out, "\"local_inputs\":[],\"local_only\":false") != NULL);   /* port 2 */
+    free(out);
+
+    /* other port fields leave it alone; the list replaces the whole set */
+    CHECK_EQ(config_from_json("{\"port1\":{\"merge_mode\":1}}"), ESP_OK);
+    CHECK_EQ(p->local_inputs, 0x02);
+    CHECK_EQ(config_from_json("{\"port1\":{\"local_inputs\":[]}}"), ESP_OK);
+    CHECK_EQ(p->local_inputs, 0);
+    CHECK(!p->local_only);                    /* the network comes back */
+
+    /* its own port, ports the board does not have and junk are dropped */
+    CHECK_EQ(config_from_json(
+        "{\"port1\":{\"local_inputs\":[1,2,3,0,-1,1.5,\"2\",1e300,null],\"local_only\":true}}"), ESP_OK);
+    CHECK_EQ(p->local_inputs, 0x02);
+    CHECK(p->local_only);
+    CHECK_EQ(config_from_json("{\"port1\":{\"local_inputs\":[1]}}"), ESP_OK);
+    CHECK_EQ(p->local_inputs, 0);
+    CHECK(!p->local_only);
+    CHECK_EQ(config_from_json("{\"port1\":{\"local_inputs\":2}}"), ESP_OK);   /* not a list */
+    CHECK_EQ(p->local_inputs, 0);
+}
+
+static void test_parse_ipv4(void)
+{
+    uint32_t ip = 0;
+    CHECK(config_parse_ipv4("10.2.70.149", &ip));
+    const uint8_t *b = (const uint8_t *)&ip;
+    CHECK(b[0] == 10 && b[1] == 2 && b[2] == 70 && b[3] == 149);
+    CHECK(config_parse_ipv4("0.0.0.0", &ip));
+    CHECK(!config_parse_ipv4("", &ip));
+    CHECK(!config_parse_ipv4("10.2.70", &ip));
+    CHECK(!config_parse_ipv4("10.2.70.149.1", &ip));
+    CHECK(!config_parse_ipv4("10.2.70.256", &ip));
+    CHECK(!config_parse_ipv4("10.2.70.1000", &ip));
+    CHECK(!config_parse_ipv4("10..70.1", &ip));
+    CHECK(!config_parse_ipv4(" 10.2.70.1", &ip));
+    CHECK(!config_parse_ipv4("10.2.70.1 ", &ip));
+    CHECK(!config_parse_ipv4("a.b.c.d", &ip));
+    CHECK(!config_parse_ipv4(NULL, &ip));
+}
+
+static void test_send_to_json(void)
+{
+    CHECK_EQ(cfg->ports[0].send_to, SEND_TO_ALL);
+    CHECK_EQ(config_from_json("{\"port1\":{\"send_to\":\"list\",\"send_list\":"
+                              "[\"10.0.0.5\",\"bad\",\"239.255.0.1\",\"10.0.0.6\"]}}"), ESP_OK);
+    CHECK_EQ(cfg->ports[0].send_to, SEND_TO_LIST);
+    CHECK_EQ(cfg->ports[0].send_count, 2);      /* the bad and multicast ones dropped */
+    cJSON *o = config_port_to_json(&cfg->ports[0]);
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(o, "send_list");
+    CHECK(cJSON_GetArraySize(list) == 2);
+    CHECK(strcmp(cJSON_GetArrayItem(list, 1)->valuestring, "10.0.0.6") == 0);
+    CHECK(strcmp(cJSON_GetObjectItemCaseSensitive(o, "send_to")->valuestring, "list") == 0);
+    cJSON_Delete(o);
+
+    CHECK_EQ(config_from_json("{\"port1\":{\"send_to\":\"nodes\"}}"), ESP_OK);
+    CHECK_EQ(cfg->ports[0].send_to, SEND_TO_NODES);
+    CHECK_EQ(cfg->ports[0].send_count, 2);      /* kept for later */
+    CHECK_EQ(config_from_json("{\"port1\":{\"send_to\":\"everywhere\"}}"), ESP_OK);
+    CHECK_EQ(cfg->ports[0].send_to, SEND_TO_NODES);   /* unknown name ignored */
+
+    /* A list with nothing in it falls back to everyone */
+    CHECK_EQ(config_from_json("{\"port1\":{\"send_to\":\"list\",\"send_list\":[]}}"), ESP_OK);
+    CHECK_EQ(cfg->ports[0].send_to, SEND_TO_ALL);
+}
+
+static void test_send_to_update_problem(void)
+{
+    const char *bad[] = {
+        "{\"port1\":{\"send_to\":\"everywhere\"}}",
+        "{\"port1\":{\"send_to\":3}}",
+        "{\"port1\":{\"send_list\":\"10.0.0.1\"}}",
+        "{\"port1\":{\"send_list\":[\"10.0.0.1\",\"10.0.0.2\",\"10.0.0.3\",\"10.0.0.4\",\"10.0.0.5\"]}}",
+        "{\"port1\":{\"send_list\":[\"10.0.0\"]}}",
+        "{\"port1\":{\"send_list\":[\"0.0.0.0\"]}}",
+        "{\"port1\":{\"send_list\":[\"255.255.255.255\"]}}",
+        "{\"port1\":{\"send_list\":[\"239.255.0.1\"]}}",
+        "{\"port1\":{\"send_to\":\"list\",\"send_list\":[]}}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        cJSON *d = cJSON_Parse(bad[i]);
+        CHECK(d != NULL);
+        CHECK(config_update_problem(d) != NULL);
+        cJSON_Delete(d);
+    }
+    cJSON *ok = cJSON_Parse("{\"port2\":{\"send_to\":\"list\",\"send_list\":[\"10.2.70.255\",\"10.2.70.20\"]}}");
+    CHECK(config_update_problem(ok) == NULL);
+    cJSON_Delete(ok);
+}
+
+static void test_send_to_sanitize(void)
+{
+    port_config_t *p = &cfg->ports[0];
+    p->send_to = 9;
+    p->send_count = 9;
+    CHECK(config_sanitize(cfg));
+    CHECK_EQ(p->send_to, SEND_TO_ALL);
+    CHECK(p->send_count <= CONFIG_SEND_LIST_MAX);
+    p->send_to = SEND_TO_LIST;
+    p->send_count = 0;
+    CHECK(config_sanitize(cfg));
+    CHECK_EQ(p->send_to, SEND_TO_ALL);
+    CHECK(!config_sanitize(cfg));
+}
+
+static void test_local_dmx_sanitize(void)
+{
+    port_config_t *p = &cfg->ports[1];
+    p->local_inputs = 0x03;                   /* port 2 from itself and port 1 */
+    p->local_only = true;
+    CHECK(config_sanitize(cfg));
+    CHECK_EQ(p->local_inputs, 0x01);
+    CHECK(p->local_only);
+    CHECK(!config_sanitize(cfg));
+    p->local_inputs = 0xF0;                   /* ports the board does not have */
+    CHECK(config_sanitize(cfg));
+    CHECK_EQ(p->local_inputs, 0);
+    CHECK(!p->local_only);                    /* nothing routed: network on */
+
+    /* the tester never routes one port to another */
+    p->local_inputs = 0x01;
+    port_config_t t;
+    config_tester_port_settings(cfg, 2, &t);
+    CHECK_EQ(t.local_inputs, 0);
+    CHECK(!t.local_only);
+}
+
+static void test_local_dmx_update_problem(void)
+{
+    struct { const char *json; bool ok; } cases[] = {
+        { "{\"port1\":{\"local_inputs\":[]}}", true },
+        { "{\"port1\":{\"local_inputs\":[2],\"local_only\":true}}", true },
+        { "{\"port2\":{\"local_inputs\":[1,1]}}", true },
+        { "{\"port1\":{\"local_inputs\":[1]}}", false },
+        { "{\"port2\":{\"local_inputs\":[1,2]}}", false },
+        { "{\"port1\":{\"local_inputs\":[3]}}", false },
+        { "{\"port1\":{\"local_inputs\":[0]}}", false },
+        { "{\"port1\":{\"local_inputs\":[1.5]}}", false },
+        { "{\"port1\":{\"local_inputs\":[\"2\"]}}", false },
+        { "{\"port1\":{\"local_inputs\":[1e300]}}", false },
+        { "{\"port1\":{\"local_inputs\":2}}", false },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        cJSON *doc = cJSON_Parse(cases[i].json);
+        CHECK(doc != NULL);
+        const char *problem = config_update_problem(doc);
+        if ((problem == NULL) != cases[i].ok) {
+            printf("    %s -> %s\n", cases[i].json, problem ? problem : "accepted");
+        }
+        CHECK_EQ(problem == NULL, cases[i].ok);
+        cJSON_Delete(doc);
+    }
+}
+
+static void test_worst_case_config_fits(void)
+{
+    set_everything(cfg);
+    cfg->network.wifi_profile_count = CONFIG_WIFI_PROFILES_MAX;
+    for (int i = 0; i < CONFIG_WIFI_PROFILES_MAX; i++) {
+        config_wifi_profile_t *w = &cfg->network.wifi_profiles[i];
+        memset(w->ssid, '"', 32);
+        w->ssid[31] = (char)('0' + i);         /* distinct: duplicates are merged */
+        w->ssid[32] = '\0';
+        memset(w->password, '\\', 64);
+        w->password[64] = '\0';
+        w->use_static_ip = true;
+        snprintf(w->static_ip, 16, "192.168.100.200");
+        snprintf(w->gateway, 16, "192.168.100.254");
+        snprintf(w->netmask, 16, "255.255.255.255");
+        w->priority = 255;
+    }
+    memset(cfg->network.ap_ssid, '"', 31);
+    cfg->network.ap_ssid[31] = '\0';
+    memset(cfg->network.ap_password, '\\', 63);
+    cfg->network.ap_password[63] = '\0';
+    for (int i = 0; i < CONFIG_DMX_PORTS; i++) {
+        port_config_t *p = &cfg->ports[i];
+        for (int k = 0; k < CONFIG_PORT_RULES_MAX; k++) {
+            p->rules[k] = (port_rule_t){ .type = PORT_RULE_PATCH, .channel = 100, .count = 100, .from = 400 };
+        }
+        p->rule_count = CONFIG_PORT_RULES_MAX;
+        p->send_count = CONFIG_SEND_LIST_MAX;
+        for (int k = 0; k < CONFIG_SEND_LIST_MAX; k++) {
+            CHECK(config_parse_ipv4("192.168.100.200", &p->send_list[k]));
+            ((uint8_t *)&p->send_list[k])[3] = (uint8_t)(200 + k);
+        }
+    }
+    snprintf(cfg->security.admin_hash, sizeof(cfg->security.admin_hash), "%064d", 1);
+    snprintf(cfg->security.admin_salt, sizeof(cfg->security.admin_salt), "%032d", 2);
+    cfg->security.admin_iterations = 100000;
+    CHECK(!config_sanitize(cfg));
+
+    char *json = NULL;
+    CHECK_EQ(config_to_json(&json), ESP_OK);
+    size_t len = strlen(json);
+    free(json);
+    cJSON *port = config_port_to_json(&cfg->ports[0]);
+    char *pj = cJSON_PrintUnformatted(port);
+    size_t per_port = strlen(pj) + 16 + 100;   /* "portN": and a tester port */
+    free(pj);
+    cJSON_Delete(port);
+    size_t four = len + (4 - CONFIG_DMX_PORTS) * per_port;
+    printf("    worst case: %zu bytes, %zu with 4 ports (limit %d)\n", len, four, 8192);
+    CHECK(four < 8192 - 256);
+
+    config_t want = *cfg;
+    CHECK_EQ(config_save(), ESP_OK);
+    config_init();
+    CHECK_EQ(config_load(), ESP_OK);
+    CHECK_MEM(cfg, &want, sizeof(want));
+}
+
 static void test_public_json_has_no_secrets(void)
 {
     CHECK_EQ(config_set_admin_password("correct horse"), ESP_OK);
@@ -366,7 +732,7 @@ static void test_load_missing_file_saves_defaults(void)
 {
     CHECK_EQ(config_load(), ESP_OK);
     CHECK_EQ(host_storage_writes, 1);
-    CHECK(host_storage_data != NULL);
+    CHECK(host_storage_get("config.json", NULL) != NULL);
 }
 
 static void test_load_corrupt_file_uses_defaults(void)
@@ -377,6 +743,117 @@ static void test_load_corrupt_file_uses_defaults(void)
     CHECK_EQ(config_load(), ESP_OK);
     CHECK_MEM(cfg, &want, sizeof(want));
     CHECK_EQ(host_storage_writes, 1);       /* replaced by a good file */
+}
+
+static void test_save_keeps_previous_copy(void)
+{
+    cfg->merge.timeout_seconds = 9;
+    CHECK_EQ(config_save(), ESP_OK);
+    CHECK(host_storage_get("config.bak", NULL) == NULL);   /* nothing to keep yet */
+    cfg->merge.timeout_seconds = 7;
+    CHECK_EQ(config_save(), ESP_OK);
+    size_t n = 0;
+    const char *bak = host_storage_get("config.bak", &n);
+    CHECK(bak != NULL);
+    char *copy = strndup(bak, n);
+    CHECK(strstr(copy, "\"timeout_seconds\":9") != NULL);
+    free(copy);
+}
+
+static void test_load_damaged_file_uses_backup(void)
+{
+    cfg->merge.timeout_seconds = 9;
+    CHECK_EQ(config_save(), ESP_OK);
+    cfg->merge.timeout_seconds = 7;
+    CHECK_EQ(config_save(), ESP_OK);
+    host_storage_put("config.json", "{\"merge\":", 9);   /* damaged after the save */
+    config_init();
+    CHECK_EQ(config_load(), ESP_OK);
+    CHECK_EQ(cfg->merge.timeout_seconds, 9);
+    CHECK_EQ(config_load_result(), CONFIG_LOAD_FROM_BACKUP);
+    CHECK(config_boot_notice() != NULL);
+    size_t n = 0;
+    const char *bad = host_storage_get("config.bad", &n);
+    CHECK(bad != NULL && n == 9);                 /* kept for a look, not as the backup */
+    CHECK(host_storage_get("config.json", NULL) != NULL);
+    const char *bak = host_storage_get("config.bak", &n);
+    CHECK(bak != NULL);
+    char *copy = strndup(bak, n);
+    CHECK(strstr(copy, "\"timeout_seconds\":9") != NULL);
+    free(copy);
+}
+
+static void test_load_power_cut_between_renames(void)
+{
+    /* Saved settings only as config.bak: the save stopped after moving the
+     * old file aside */
+    cfg->merge.timeout_seconds = 9;
+    CHECK_EQ(config_save(), ESP_OK);
+    size_t n = 0;
+    char *saved = strndup(host_storage_get("config.json", &n), n);
+    host_fakes_reset();
+    host_storage_put("config.bak", saved, strlen(saved));
+    free(saved);
+    config_init();
+    CHECK_EQ(config_load(), ESP_OK);
+    CHECK_EQ(cfg->merge.timeout_seconds, 9);
+    CHECK_EQ(config_load_result(), CONFIG_LOAD_FROM_BACKUP);
+}
+
+static void test_load_damaged_without_backup(void)
+{
+    host_storage_put("config.json", "garbage", 7);
+    host_storage_put("config.bak", "{", 1);
+    CHECK_EQ(config_load(), ESP_OK);
+    config_t want = defaults();
+    CHECK_MEM(cfg, &want, sizeof(want));
+    CHECK_EQ(config_load_result(), CONFIG_LOAD_RESET);
+    CHECK(config_boot_notice() != NULL);
+    CHECK(host_storage_get("config.bad", NULL) != NULL);
+}
+
+static void test_load_first_start_is_quiet(void)
+{
+    CHECK_EQ(config_load(), ESP_OK);
+    CHECK_EQ(config_load_result(), CONFIG_LOAD_NEW);
+    CHECK(config_boot_notice() == NULL);
+    CHECK_EQ(config_load(), ESP_OK);
+    CHECK_EQ(config_load_result(), CONFIG_LOAD_OK);
+    CHECK(config_boot_notice() == NULL);
+}
+
+static void test_reset_deletes_old_copies(void)
+{
+    CHECK_EQ(config_save(), ESP_OK);
+    CHECK_EQ(config_save(), ESP_OK);
+    host_storage_put("config.bad", "x", 1);
+    CHECK(host_storage_get("config.bak", NULL) != NULL);
+    CHECK_EQ(config_reset_to_defaults(), ESP_OK);
+    CHECK(host_storage_get("config.json", NULL) != NULL);
+    CHECK(host_storage_get("config.bak", NULL) == NULL);
+    CHECK(host_storage_get("config.bad", NULL) == NULL);
+}
+
+/* Runs last: the notice stays cleared */
+static void test_boot_notice(void)
+{
+    CHECK_EQ(config_load(), ESP_OK);          /* first start */
+    CHECK(config_boot_notice() == NULL);
+    host_storage_formatted = true;            /* storage was erased at boot */
+    CHECK(config_boot_notice() != NULL);
+    config_boot_notice_clear();
+    CHECK(config_boot_notice() == NULL);
+}
+
+static void test_snapshot(void)
+{
+    cfg->merge.timeout_seconds = 9;
+    config_t *c = config_snapshot();
+    CHECK(c != NULL);
+    CHECK_MEM(c, cfg, sizeof(*c));
+    cfg->merge.timeout_seconds = 7;
+    CHECK_EQ(c->merge.timeout_seconds, 9);    /* a copy */
+    free(c);
 }
 
 static void test_load_oversized_file(void)
@@ -594,6 +1071,13 @@ int main(void)
     RUN(test_wifi_profiles);
     RUN(test_load_missing_file_saves_defaults);
     RUN(test_load_corrupt_file_uses_defaults);
+    RUN(test_save_keeps_previous_copy);
+    RUN(test_load_damaged_file_uses_backup);
+    RUN(test_load_power_cut_between_renames);
+    RUN(test_load_damaged_without_backup);
+    RUN(test_load_first_start_is_quiet);
+    RUN(test_reset_deletes_old_copies);
+    RUN(test_snapshot);
     RUN(test_load_oversized_file);
     RUN(test_load_legacy_file);
     RUN(test_load_bad_credentials_dropped);
@@ -604,6 +1088,19 @@ int main(void)
     RUN(test_sanitize_names_and_passwords);
     RUN(test_sanitize_credentials);
     RUN(test_update_problem);
+    RUN(test_rule_problem);
+    RUN(test_rules_sanitize);
+    RUN(test_rules_json);
+    RUN(test_rules_update_problem);
+    RUN(test_local_dmx_json);
+    RUN(test_local_dmx_sanitize);
+    RUN(test_parse_ipv4);
+    RUN(test_send_to_json);
+    RUN(test_send_to_update_problem);
+    RUN(test_send_to_sanitize);
+    RUN(test_local_dmx_update_problem);
+    RUN(test_worst_case_config_fits);
     RUN(test_public_json_has_no_secrets);
+    RUN(test_boot_notice);
     return test_summary();
 }

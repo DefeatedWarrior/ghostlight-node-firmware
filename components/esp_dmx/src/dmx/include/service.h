@@ -23,6 +23,18 @@ extern "C" {
 #define DMX_CHECK(a, err_code, format, ...) \
   ESP_RETURN_ON_FALSE(a, err_code, TAG, format, ##__VA_ARGS__)
 
+/* WIFIDMX: upstream waited 23 ms for both of these. A wait of 23 ticks can end
+after 22 ms and a full frame takes 22.76 ms, so most requests made just after
+a frame started were never sent. Both waits normally end early, on the
+interrupt. */
+/** @brief The longest wait for the packet already being sent: a full frame
+ * with a 1 ms break and a 1 ms mark takes 24.6 ms.*/
+#define DMX_SEND_WAIT_MS 30
+/** @brief The longest wait for an RDM response, counted from the start of the
+ * request: two full packets and the responder's 2.8 ms take 26.3 ms, more if
+ * the responder leaves gaps between slots.*/
+#define RDM_EXCHANGE_WAIT_MS 50
+
 /** @brief Logs a warning message on the terminal if the condition is not met.*/
 #define DMX_ERR(format, ...)              \
   do {                                    \
@@ -136,6 +148,30 @@ typedef struct dmx_driver_t {
     int64_t controller_eop_timestamp;  // The timestamp (in microseconds since boot) of the end-of-packet of the last controller-generated packet.
     rdm_pid_t last_responder_pid;  // The PID of the last responder-generated packet.
     bool responder_sent_last;  // True if the last packet was a responder-generated packet.
+    /* WIFIDMX: the next packet overwrites data[] from slot 0 one break after
+    the last one ended, which can be well under a millisecond, so a task that
+    copies data[] after being notified can get a mix of two packets. The
+    receive ISR therefore copies each finished level packet (NULL start code)
+    to rx_frame before it handles the next break, and counts it in
+    rx_frame_seq. dmx_read_received() reads that copy. */
+    uint32_t rx_frame_seq;
+    uint16_t rx_frame_size;
+    uint8_t rx_frame[DMX_PACKET_SIZE_MAX];
+    /* WIFIDMX: length of the last level packet a break cut short (0: the
+    last one was whole). The expected size only shrinks to a length seen
+    twice in a row. */
+    int rx_short_len;
+    /* WIFIDMX: head when a framing error ended a packet (0: none). A break's
+    null byte is a framing error, which can be flagged before the break: if
+    nothing else arrives before the break, the packet was a short one. */
+    int rx_err_head;
+    /* WIFIDMX: when something was last heard on a controller's line. The next
+    packet waits until the line has been quiet long enough after it (upstream
+    timed only from the end of the request: esp_dmx issue 177). */
+    int64_t last_rx_timestamp;
+    /* WIFIDMX: when the packet being sent was started, so dmx_wait_sent() can
+    tell one that will never finish. */
+    int64_t send_start_timestamp;
     union {
       struct {
         rdm_pid_t last_request_pid;  // The PID of the last packet which targeted this device. Is only used when this device is a DMX responder.

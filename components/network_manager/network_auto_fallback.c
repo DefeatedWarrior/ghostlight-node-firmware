@@ -128,8 +128,9 @@ static void copy_bounded(char *dst, size_t dst_size, const char *src)
 
 static void load_settings(settings_t *t)
 {
-    const config_t *c = config_get();
     memset(t, 0, sizeof(*t));
+    config_lock();   /* a consistent copy while the web UI may be saving */
+    const config_t *c = config_get();
     t->mode = c->network.mode <= NET_MODE_LAST ? c->network.mode : NET_MODE_AUTO;
     t->ap_always = c->network.ap_always;
     t->eth_static = c->network.eth_use_static_ip;
@@ -142,6 +143,7 @@ static void load_settings(settings_t *t)
     copy_bounded(t->ap_ssid, sizeof(t->ap_ssid), c->network.ap_ssid);
     copy_bounded(t->ap_pw, sizeof(t->ap_pw), c->network.ap_password);
     t->ap_ch = c->network.ap_channel;
+    config_unlock();
 }
 
 static ip_config_t eth_ip_config(const settings_t *t)

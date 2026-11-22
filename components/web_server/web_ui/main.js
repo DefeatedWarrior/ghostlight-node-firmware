@@ -96,6 +96,43 @@ const MERGES = [
     [0, 'HTP: highest level wins'], [1, 'LTP: latest change wins'], [2, 'Last source to send wins'],
     [3, 'Backup: primary, then backup address'], [4, 'No merge: first source only'],
 ];
+const RULE_TYPES = [['patch', 'Patch'], ['limit', 'Limit'], ['park', 'Park']];
+const RULES_MAX = 8;
+const SEND_LIST_MAX = 4;   /* input port unicast addresses (config CONFIG_SEND_LIST_MAX) */
+
+/** Why a channel rule is not valid (as the firmware checks it), or '' */
+function ruleProblem(r) {
+    const ok = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+    if (!RULE_TYPES.some(([t]) => t === r.type)) return 'Pick patch, limit or park';
+    if (!ok(r.channel, 1, 512)) return 'The channel must be 1–512';
+    if (!ok(r.count, 1, 512) || r.channel + r.count - 1 > 512) return 'The channels must stay within 1–512';
+    if (r.type === 'patch') {
+        if (!ok(r.from, 1, 512) || r.from + r.count - 1 > 512) return 'The channels it copies must stay within 1–512';
+    } else if (!ok(r.level, 0, 255)) {
+        return 'The level must be 0–255';
+    }
+    return '';
+}
+
+function chRange(first, count) { return count > 1 ? `${first}–${first + count - 1}` : `${first}`; }
+
+/** A rule in words */
+function ruleText(r) {
+    if (ruleProblem(r)) return ruleProblem(r);
+    const many = r.count > 1;
+    const ch = `Channel${many ? 's' : ''} ${chRange(r.channel, r.count)}`;
+    const pct = v => `${v} (${Math.round(v / 2.55)}%)`;
+    if (r.type === 'patch') return `${ch} ${many ? 'output' : 'outputs'} what arrives on ${chRange(r.from, r.count)}.`;
+    if (r.type === 'limit') return `${ch} never ${many ? 'go' : 'goes'} above ${pct(r.level)}.`;
+    return `${ch} ${many ? 'stay' : 'stays'} at ${pct(r.level)}, whatever arrives.`;
+}
+
+/** Dotted IPv4 strings in the same subnet? */
+function sameSubnet(a, b, mask) {
+    const x = ipv4(a), y = ipv4(b), m = ipv4(mask);
+    return x !== null && y !== null && m !== null && ((x & m) >>> 0) === ((y & m) >>> 0);
+}
+
 const ROLES = {
     off: { label: 'Off', chip: '', help: 'The port is switched off. Pick a job for it.' },
     send: { label: 'Send', chip: 'out', help: 'Outputs DMX. Set levels with the faders, run test patterns and change the output timing.' },
@@ -628,7 +665,7 @@ const app = {
     },
 
     onPageShow(page) {
-        if (page === 'system') { this.loadCrash(); if (this.has('web_log')) this.startLog(); } else { this.stopLog(); }
+        if (page === 'system') { this.loadCrash(); this.loadHealth(); if (this.has('web_log')) this.startLog(); } else { this.stopLog(); }
         if (page === 'scenes') this.loadScenes();
         if (page === 'rdm') this.loadRdmDevices();
         if (page === 'tools') { this.loadTests(); this.loadSelfTest(); }
@@ -651,6 +688,8 @@ const app = {
         }
         if (n % 2 === 0) this.pollStatus();
         if (n % 2 === 1 && Date.now() - this.lastFrameAt > 3000) this.pollDmx();
+        if (n % 2 === 1 && !this.tester && this.page === 'overview') this.loadSources();
+        if (n % 5 === 1 && !this.tester && this.page === 'overview') this.loadNodes();
     },
 
     // ------------------------------------------------------------------------
@@ -658,6 +697,9 @@ const app = {
     // ------------------------------------------------------------------------
 
     renderSystemInfo(d) {
+        const notice = d.settings_notice || '';
+        setText('settingsNotice', notice);
+        $('settingsBanner').hidden = !notice;
         if (!d) return;
         setText('sysFw', d.firmware_version || '--');
         setText('sysBuilt', d.build_date ? `${d.build_date} ${d.build_time || ''}`.trim() : '--');
@@ -687,6 +729,11 @@ const app = {
                 `<span class="chip ${d.features[k] ? 'ok' : ''}" title="${d.features[k] ? 'built in' : 'not built in'}">${d.features[k] ? '' : '<s>'}${names[k]}${d.features[k] ? '' : '</s>'}</span>`).join('');
             this._setHtml(fe, html);
         }
+    },
+
+    async dismissSettingsNotice() {
+        $('settingsBanner').hidden = true;
+        try { await this.post('/api/system/notice/clear'); } catch (_) { /* shows again next poll */ }
     },
 
     async pollStatus() {
@@ -988,7 +1035,7 @@ const app = {
         let rdm = '--';
         if (p.rdm_available) {
             rdm = p.rdm_discovering ? 'Discovering…'
-                : p.rdm_tod_valid ? plural(p.rdm_devices, 'device') : 'Waiting for discovery';
+                : p.rdm_tod_valid ? plural(p.rdm_devices, 'device') + (p.rdm_list_full ? ' (list full)' : '') : 'Waiting for discovery';
         } else if (!input && p.mode !== 0) {
             rdm = 'Off';
         }
@@ -1013,8 +1060,8 @@ const app = {
                 html = p.mode === 0 ? '--' : 'None';
             } else {
                 html = p.sources.map(s => {
-                    const who = s.name ? `${esc(s.name)} <small>${esc(s.ip)}</small>` : esc(s.ip);
-                    const tags = [s.protocol === 'sACN' ? `sACN p${s.priority}` : esc(s.protocol)];
+                    const who = !s.ip ? esc(s.name) : s.name ? `${esc(s.name)} <small>${esc(s.ip)}</small>` : esc(s.ip);
+                    const tags = [s.protocol === 'sACN' ? `sACN p${s.priority}` : s.protocol === 'DMX' ? 'local DMX' : s.protocol];
                     if (s.backup) tags.push('backup');
                     if (s.per_address_priority) tags.push('per-address priority');
                     return `<div${s.contributing ? '' : ' style="opacity:.5"'}>${who} <span class="chip">${esc(tags.join(' · '))}</span></div>`;
@@ -1078,6 +1125,325 @@ const app = {
 
     refreshPorts() { if (this.tester) this.loadTester(); else this.loadPortsStatus(true); },
 
+    // ------------------------------------------------------------------------
+    // Signal check: every Art-Net / sACN sender heard, and what looks wrong
+    // ------------------------------------------------------------------------
+
+    async loadSources() {
+        this.once('sources', async () => {
+            try {
+                const d = await this.api('/api/network/sources', { quiet: true });
+                this.renderSources(d);
+            } catch (_) { /* next time */ }
+        });
+    },
+
+    // Other Art-Net nodes (their ArtPollReply)
+    async loadNodes() {
+        this.once('nodes', async () => {
+            try {
+                const d = await this.api('/api/network/nodes', { quiet: true });
+                this.nodes = d;
+                this.renderNodes(d);
+                /* the node just polled: the answers arrive within a second */
+                if (d.polled) setTimeout(() => { if (this.page === 'overview') this.loadNodes(); }, 1500);
+            } catch (_) { /* next time */ }
+        });
+    },
+
+    /** One entry per device: nodes send one reply per group of ports */
+    groupNodes(list) {
+        const map = new Map();
+        for (const r of list || []) {
+            const key = `${r.ip}|${r.mac}`;
+            let g = map.get(key);
+            if (!g) {
+                g = { ...r, ports: [] };
+                map.set(key, g);
+            }
+            g.ports.push(...(r.ports || []));
+            g.age_ms = Math.min(g.age_ms, r.age_ms);
+            g.conflict = g.conflict || r.conflict;
+            if (!g.short_name && r.short_name) g.short_name = r.short_name;
+        }
+        return [...map.values()];
+    },
+
+    nodeName(n) { return n.short_name || n.long_name || n.ip; },
+
+    renderNodes(d) {
+        if (!d) return;
+        const nodes = this.groupNodes(d.nodes);
+        const chip = $('nodesState');
+        if (chip) {
+            const clash = nodes.some(n => n.conflict);
+            chip.className = 'chip ' + (clash ? 'bad' : nodes.length ? 'ok' : '');
+            setText(chip, !d.listening ? 'Off' : clash ? 'Address clash' : nodes.length ? plural(nodes.length, 'node') : 'None found');
+        }
+        const sig = this.sigData || {};
+        const mine = (sig.ports || []);
+        const styles = ['', 'controller', 'media server', 'router', 'backup', 'config tool', 'visualiser'];
+        const protos = ['', 'MIDI', 'Avab', 'CMX', 'ADB', 'Art-Net', 'DALI'];
+        const rows = nodes.map(n => {
+            const ports = n.ports.map(p => {
+                const bits = [];
+                const proto = p.protocol ? ` ${esc(protos[p.protocol] || `type ${p.protocol}`)}` : '';
+                if (p.output) {
+                    const same = mine.filter(q => q.output && !q.local_only && q.protocol_mode !== 1 && q.artnet === p.out);
+                    bits.push(`Out ${p.out} <small>${netSubUni(p.out)}</small>${proto}${p.out_data ? ' <span class="chip ok">data</span>' : ''}` +
+                        same.map(q => ` <span class="chip">same as port ${q.port}</span>`).join(''));
+                }
+                if (p.input) {
+                    const same = mine.filter(q => q.input && q.protocol_mode !== 1 && q.artnet === p.in);
+                    bits.push(`In ${p.in} <small>${netSubUni(p.in)}</small>${proto}${p.in_data ? ' <span class="chip ok">data</span>' : ''}` +
+                        same.map(q => ` <span class="chip warn">port ${q.port} sends this too</span>`).join(''));
+                }
+                return bits.join(' · ');
+            }).filter(Boolean);
+            const tags = [];
+            if (styles[n.style]) tags.push(styles[n.style]);
+            if (n.dhcp) tags.push('DHCP');
+            const name = `${esc(this.nodeName(n))}${n.long_name && n.long_name !== n.short_name ? ` <small>${esc(n.long_name)}</small>` : ''}`;
+            return `<tr>
+                <td>${name}${tags.length ? ` <span class="chip">${esc(tags.join(' · '))}</span>` : ''}</td>
+                <td>${esc(n.ip)}${n.from && n.from !== n.ip ? ` <small>from ${esc(n.from)}</small>` : ''}${n.conflict ? ' <span class="chip bad">same IP as this node</span>' : ''}<br><small class="mono">${esc(n.mac)}</small></td>
+                <td>${ports.length ? ports.map(p => `<div>${p}</div>`).join('') : '<span class="help" style="display:inline">no ports</span>'}</td>
+                <td>${n.age_ms < 6000 ? 'now' : `${Math.round(n.age_ms / 1000)} s ago`}</td>
+            </tr>`;
+        });
+        this._setHtml($('nodesTable'), rows.join('') ||
+            `<tr><td colspan="4" class="empty">${d.listening ? 'No other Art-Net nodes answered' : 'Not listening (tester mode)'}</td></tr>`);
+    },
+
+    /** Address clashes between this node and the others, for the signal check */
+    nodeHints(d, add) {
+        const nodes = this.groupNodes(this.nodes && this.nodes.nodes);
+        for (const n of nodes.filter(n => n.conflict)) {
+            add('bad', 'IP address clash',
+                `${this.nodeName(n)} (MAC ${n.mac}) also uses ${n.ip}, this node's address. Devices that share an address lose packets and drop off the network. Give one of them another address.`);
+        }
+        const byIp = new Map();
+        for (const n of nodes.filter(n => !n.conflict)) byIp.set(n.ip, (byIp.get(n.ip) || []).concat([n]));
+        for (const [ip, list] of byIp) {
+            if (list.length < 2) continue;
+            add('bad', `Two devices share ${ip}`,
+                `${list.map(n => `${this.nodeName(n)} (MAC ${n.mac})`).join(' and ')} both use ${ip}. Give one of them another address.`);
+        }
+        /* two senders on one Art-Net universe: receivers merge them or flicker */
+        const senders = new Map();
+        const note = (u, who) => senders.set(u, [...new Set((senders.get(u) || []).concat([who]))]);
+        for (const p of (d.ports || []).filter(p => p.input && p.signal && p.protocol_mode !== 1)) note(p.artnet, `this node's port ${p.port}`);
+        for (const n of nodes) {
+            for (const p of n.ports.filter(p => p.input && p.in_data)) note(p.in, this.nodeName(n));
+        }
+        for (const [u, who] of senders) {
+            if (who.length < 2) continue;
+            add('warn', `Two inputs send ${this.uniText('artnet', u)}`,
+                `${who.join(' and ')} both send it. Receivers merge them or flicker between them: give one of them another Port-Address.`);
+        }
+    },
+
+    uniText(proto, u) { return proto === 'artnet' ? `Art-Net ${u} (${netSubUni(u)})` : `sACN ${u}`; },
+    who(s) { return s.name ? `${s.name} (${s.ip})` : s.ip; },
+    protoName(p) { return p === 'sacn' ? 'sACN' : 'Art-Net'; },
+
+    /** What looks wrong, worst first: [{cls, title, text}] */
+    sourceHints(d) {
+        const hints = [];
+        const add = (cls, title, text) => hints.push({ cls, title, text });
+        if (!d.listening) {
+            add('info', 'Tester mode', 'The node is a DMX tester now and does not listen to Art-Net or sACN.');
+            return hints;
+        }
+        const ifs = d.interfaces || [];
+        if (!ifs.length) add('bad', 'No network', 'The node has no network connection, so nothing can arrive.');
+        this.nodeHints(d, add);
+        const live = (d.sources || []).filter(s => s.age_ms < 2500);
+        const adverts = d.advertised || [];
+        const outs = (d.ports || []).filter(p => p.output);
+        const sacnOn = this.has('sacn');
+        const wants = p => {
+            const w = [];
+            if (p.protocol_mode !== 1) w.push(this.uniText('artnet', p.artnet));
+            if (sacnOn && p.protocol_mode !== 0) w.push(this.uniText('sacn', p.sacn));
+            return w.join(' or ');
+        };
+
+        const netOuts = outs.filter(p => !p.local_only);   /* splitters ignore the network */
+        if (!live.length && !adverts.length && ifs.length && netOuts.length) {
+            const addrs = ifs.map(i => `${i.ip} (${i.name === 'ap' ? 'own Wi-Fi' : i.name === 'wifi' ? 'Wi-Fi' : 'Ethernet'})`).join(', ');
+            add('bad', 'Nothing is arriving',
+                `No Art-Net${sacnOn ? ' or sACN' : ''} has reached the node in the last few seconds. Check that the console's output is on, ` +
+                `that it sends to this network and that a firewall on the computer is not blocking it. The node is at ${addrs}.`);
+        }
+
+        for (const p of outs) {
+            /* DMX from other ports' inputs (merged in, or instead of the network) */
+            const inputs = p.local_inputs || [];
+            let localOk = false;
+            for (const m of inputs) {
+                const src = (d.ports || []).find(q => q.port === m);
+                if (src && !src.input) {
+                    add('bad', `Port ${p.port}: port ${m} is not a DMX input`,
+                        `Port ${p.port} takes port ${m}'s DMX, but port ${m} is set to ${src.output ? 'output' : 'off'}. Set it to DMX input, or change port ${p.port}'s "DMX from another port", on the Ports page.`);
+                } else if (src && !src.signal) {
+                    add('warn', `Port ${p.port}: no DMX on port ${m}`,
+                        `Port ${p.port} takes port ${m}'s DMX input, but nothing arrives there. Check the cable from the desk and that the desk is outputting.`);
+                } else {
+                    localOk = true;
+                }
+            }
+            if (inputs.length && p.local_only) {
+                if (localOk) {
+                    if (inputs.length === 1) {
+                        add('info', `Port ${p.port} is a splitter`, `It outputs port ${inputs[0]}'s DMX input and ignores the network.`);
+                    } else {
+                        add('info', `Port ${p.port} merges DMX inputs`,
+                            `It merges the DMX inputs of ports ${inputs.slice(0, -1).join(', ')} and ${inputs[inputs.length - 1]} and ignores the network.`);
+                    }
+                }
+                continue;
+            }
+            const feeding = live.filter(s => (s.ports || []).includes(p.port) && !s.preview);
+            if (!feeding.length && localOk) continue;   /* the local DMX is its source */
+            if (feeding.length) {
+                if (feeding.length > 1 && p.merge_mode === 4) {
+                    add('warn', `Port ${p.port}: ${feeding.length} senders, merging off`,
+                        `Only the first one is used: ${feeding.map(s => this.who(s)).join(', ')}. Pick a merge mode on the Ports page if they should share the port.`);
+                } else if (feeding.length > 1 && (p.merge_mode === 1 || p.merge_mode === 2)) {
+                    add('info', `Port ${p.port}: ${feeding.length} senders`,
+                        `${feeding.map(s => this.who(s)).join(' and ')} both control it; the latest change wins.`);
+                }
+                const sacn = feeding.filter(s => s.protocol === 'sacn');
+                const top = Math.max(...sacn.map(s => s.priority ?? 100));
+                const hidden = sacn.filter(s => (s.priority ?? 100) < top && !s.pap);
+                if (hidden.length) {
+                    add('info', `Port ${p.port}: lower sACN priority ignored`,
+                        `${hidden.map(s => `${this.who(s)} (priority ${s.priority})`).join(', ')} ${hidden.length > 1 ? 'are' : 'is'} not used while a source with priority ${top} sends.`);
+                }
+                continue;
+            }
+            if (!live.length && !adverts.length) continue;   /* said above */
+            const filtered = live.filter(s => (s.filtered || []).includes(p.port));
+            const preview = live.filter(s => s.preview && (s.ports || []).includes(p.port));
+            const protoName = PROTOCOLS.find(([v]) => v === p.protocol_mode);
+            if (filtered.length) {
+                add('bad', `Port ${p.port} ignores what it is sent`,
+                    `${filtered.map(s => `${this.who(s)} sends ${this.uniText(s.protocol, s.universe)}`).join('; ')}, but the port's protocol is "${protoName ? protoName[1] : '?'}". Change the protocol on the Ports page.`);
+                continue;
+            }
+            if (preview.length) {
+                add('warn', `Port ${p.port}: preview data only`,
+                    `${preview.map(s => this.who(s)).join(', ')} sends sACN marked "preview" (for visualisers), which outputs ignore. Turn off preview / blind mode on the console.`);
+                continue;
+            }
+            const announced = adverts.filter(a => p.protocol_mode !== 0 && a.universes.includes(p.sacn));
+            if (announced.length) {
+                add('bad', `Port ${p.port}: sACN ${p.sacn} announced but not arriving`,
+                    `${announced.map(a => this.who(a)).join(', ')} says it sends sACN ${p.sacn}, but none of that data reaches the node. ` +
+                    'Check that the console really outputs that universe. A network switch that filters multicast (IGMP snooping with no querier) also does this: switch snooping off, or have the console send unicast to the node.');
+                continue;
+            }
+            const near = live.filter(s => !(s.ports || []).length && !(s.filtered || []).length && (
+                (s.protocol === 'artnet' && p.protocol_mode !== 1 && Math.abs(s.universe - p.artnet) === 1) ||
+                (s.protocol === 'sacn' && p.protocol_mode !== 0 && Math.abs(s.universe - p.sacn) === 1)));
+            const advNear = adverts.filter(a => p.protocol_mode !== 0 && !a.universes.includes(p.sacn) && a.universes.some(u => Math.abs(u - p.sacn) <= 1));
+            if (near.length || advNear.length) {
+                const what = near.map(s => `${this.who(s)} sends ${this.uniText(s.protocol, s.universe)}`)
+                    .concat(advNear.map(a => `${this.who(a)} sends sACN ${a.universes.join(', ')}`));
+                add('bad', `Port ${p.port}: universe off by one?`,
+                    `The port listens to ${wants(p)}, but ${what.join('; ')}. Many consoles count Art-Net universes from 1 while the Port-Address starts at 0.`);
+                continue;
+            }
+            const others = live.filter(s => !(s.ports || []).length);
+            const advOthers = adverts.filter(a => p.protocol_mode !== 0 && !a.universes.includes(p.sacn));
+            if (others.length || advOthers.length) {
+                const list = others.slice(0, 4).map(s => this.uniText(s.protocol, s.universe))
+                    .concat(advOthers.slice(0, 2).map(a => `sACN ${a.universes.slice(0, 6).join(', ')}${a.count > a.universes.length ? '…' : ''} (${this.who(a)})`));
+                add('warn', `Port ${p.port}: nothing on its universe`,
+                    `It listens to ${wants(p)}. The node hears ${[...new Set(list)].join(', ')}.`);
+            } else {
+                add('warn', `Port ${p.port}: nothing on its universe`, `It listens to ${wants(p)}.`);
+            }
+        }
+        if (!outs.length && (d.ports || []).length) {
+            add('info', 'No output ports', 'Every port is an input or off, so nothing received is output. Set a port to DMX output on the Ports page.');
+        }
+
+        /* quality: losses and gaps on what is in use */
+        const wifi = ifs.find(i => i.name === 'wifi');
+        const onlyWifi = wifi && !ifs.some(i => i.name === 'ethernet');
+        for (const s of live.filter(s => (s.ports || []).length)) {
+            if (s.lost_recent > 0) {
+                const tip = onlyWifi ? (s.protocol === 'sacn'
+                    ? ' Over Wi-Fi, sACN multicast is often unreliable: send unicast to the node if the console can.'
+                    : ' Wi-Fi drops packets: move the node closer to the access point, or use Ethernet.') : ' Check cables and switches between the console and the node.';
+                add('warn', `Losing packets from ${this.who(s)}`, `${plural(s.lost_recent, 'packet')} missing on ${this.uniText(s.protocol, s.universe)} in the last 10–20 s.${tip}`);
+            } else if (s.max_gap_ms > 1200 && s.rate >= 2) {
+                add('warn', `Gaps from ${this.who(s)}`,
+                    `Up to ${(s.max_gap_ms / 1000).toFixed(1)} s between packets on ${this.uniText(s.protocol, s.universe)}. Long gaps can make fixtures flicker or trigger the failsafe.`);
+            }
+        }
+        if (wifi && wifi.rssi !== undefined && wifi.rssi < -72) {
+            add('warn', 'Weak Wi-Fi signal', `The node's Wi-Fi signal is ${wifi.rssi} dBm. Below about -70 dBm, DMX over Wi-Fi gets choppy.`);
+        }
+
+        /* subnet: Art-Net still arrives, but the console may not find the node */
+        const lan = ifs.filter(i => i.name !== 'ap');
+        const stray = live.filter(s => s.protocol === 'artnet' && lan.length && !ifs.some(i => sameSubnet(s.ip, i.ip, i.netmask)));
+        if (stray.length) {
+            const me = lan.map(i => `${i.ip} / ${i.netmask}`).join(', ');
+            add('info', 'Console on another subnet',
+                `${[...new Set(stray.map(s => s.ip))].join(', ')} ${stray.length > 1 ? 'are' : 'is'} outside the node's network (${me}). Data still arrives, but the console may not list the node or reach it directly. Put both in the same range, e.g. 2.x.x.x / 255.0.0.0 for Art-Net.`);
+        }
+
+        for (const p of (d.ports || []).filter(p => p.output && p.rules)) {
+            add('info', `Port ${p.port} has channel rules`, 'Patches, limits or parks change what it outputs. See the Ports page if channels look stuck or swapped.');
+        }
+        return hints;
+    },
+
+    renderSources(d) {
+        if (!d) return;
+        this.sigData = d;
+        const hints = this.sourceHints(d);
+        const worst = hints.some(h => h.cls === 'bad') ? 'bad' : hints.some(h => h.cls === 'warn') ? 'warn' : '';
+        const chip = $('sigState');
+        if (chip) {
+            chip.className = 'chip ' + (worst || 'ok');
+            setText(chip, worst === 'bad' ? 'Needs attention' : worst === 'warn' ? 'Check' : d.listening ? 'All good' : 'Off');
+        }
+        this._setHtml($('sigHints'), hints.map(h =>
+            `<div class="note ${h.cls}"><strong>${esc(h.title)}</strong>${esc(h.text)}</div>`).join(''));
+
+        const rows = (d.sources || []).map(s => {
+            const live = s.age_ms < 2500;
+            const used = (s.ports || []).map(p => `Port ${p}`);
+            const filt = (s.filtered || []).map(p => `Port ${p} (protocol off)`);
+            let usedBy = used.concat(filt).join(', ') || '<span class="help" style="display:inline">not used</span>';
+            if (s.preview) usedBy += ' <span class="chip warn">preview</span>';
+            const tags = [];
+            if (s.protocol === 'sacn') tags.push(`p${s.priority}`);
+            if (s.pap) tags.push('per-address');
+            const lost = s.sequenced === false ? '--'
+                : `${s.lost_recent.toLocaleString()}${s.lost ? ` <small>(${s.lost.toLocaleString()} total)</small>` : ''}`;
+            return `<tr${live ? '' : ' style="opacity:.55"'}>
+                <td>${s.name ? `${esc(s.name)} <small>${esc(s.ip)}</small>` : esc(s.ip)}</td>
+                <td>${esc(this.uniText(s.protocol, s.universe))}${tags.length ? ` <small>${esc(tags.join(' · '))}</small>` : ''}</td>
+                <td class="num">${live ? `${s.rate.toFixed(s.rate < 10 ? 1 : 0)}/s` : '--'}</td>
+                <td class="num"${s.lost_recent ? ' style="color:var(--warn)"' : ''}>${lost}</td>
+                <td class="num">${s.max_gap_ms ? `${s.max_gap_ms.toLocaleString()} ms` : '--'}</td>
+                <td>${live ? 'now' : `${Math.round(s.age_ms / 1000)} s ago`}</td>
+                <td>${usedBy}</td>
+            </tr>`;
+        });
+        this._setHtml($('sigTable'), rows.join('') ||
+            `<tr><td colspan="7" class="empty">${d.listening ? 'Nothing heard yet' : 'Not listening (tester mode)'}</td></tr>`);
+        const adv = (d.advertised || []).map(a =>
+            `${this.who(a)}: sACN ${a.universes.join(', ')}${a.count > a.universes.length ? ` and ${a.count - a.universes.length} more` : ''}`);
+        setText('sigAdverts', adv.length ? `sACN discovery — consoles announce: ${adv.join(' · ')}` : '');
+    },
+
     async blackoutPort(port) {
         try {
             await this.post(`/api/ports/${port}/blackout`);
@@ -1116,6 +1482,9 @@ const app = {
                                 <input type="number" name="universe_secondary" min="0" max="32767" placeholder="none">
                                 <small class="help">Only used by the Backup merge.</small></div>
                         </div>
+                        ${this.nports > 1 ? `<div class="field"><label>DMX from another port</label>
+                            <select name="local" onchange="app.localChanged(this.form)">${this.localOptions(n)}</select>
+                            <small class="help" data-local-help></small></div>` : ''}
                         ${this.has('rdm') ? `<div data-rdm-opt><label class="check"><input type="checkbox" name="rdm_enabled">
                             <span><strong>RDM on this output</strong><small>Find and address fixtures, and answer RDM over Art-Net. RDM controller mode always has it.</small></span></label></div>` : ''}
                         <div class="subcard">
@@ -1128,12 +1497,30 @@ const app = {
                             </div>
                             <small class="help">The defaults (44 Hz, 176 µs, 12 µs, 512 slots) suit almost every fixture. Lower the refresh or lengthen break / MAB for old or fussy fixtures. With RDM, break stays within 176–352 µs and MAB within 12–88 µs.</small>
                         </div>
+                        <div class="subcard">
+                            <div class="card-head" style="margin-bottom:4px"><h3 style="margin:0">Channel rules</h3>
+                                <div class="actions"><button type="button" class="btn xs" data-rule-add onclick="app.addRule(${n})">Add rule</button></div></div>
+                            <div data-rules></div>
+                            <small class="help">Change what this port outputs, whatever the console sends. <strong>Patch</strong> outputs one block of channels on others, <strong>Limit</strong> caps channels at a level, <strong>Park</strong> holds them at a level. Patches go first, then limits, then parks. Up to ${RULES_MAX} rules.</small>
+                        </div>
                         ${this.has('scenes') ? `<div class="fields two section">
                             <div class="field"><label>Power-on scene</label><select name="startup_scene" data-scene-select><option value="0">None</option></select>
                                 <small class="help">Shown from power-on until a console sends data, then it fades out.</small></div>
                             <div class="field"><label>Failsafe scene</label><select name="failsafe_scene" data-scene-select><option value="0">None (zero)</option></select>
                                 <small class="help">Shown when every source is lost and the failsafe is set to "Failsafe scene".</small></div>
                         </div>` : ''}
+                    </div>
+                    <div data-in-only hidden>
+                        <div class="fields two">
+                            <div class="field"><label>Send to</label><select name="send_to" onchange="app.sendToChanged(this.form)">
+                                <option value="all">Everyone (broadcast / multicast)</option>
+                                <option value="nodes">Art-Net nodes on this universe</option>
+                                <option value="list">These addresses</option></select>
+                                <small class="help" data-send-help></small></div>
+                            <div class="field" data-send-list><label>Addresses</label>
+                                <input type="text" name="send_list" placeholder="10.0.0.20, 10.0.0.21" autocomplete="off" spellcheck="false">
+                                <small class="help">Up to ${SEND_LIST_MAX}, separated by commas. Art-Net and sACN both go to each one.</small></div>
+                        </div>
                     </div>
                     <div class="btn-row section"><button type="submit" class="btn primary">Apply</button></div>
                 </form>
@@ -1145,6 +1532,63 @@ const app = {
                 sel.addEventListener('change', () => { sel.dataset.want = sel.value; }));
             this.portModeChanged(f);
         });
+    },
+
+    // DMX from another port's input: merged with the network, or on its own (splitter)
+    localOptions(n) {
+        let html = '<option value="0">None</option>';
+        for (const m of this.portList()) {
+            if (m === n) continue;
+            html += `<option value="${m}:merge">Port ${m} input, merged with the network</option>` +
+                    `<option value="${m}:only">Port ${m} input only (splitter)</option>`;
+        }
+        return html;
+    },
+
+    readLocal(f) {
+        const sel = f.elements.local;
+        if (!sel) return null;
+        const [m, how] = sel.value.split(':');
+        const input = parseInt(m) || 0;
+        return { local_inputs: input ? [input] : [], local_only: input > 0 && how === 'only' };
+    },
+
+    localChanged(f) {
+        const help = f.querySelector('[data-local-help]');
+        const l = this.readLocal(f);
+        if (!help || !l) return;
+        const m = l.local_inputs[0];
+        if (!m) {
+            setText(help, 'Plug a desk or another DMX line into a port set to DMX input, and this port can output it too.');
+            help.classList.remove('bad');
+            return;
+        }
+        const src = $('portForm' + m);
+        const srcMode = src ? parseInt(src.elements.mode.value) : 2;
+        const text = l.local_only
+            ? `Splitter: outputs port ${m}'s DMX frame by frame and ignores the network.`
+            : `Port ${m}'s DMX joins the network sources like another console, using this port's merge mode.`;
+        const notInput = !this.isInput(srcMode);
+        setText(help, notInput ? `${text} Port ${m} is not a DMX input yet: set it to DMX input.` : text);
+        help.classList.toggle('bad', notInput);
+    },
+
+    readSendList(f) {
+        const el = f.elements.send_list;
+        return el ? el.value.split(/[\s,;]+/).filter(Boolean) : [];
+    },
+
+    sendToChanged(f) {
+        const sel = f.elements.send_to;
+        if (!sel) return;
+        const list = f.querySelector('[data-send-list]');
+        if (list) list.hidden = sel.value !== 'list';
+        const sacn = this.has('sacn') ? ' sACN stays multicast.' : '';
+        setText(f.querySelector('[data-send-help]'), {
+            all: 'Every device on the network gets it. On Wi-Fi the access point may hold broadcast and multicast back by a few hundred ms and never resends a lost one: pick unicast there.',
+            nodes: `Art-Net goes only to the nodes that answer ArtPoll with an output on this universe, as Art-Net 4 asks (everyone while none answer).${sacn}`,
+            list: 'Only these devices get it, unicast: the reliable choice on Wi-Fi.',
+        }[sel.value] || '');
     },
 
     fillPortForm(n, pc) {
@@ -1167,14 +1611,91 @@ const app = {
             const sel = f.elements[k];
             if (sel) { sel.dataset.want = String(pc[k] || 0); sel.value = sel.dataset.want; }
         }
+        this.renderRules(n, Array.isArray(pc.rules) ? pc.rules : []);
+        if (f.elements.local) {
+            const m = (pc.local_inputs || [])[0] || 0;
+            f.elements.local.value = m ? `${m}:${pc.local_only ? 'only' : 'merge'}` : '0';
+            if (f.elements.local.selectedIndex < 0) f.elements.local.value = '0';
+        }
+        if (f.elements.send_to) {
+            f.elements.send_to.value = pc.send_to || 'all';
+            if (f.elements.send_to.selectedIndex < 0) f.elements.send_to.value = 'all';
+            f.elements.send_list.value = (pc.send_list || []).join(', ');
+        }
         this.showNetSubUni(f.elements.universe);
         this.portModeChanged(f);
+    },
+
+    // Channel rules (patch / limit / park), edited in the port form
+
+    readRules(n) {
+        const f = $('portForm' + n);
+        if (!f) return [];
+        return [...f.querySelectorAll('[data-rule]')].map(row => {
+            const v = name => { const el = row.querySelector(`[name="${name}"]`); return el ? Number(el.value) : undefined; };
+            const r = { type: row.querySelector('[name="r_type"]').value, channel: v('r_channel'), count: v('r_count') };
+            if (r.type === 'patch') r.from = v('r_from'); else r.level = v('r_level');
+            return r;
+        });
+    },
+
+    renderRules(n, list) {
+        const f = $('portForm' + n);
+        const box = f ? f.querySelector('[data-rules]') : null;
+        if (!box) return;
+        const num = (name, label, v, lo, hi) =>
+            `<label>${label}<input type="number" name="${name}" min="${lo}" max="${hi}" value="${esc(v ?? '')}" oninput="app.ruleInput(${n}, this)"></label>`;
+        box.innerHTML = list.length ? list.map((r, i) => `
+            <div class="rule-row" data-rule="${i}">
+                <label class="rule-type">Rule ${i + 1}<select name="r_type" onchange="app.ruleTypeChanged(${n})">${RULE_TYPES.map(([t, l]) =>
+                    `<option value="${t}"${t === r.type ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+                <button type="button" class="btn xs ghost" onclick="app.removeRule(${n}, ${i})">Remove</button>
+                ${num('r_channel', 'Channel', r.channel, 1, 512)}
+                ${num('r_count', 'Count', r.count, 1, 512)}
+                ${r.type === 'patch' ? num('r_from', 'From', r.from, 1, 512) : num('r_level', 'Level', r.level, 0, 255)}
+                <small></small>
+            </div>`).join('') : '<p class="help" style="margin:6px 0 8px">No rules: the port outputs what arrives.</p>';
+        box.querySelectorAll('[data-rule]').forEach(row => this.ruleInput(n, row.querySelector('input')));
+        const add = f.querySelector('[data-rule-add]');
+        if (add) add.disabled = list.length >= RULES_MAX;
+    },
+
+    ruleInput(n, input) {
+        const row = input && input.closest('[data-rule]');
+        if (!row) return;
+        const r = this.readRules(n)[Number(row.dataset.rule)];
+        row.classList.toggle('bad', !!ruleProblem(r));
+        setText(row.querySelector('small'), ruleText(r));
+    },
+
+    addRule(n) {
+        const list = this.readRules(n);
+        if (list.length >= RULES_MAX) return;
+        list.push({ type: 'park', channel: 1, count: 1, level: 255 });
+        this.renderRules(n, list);
+    },
+
+    removeRule(n, i) {
+        const list = this.readRules(n);
+        list.splice(i, 1);
+        this.renderRules(n, list);
+    },
+
+    ruleTypeChanged(n) {
+        /* a patch needs "from", the others a level: fill in the one it lacks */
+        this.renderRules(n, this.readRules(n).map(r => {
+            if (r.type === 'patch' && !Number.isInteger(r.from)) r.from = 1;
+            if (r.type !== 'patch' && !Number.isInteger(r.level)) r.level = r.type === 'limit' ? 128 : 255;
+            return r;
+        }));
     },
 
     portModeChanged(f) {
         const m = parseInt(f.elements.mode.value);
         const out = m === 1 || m === 3;
         f.querySelectorAll('[data-out-only]').forEach(el => { el.hidden = !out; });
+        f.querySelectorAll('[data-in-only]').forEach(el => { el.hidden = !this.isInput(m); });
+        this.sendToChanged(f);
         const ro = f.querySelector('[data-rdm-opt]');
         if (ro) ro.hidden = m !== 1;
         const help = {
@@ -1187,6 +1708,11 @@ const app = {
         setText(f.querySelector('[data-mode-help]'), help);
         const ph = f.querySelector('[data-proto-help]');
         if (ph) setText(ph, this.isInput(m) ? 'What the input sends on the network.' : m === 0 ? '' : 'Which network data the output listens to.');
+        /* a port's mode decides whether the others can take its DMX */
+        for (const k of this.portList()) {
+            const g = $('portForm' + k);
+            if (g) this.localChanged(g);
+        }
     },
 
     showNetSubUni(input) {
@@ -1216,6 +1742,34 @@ const app = {
         if (g('rdm_enabled')) pc.rdm_enabled = g('rdm_enabled').checked;
         if (g('startup_scene')) pc.startup_scene = clampInt(g('startup_scene').value, 0, 255, 0);
         if (g('failsafe_scene')) pc.failsafe_scene = clampInt(g('failsafe_scene').value, 0, 255, 0);
+        const local = this.readLocal(f);
+        if (local) Object.assign(pc, local);
+        if (g('send_to')) {
+            const list = this.readSendList(f);
+            const bad = list.find(a => { const v = ipv4(a); return v === null || v === 0 || v >= 0xE0000000; });
+            if (bad) {
+                this.toast(`Port ${port}: "${bad}" is not an address to send to`, 'error');
+                return false;
+            }
+            if (list.length > SEND_LIST_MAX) {
+                this.toast(`Port ${port}: at most ${SEND_LIST_MAX} addresses`, 'error');
+                return false;
+            }
+            pc.send_to = g('send_to').value;
+            if (pc.send_to === 'list' && !list.length) {
+                this.toast(`Port ${port}: give at least one address to send to`, 'error');
+                return false;
+            }
+            pc.send_list = list;
+        }
+        if (f.querySelector('[data-rules]')) {
+            pc.rules = this.readRules(port);
+            const bad = pc.rules.findIndex(r => ruleProblem(r));
+            if (bad >= 0) {
+                this.toast(`Port ${port}, rule ${bad + 1}: ${ruleProblem(pc.rules[bad])}`, 'error');
+                return false;
+            }
+        }
         try {
             await this.post('/api/config', { [`port${port}`]: pc });
             this.toast(`Port ${port} applied`, 'success');
@@ -1766,7 +2320,7 @@ const app = {
             else if (role === 'off') sub = 'switched off';
             else if (role === 'receive') sub = p.signal ? `${a.refresh_hz ?? '--'} Hz · ${a.slots ?? '--'} slots` : 'no signal';
             else if (p.test) sub = `test pattern: ${p.test.mode}`;
-            else if (role === 'rdm') sub = p.rdm_discovering ? 'discovering…' : (p.rdm_tod_valid ? plural(p.rdm_devices, 'device') : 'sending');
+            else if (role === 'rdm') sub = p.rdm_discovering ? 'discovering…' : (p.rdm_tod_valid ? plural(p.rdm_devices, 'device') + (p.rdm_list_full ? ' (list full)' : '') : 'sending');
             else sub = p.timing ? `sending ${p.timing.rate_hz} Hz` : 'sending';
             setText('tsTabSub' + n, sub);
             const tab = $('tsTab' + n);
@@ -1879,6 +2433,7 @@ const app = {
             ['Framing errors', a.err_framing ?? 0],
             ['Overflow', a.err_overflow ?? 0],
             ['Frames cut short', a.err_short ?? 0],
+            ['Frames skipped for a newer one', a.dropped_late ?? 0],
             ['RDM packets', a.rdm_packets ?? 0],
             ['Other start codes', a.alt_start_codes ? `${a.alt_start_codes} <small>(last ${hex2(a.last_alt_start_code)})</small>` : 'none'],
             ['Break / MAB', this.timingText(a)],
@@ -2217,6 +2772,7 @@ const app = {
             af.elements.ap_password.value = '';
             af.elements.ap_open.checked = !!net.ap_open;
             af.elements.ap_channel.value = net.ap_channel || 1;
+            if (af.elements.ap_captive) af.elements.ap_captive.checked = net.ap_captive !== false;
             this.showApOpen();
         }
         const profiles = Array.isArray(net.wifi_profiles) ? net.wifi_profiles.map(p => ({ ...p })) : [];
@@ -2759,6 +3315,7 @@ const app = {
         }
         if (!(ch >= 1 && ch <= 13)) { this.toast('The channel must be 1–13', 'error'); return false; }
         const net = { ap_ssid: ssid, ap_channel: ch };
+        if (f.elements.ap_captive) net.ap_captive = f.elements.ap_captive.checked;
         if (pw || open !== wasOpen) net.ap_password = pw;
         const changedLogin = 'ap_password' in net || (this.netCfg && this.netCfg.ap_ssid !== ssid);
         const warn = [];
@@ -2776,6 +3333,7 @@ const app = {
             if (this.netCfg) {
                 this.netCfg.ap_ssid = ssid;
                 this.netCfg.ap_channel = ch;
+                if ('ap_captive' in net) this.netCfg.ap_captive = net.ap_captive;
                 if ('ap_password' in net) this.netCfg.ap_open = open;
             }
             f.elements.ap_password.value = '';
@@ -2938,7 +3496,11 @@ const app = {
             (cfg.network.wifi_profiles || []).forEach(p => { delete p.password; delete p.has_password; });
         }
         const from = meta.node ? ` from "${meta.node}"${meta.created ? ` (${meta.created.slice(0, 10)})` : ''}` : '';
-        if (!confirm(`Restore the settings${from}? The current settings are replaced` +
+        const here = (this.info && this.info.board) || '';
+        const other = meta.board && here && meta.board !== here
+            ? `Careful: this backup was saved on a different board (${meta.board}; this node is ${here}). ` +
+              'Port settings may not fit it.\n\n' : '';
+        if (!confirm(`${other}Restore the settings${from}? The current settings are replaced` +
                      (withNet ? ' and the network may reconnect at a different address.' : ' (network settings are kept).'))) {
             return false;
         }
@@ -3018,6 +3580,31 @@ const app = {
     },
 
     downloadLog() { this.download('/api/diag/log.txt', 'esp-node-log.txt'); },
+
+    async loadHealth() {
+        const body = $('healthBody');
+        if (!body) return;
+        try {
+            const h = await this.api('/api/diag/health', { quiet: true });
+            const lowRam = h.internal_min_free < h.internal_low;
+            const stacks = h.stacks || [];
+            const rows = stacks.slice(0, 8).map(s => {
+                const low = s.free < h.stack_low;
+                return `<dt>${esc(s.task)}</dt><dd>${low ? `<span class="chip bad">${s.free} bytes</span>` : `${s.free} bytes`}</dd>`;
+            }).join('');
+            body.innerHTML = `
+                <dl class="kv">
+                    <dt>Internal RAM free</dt><dd>${this.formatBytes(h.internal_free)}</dd>
+                    <dt>Lowest since start</dt><dd>${lowRam ? `<span class="chip bad">${this.formatBytes(h.internal_min_free)}</span>` : this.formatBytes(h.internal_min_free)}</dd>
+                    <dt>Largest free block</dt><dd>${this.formatBytes(h.internal_largest)}</dd>
+                    ${h.psram_free ? `<dt>PSRAM free</dt><dd>${this.formatBytes(h.psram_free)} <small>(lowest ${this.formatBytes(h.psram_min_free)})</small></dd>` : ''}
+                </dl>
+                ${rows ? `<h3>Tightest task stacks</h3><dl class="kv">${rows}</dl>
+                <small class="help">Least stack each task has had left since start. Below ${h.stack_low} bytes a task is close to overflowing: send the log with a bug report.</small>` : ''}`;
+        } catch (_) {
+            body.innerHTML = '<small>Could not read the memory figures.</small>';
+        }
+    },
 
     async loadCrash() {
         const body = $('crashBody');

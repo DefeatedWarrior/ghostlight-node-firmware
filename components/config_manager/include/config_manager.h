@@ -82,6 +82,42 @@ typedef enum {
 #define CONFIG_DMX_SLOTS_MIN    24
 #define CONFIG_DMX_SLOTS_MAX    512
 
+/*
+ * Output processing per port, applied to the merged levels just before they
+ * go on the wire (node mode). Patches are applied first (in list order, each
+ * reading the unpatched levels), then limits, then parks, so a park always
+ * wins. JSON: "rules": [{"type":"patch","channel":101,"count":10,"from":1},
+ * {"type":"limit","channel":20,"count":2,"level":128},
+ * {"type":"park","channel":5,"count":1,"level":255}]
+ */
+#define CONFIG_PORT_RULES_MAX 8
+
+typedef enum {
+    PORT_RULE_PATCH = 1,   /* channel..channel+count-1 take the levels of from.. */
+    PORT_RULE_LIMIT,       /* never above level */
+    PORT_RULE_PARK,        /* always level, whatever arrives */
+} port_rule_type_t;
+#define PORT_RULE_FIRST PORT_RULE_PATCH
+#define PORT_RULE_LAST  PORT_RULE_PARK
+
+typedef struct {
+    uint8_t type;          /* port_rule_type_t */
+    uint8_t level;         /* limit / park level, 0-255 */
+    uint16_t channel;      /* first channel it changes, 1-512 */
+    uint16_t count;        /* number of channels, 1-(513-channel) */
+    uint16_t from;         /* patch: first channel it reads, 1-(513-count) */
+} port_rule_t;
+
+/* Where an input port sends its DMX (port_config_t.send_to) */
+typedef enum {
+    SEND_TO_ALL = 0,    /* Art-Net broadcast, sACN multicast */
+    SEND_TO_NODES,      /* ArtDmx unicast to the Art-Net nodes that output the universe
+                           (found by ArtPoll; broadcast while there are none); sACN multicast */
+    SEND_TO_LIST,       /* Art-Net and sACN unicast to send_list only */
+} send_to_t;
+#define SEND_TO_LAST SEND_TO_LIST
+#define CONFIG_SEND_LIST_MAX 4
+
 // Port configuration
 typedef struct {
     dmx_mode_t mode;
@@ -102,7 +138,33 @@ typedef struct {
     /* Scenes (scene ids, 0 = none) */
     uint8_t startup_scene;        // played at power-on until a console sends data
     uint8_t failsafe_scene;       // output when sources are lost and loss = LOSS_SCENE
+
+    /* Output processing (output ports, see port_rule_t) */
+    port_rule_t rules[CONFIG_PORT_RULES_MAX];
+    uint8_t rule_count;
+
+    /* Routing (output ports): the DMX arriving on other ports' inputs, merged
+     * with the network sources (local_only false) or without them (local_only
+     * true: the port ignores Art-Net / sACN; with one input it is a splitter
+     * that follows the input frame by frame). Bit p-1 = port p's input, never
+     * the port's own bit. JSON: "local_inputs": [2, 4], "local_only": false */
+    uint8_t local_inputs;
+    bool local_only;
+
+    /* Destinations (input ports), see send_to_t. Unicast is the one to use
+     * on Wi-Fi: access points hold broadcast and multicast until the next
+     * DTIM beacon (often 100-300 ms) and never resend a lost one.
+     * JSON: "send_to": "all" | "nodes" | "list", "send_list": ["10.0.0.20"] */
+    uint8_t send_to;
+    uint8_t send_count;
+    uint32_t send_list[CONFIG_SEND_LIST_MAX];   /* IPv4, network byte order */
 } port_config_t;
+
+/** "all" / "nodes" / "list" */
+const char *config_send_to_name(uint8_t send_to);
+
+/** Bits of every port on the board, for port_config_t.local_inputs */
+#define CONFIG_PORT_BITS ((uint8_t)((1u << CONFIG_DMX_PORTS) - 1))
 
 /* DMX tester mode (CONFIG_NODE_TESTER). The node stops being an Art-Net /
  * sACN node and each port does one tester job, driven from the web UI. */
@@ -149,6 +211,7 @@ typedef struct {
         char ap_ssid[32];
         char ap_password[64];
         uint8_t ap_channel;
+        bool ap_captive;              /* devices joining the AP get the web UI (captive portal) */
     } network;
     
     port_config_t ports[CONFIG_DMX_PORTS];   // ports[0] = port 1 ("port1" in JSON)
@@ -211,6 +274,43 @@ esp_err_t config_save(void);
  */
 config_t* config_get(void);
 
+/**
+ * The settings lock. config_get() hands out the live settings, which the web
+ * UI, the USB setup and Art-Net (ArtAddress, ArtIpProg) all change from their
+ * own tasks: hold the lock across any read-modify-write of them, so one change
+ * can't undo another made at the same moment. It is recursive, and the
+ * config_* functions here take it themselves. Keep it short: don't wait for
+ * other locks, the network or the DMX ports while holding it.
+ * config_save() may be called with it held (the file is written without it).
+ */
+void config_lock(void);
+void config_unlock(void);
+
+/**
+ * A copy of the settings, taken under the lock (sanitised first), for code
+ * that reads many of them and then does slow work. Caller frees.
+ * NULL if out of memory.
+ */
+config_t *config_snapshot(void);
+
+/** How config_load() found the settings at boot */
+typedef enum {
+    CONFIG_LOAD_NEW = 0,        /* no settings yet (first start): factory settings */
+    CONFIG_LOAD_OK,             /* config.json */
+    CONFIG_LOAD_FROM_BACKUP,    /* config.json damaged or missing: the copy from before the last save */
+    CONFIG_LOAD_RESET,          /* config.json damaged and no good copy: factory settings */
+} config_load_result_t;
+
+config_load_result_t config_load_result(void);
+
+/**
+ * What went wrong with the stored settings at boot, as a sentence for the
+ * user (storage erased, settings restored from the backup or reset), or NULL
+ * if nothing did or config_boot_notice_clear() was called.
+ */
+const char *config_boot_notice(void);
+void config_boot_notice_clear(void);
+
 /** Settings of DMX port @p port (1..CONFIG_DMX_PORTS), NULL if out of range */
 static inline port_config_t *config_port(config_t *c, int port)
 {
@@ -218,7 +318,8 @@ static inline port_config_t *config_port(config_t *c, int port)
 }
 
 /**
- * @brief Reset to default configuration
+ * @brief Reset to default configuration and save it. The backup copy of the
+ *        old settings is deleted too.
  * @return ESP_OK on success
  */
 esp_err_t config_reset_to_defaults(void);
@@ -258,6 +359,15 @@ const char *config_ap_password_problem(const char *pw);
  * NULL if it may be applied (every other value is clamped by the parser).
  */
 const char *config_update_problem(const struct cJSON *doc);
+
+/** Parse a dotted IPv4 address into network byte order. False if it isn't one. */
+bool config_parse_ipv4(const char *s, uint32_t *out);
+
+/** Why @p r is not a usable port rule, or NULL if it is fine */
+const char *config_port_rule_problem(const port_rule_t *r);
+
+/** JSON name of a rule type ("patch", "limit", "park"), NULL if unknown */
+const char *config_port_rule_name(uint8_t type);
 
 /** "off" / "send" / "receive" / "rdm" */
 const char *config_tester_role_name(uint8_t role);

@@ -5,12 +5,16 @@
  *                task, which pulls a fresh merged frame for every frame it sends.
  * Input ports:   DMX input task -> on change (plus a short repeat and a 1 s
  *                keepalive) -> ArtDmx and/or sACN.
+ * Local DMX:     DMX input task -> merge engine of each output port that takes
+ *                that input (merged with the network, or alone as a splitter,
+ *                which then sends a DMX frame for every frame received).
  * Sync:          ArtSync / E1.31 sync packets latch the merged levels and
  *                trigger the DMX frame straight away.
  *
  * Everything here runs on the network / DMX tasks: it reads g_app.route and
  * hands anything slow to the main task through g_app.events.
  */
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
@@ -21,12 +25,16 @@
 #include "sacn_transmitter.h"
 #include "merge_engine.h"
 #include "dmx_tools.h"
+#include "port_rules.h"
+#include "source_monitor.h"
 #include "app.h"
 
 static const char *TAG = "main";
 
 #define INPUT_KEEPALIVE_US    (1000 * 1000)   /* resend unchanged input every 1 s */
 #define INPUT_REPEAT_FRAMES   3               /* send each change 3 times */
+#define APP_NOT_ROUTED_NOTE_US (5 * 1000 * 1000) /* "not routed" log at most every 5 s */
+#define INPUT_NODES_CHECK_US  (1000 * 1000)   /* send_to "nodes": look them up every 1 s */
 
 void app_on_network_up(void)
 {
@@ -64,9 +72,18 @@ void app_on_artnet_dmx(uint16_t universe, const uint8_t *data,
 {
     bool routed = false;
 
+    srcmon_packet_t seen = {
+        .proto = SRCMON_ARTNET,
+        .ip = source_ip,
+        .universe = universe,
+        .sequence = sequence,
+        .slots = length,
+    };
+    srcmon_note(&seen);   /* routed or not: the signal check lists everything */
+
     for (int p = 0; p < NPORTS; p++) {
         const route_t *r = &g_app.route[p];
-        if (!app_mode_is_output(r->mode) || r->proto == PROTOCOL_SACN_ONLY) continue;
+        if (!app_mode_is_output(r->mode) || r->proto == PROTOCOL_SACN_ONLY || r->local_only) continue;
 
         bool primary = (universe == r->artnet);
         bool backup = !primary && r->merge == MERGE_MODE_BACKUP &&
@@ -94,25 +111,47 @@ void app_on_artnet_dmx(uint16_t universe, const uint8_t *data,
         return;
     }
 
-    /* Universe nobody listens to: the most common cause of "no output". */
-    static uint32_t miss_count = 0;
-    static uint16_t last_miss = 0xFFFF;
-    miss_count++;
-    if (universe != last_miss || (miss_count % 500) == 1) {
-        last_miss = universe;
+    /* Universe nobody listens to: the most common cause of "no output", so say
+     * so, but at most every few seconds. A console line takes milliseconds and
+     * blocks this task; logging every stray packet capped Art-Net at ~130
+     * packets/s on a network carrying other universes. */
+    static int64_t next_note_us;
+    static uint32_t missed;
+    missed++;
+    int64_t now = esp_timer_get_time();
+    if (now >= next_note_us) {
+        next_note_us = now + APP_NOT_ROUTED_NOTE_US;
         char on[8 * NPORTS + 1];
         size_t o = 0;
         on[0] = '\0';
         for (int p = 0; p < NPORTS && o < sizeof(on); p++) {
             o += snprintf(on + o, sizeof(on) - o, "%s%u", p ? ", " : "", g_app.route[p].artnet);
         }
-        ESP_LOGW(TAG, "Art-Net %u:%u:%u (port-address %u) not routed; ports are on %s",
-                 (universe >> 8) & 0x7F, (universe >> 4) & 0xF, universe & 0xF, universe, on);
+        ESP_LOGW(TAG, "Art-Net %u:%u:%u (port-address %u) not routed (%" PRIu32
+                 " such packets since the last note); ports are on %s",
+                 (universe >> 8) & 0x7F, (universe >> 4) & 0xF, universe & 0xF, universe,
+                 missed, on);
+        missed = 0;
     }
 }
 
 void app_on_sacn_dmx(const sacn_packet_info_t *pkt, void *user_data)
 {
+    if (!pkt->terminated) {
+        srcmon_packet_t seen = {
+            .proto = SRCMON_SACN,
+            .ip = pkt->source_ip,
+            .cid = pkt->cid,
+            .universe = pkt->universe,
+            .name = pkt->source_name,
+            .priority = pkt->priority,
+            .start_code = pkt->start_code,
+            .preview = pkt->preview,
+            .sequence = pkt->sequence,
+            .slots = pkt->length,
+        };
+        srcmon_note(&seen);
+    }
     if (pkt->preview && !pkt->terminated) {
         return;   /* preview data is for visualisers, not live output */
     }
@@ -120,7 +159,7 @@ void app_on_sacn_dmx(const sacn_packet_info_t *pkt, void *user_data)
     bool routed = false;
     for (int p = 0; p < NPORTS; p++) {
         const route_t *r = &g_app.route[p];
-        if (!app_mode_is_output(r->mode) || r->proto == PROTOCOL_ARTNET_ONLY) continue;
+        if (!app_mode_is_output(r->mode) || r->proto == PROTOCOL_ARTNET_ONLY || r->local_only) continue;
         if (pkt->universe != r->sacn) continue;
 
         merge_input_t in = {
@@ -173,6 +212,29 @@ void app_on_sacn_sync(uint16_t sync_universe, const uint8_t *cid, uint32_t sourc
     trigger_ports(merge_engine_sacn_sync(sync_universe));
 }
 
+/* Other nodes' ArtPollReply: the node list and address clash warnings */
+void app_on_artnet_poll_reply(const artnet_poll_reply_t *reply, bool ip_conflict, void *user_data)
+{
+    srcmon_note_node(reply, ip_conflict);
+    static int64_t last_warn_us;
+    int64_t now = esp_timer_get_time();
+    if (ip_conflict && (last_warn_us == 0 || now - last_warn_us > 60 * 1000000LL)) {
+        last_warn_us = now;
+        const uint8_t *m = reply->mac;
+        ESP_LOGW(TAG, "IP address clash: \"%s\" (MAC %02X:%02X:%02X:%02X:%02X:%02X) uses this node's address",
+                 reply->short_name, m[0], m[1], m[2], m[3], m[4], m[5]);
+    }
+}
+
+/* Universe discovery: only for the signal check (which universes a console
+ * sends that this node is not listening to) */
+void app_on_sacn_discovery(const uint8_t *cid, const char *source_name, uint32_t source_ip,
+                           uint8_t page, uint8_t last_page, const uint8_t *universes_be,
+                           uint16_t count, void *user_data)
+{
+    srcmon_note_discovery(cid, source_ip, source_name, page, last_page, universes_be, count);
+}
+
 /*
  * sACN multicast groups: the output ports' data universes plus every
  * synchronization universe their sources announce (joined while a source
@@ -183,7 +245,8 @@ void app_update_sacn_groups(void)
     uint16_t unis[SACN_MAX_UNIVERSES];
     uint8_t n = 0;
     for (int p = 0; p < NPORTS && n < SACN_MAX_UNIVERSES; p++) {
-        if (!app_mode_is_output(g_app.route[p].mode) || g_app.route[p].proto == PROTOCOL_ARTNET_ONLY) continue;
+        const route_t *r = &g_app.route[p];
+        if (!app_mode_is_output(r->mode) || r->proto == PROTOCOL_ARTNET_ONLY || r->local_only) continue;
         uint16_t cand[1 + MERGE_MAX_SOURCES];
         uint8_t c = 0;
         cand[c++] = g_app.route[p].sacn;
@@ -205,7 +268,8 @@ void app_update_sacn_groups(void)
 }
 
 /* DMX output task asks for every frame it sends. A running test pattern
- * (web DMX tools / self-test) replaces the output completely. */
+ * (web DMX tools / self-test) replaces the output completely; otherwise the
+ * port's patch / limit / park rules shape the merged levels. */
 void app_dmx_frame_source(uint8_t port, uint8_t *data, void *user_data)
 {
 #if CONFIG_NODE_DMX_TOOLS
@@ -218,6 +282,39 @@ void app_dmx_frame_source(uint8_t port, uint8_t *data, void *user_data)
     }
 #endif
     merge_engine_get_output(port, data);
+    port_rules_apply(port, data);
+}
+
+// ============================================================================
+// DMX input -> other ports (splitter / merger)
+// ============================================================================
+
+/* Output ports that take input port @p in_port's DMX. The input port number
+ * stands in for the sender's address in the merge engine. */
+static void feed_local_outputs(uint8_t in_port, const uint8_t *data)
+{
+    char name[16];
+    snprintf(name, sizeof(name), "Port %u DMX in", in_port);
+    for (int p = 0; p < NPORTS; p++) {
+        const route_t *o = &g_app.route[p];
+        if (!(o->local_mask & (1u << (in_port - 1))) || !app_mode_is_output(o->mode)) continue;
+        merge_input_t in = {
+            .protocol = SOURCE_PROTOCOL_DMX_IN,
+            .source_ip = in_port,
+            .name = name,
+            .priority = MERGE_ARTNET_PRIORITY,
+            .start_code = 0x00,
+            .data = data,
+            .length = 512,
+        };
+        merge_engine_push(p + 1, &in);
+        if (o->splitter) {
+            /* one input and no network: follow it frame by frame (with
+             * several inputs the port keeps its own refresh rate) */
+            dmx_handler_trigger_output(p + 1);
+        }
+        if (g_app.startup_mask & (1u << p)) xEventGroupSetBits(g_app.events, EV_TAKEOVER);
+    }
 }
 
 // ============================================================================
@@ -227,15 +324,19 @@ void app_dmx_frame_source(uint8_t port, uint8_t *data, void *user_data)
 void app_on_dmx_input(uint8_t port, const uint8_t *data, size_t size, void *user_data)
 {
     route_t *r = &g_app.route[port - 1];
-    (void)size;   /* always a full 512-slot buffer (short frames are zero-filled) */
+    (void)size;   /* always a full 512-slot buffer (dmx_handler fills in what a short frame leaves out) */
 #if CONFIG_NODE_TESTER
     if (g_app.tester) {
         if (!app_selftest_running()) dmx_tester_on_frame(port, data);
         return;   /* tester: nothing goes to the network */
     }
 #endif
-    if (!app_mode_is_input(r->mode) || !network_is_connected() || app_selftest_running()) {
-        return;   /* (self-test data stays off the network) */
+    if (!app_mode_is_input(r->mode) || app_selftest_running()) {
+        return;   /* (self-test data stays where it is) */
+    }
+    feed_local_outputs(port, data);
+    if (!network_is_connected()) {
+        return;
     }
 
     int64_t now = esp_timer_get_time();
@@ -249,8 +350,30 @@ void app_on_dmx_input(uint8_t port, const uint8_t *data, size_t size, void *user
     r->last_tx_us = now;
     r->tx_started = true;
 
+    /* Destinations: unicast to the list, or to the Art-Net nodes that output
+     * this universe (looked up once a second; broadcast while there are
+     * none), else broadcast / multicast */
+    uint32_t list[CONFIG_SEND_LIST_MAX];
+    int nlist = 0;
+    uint8_t send_to = r->send_to;
+    if (send_to == SEND_TO_LIST) {
+        nlist = r->send_count;
+        if (nlist > CONFIG_SEND_LIST_MAX) nlist = CONFIG_SEND_LIST_MAX;
+        for (int i = 0; i < nlist; i++) list[i] = r->send_list[i];
+    } else if (send_to == SEND_TO_NODES && now - r->nodes_checked_us >= INPUT_NODES_CHECK_US) {
+        r->nodes_checked_us = now;
+        r->node_count = (uint8_t)srcmon_output_nodes(r->artnet, r->node_ips, APP_SEND_NODES_MAX);
+    }
+
     if (r->proto != PROTOCOL_SACN_ONLY) {
-        artnet_transmitter_send_port(r->artnet, port - 1, r->last_tx, 512);
+        if (nlist) {
+            artnet_transmitter_send_port_to(r->artnet, port - 1, r->last_tx, 512, list, nlist);
+        } else if (send_to == SEND_TO_NODES && r->node_count) {
+            artnet_transmitter_send_port_to(r->artnet, port - 1, r->last_tx, 512,
+                                            r->node_ips, r->node_count);
+        } else {
+            artnet_transmitter_send_port(r->artnet, port - 1, r->last_tx, 512);
+        }
     }
 #if CONFIG_NODE_SACN
     if (r->proto != PROTOCOL_ARTNET_ONLY) {
@@ -259,7 +382,8 @@ void app_on_dmx_input(uint8_t port, const uint8_t *data, size_t size, void *user
             sacn_transmitter_terminate(r->tx_sacn_universe);
         }
         r->tx_sacn_universe = uni;
-        sacn_transmitter_send(uni, r->last_tx, 512, config_get()->node_info.sacn_priority);
+        sacn_transmitter_send_to(uni, r->last_tx, 512, config_get()->node_info.sacn_priority,
+                                 list, nlist);
     }
 #endif
     led_manager_pulse();

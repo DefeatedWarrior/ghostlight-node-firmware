@@ -80,6 +80,7 @@ p { margin: 0 0 10px; }
 code, .mono { font-family: var(--mono); font-size: 12.5px; }
 small, .help { color: var(--text-3); font-size: 12.5px; }
 .help { display: block; margin-top: 4px; }
+.help.bad { color: var(--bad); }
 svg.i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* ===== Shell ========================================================= */
@@ -153,6 +154,8 @@ svg.i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor;
 .banner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 12px 16px; margin: 0 auto 18px; max-width: 1280px;
     border-radius: var(--radius); border: 1px solid; }
 .banner.tester { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.banner.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.banner.warn .b-icon { background: var(--warn); color: #1a1205; }
 .banner .b-icon { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: var(--accent); color: var(--accent-ink); flex: none; }
 .banner .b-text { flex: 1; min-width: 220px; }
 .banner strong { display: block; }
@@ -285,6 +288,18 @@ tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .empty { color: var(--text-3); text-align: center; padding: 22px 8px; }
 td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
+
+/* ===== Channel rules, signal check =================================== */
+.rule-row { display: grid; gap: 6px 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: end; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.rule-row:last-child { border-bottom: 0; }
+.rule-row label { display: block; font-size: 12px; color: var(--text-3); min-width: 0; }
+.rule-row input, .rule-row select { width: 100%; min-height: 32px; padding: 4px 8px; margin-top: 3px; }
+.rule-row .rule-type { grid-column: 1 / 3; }
+.rule-row > button { justify-self: end; }
+.rule-row small { grid-column: 1 / -1; }
+.rule-row.bad small { color: var(--bad); }
+.hints { display: grid; gap: 8px; margin-bottom: 14px; }
+.hints .note strong { display: block; margin-bottom: 2px; }
 
 /* ===== Alerts ======================================================== */
 .note { padding: 11px 13px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); font-size: 13px; }
@@ -453,6 +468,15 @@ td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
             <button type="button" class="btn" onclick="app.setTesterMode(false)">Back to node mode</button>
         </div>
 
+        <div class="banner warn" id="settingsBanner" role="alert" hidden>
+            <div class="b-icon"><svg class="i" viewBox="0 0 24 24"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17.5v.01"/></svg></div>
+            <div class="b-text">
+                <strong>Settings problem at start-up</strong>
+                <small id="settingsNotice"></small>
+            </div>
+            <button type="button" class="btn" onclick="app.dismissSettingsNotice()">Got it</button>
+        </div>
+
         <!-- ================= Overview ================= -->
         <section class="page" id="page-overview">
             <div class="page-head">
@@ -466,6 +490,29 @@ td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
                 <div class="tile"><div class="tile-label">Firmware</div><div class="tile-value" id="ovFw">--</div><div class="tile-sub" id="ovHw">--</div></div>
             </div>
             <div class="grid" id="ovPorts"></div>
+            <div class="card section" id="sigCard" data-node-only>
+                <div class="card-head">
+                    <h2>Signal check</h2>
+                    <div class="actions"><span class="chip" id="sigState">Checking…</span></div>
+                </div>
+                <div class="hints" id="sigHints"></div>
+                <div class="table-wrap"><table>
+                    <thead><tr><th>Sender</th><th>Universe</th><th class="num">Rate</th><th class="num">Lost</th><th class="num">Longest gap</th><th>Last heard</th><th>Used by</th></tr></thead>
+                    <tbody id="sigTable"><tr><td colspan="7" class="empty">Nothing heard yet</td></tr></tbody>
+                </table></div>
+                <small class="help" id="sigAdverts"></small>
+            </div>
+            <div class="card section" id="nodesCard" data-node-only>
+                <div class="card-head">
+                    <h2>Other Art-Net nodes</h2>
+                    <div class="actions"><span class="chip" id="nodesState">Looking…</span></div>
+                </div>
+                <div class="table-wrap"><table>
+                    <thead><tr><th>Node</th><th>Address</th><th>Ports</th><th>Last heard</th></tr></thead>
+                    <tbody id="nodesTable"><tr><td colspan="4" class="empty">Looking…</td></tr></tbody>
+                </table></div>
+                <small class="help">While this page is open, the node asks the network every few seconds who is there (ArtPoll). Devices that only use sACN do not answer.</small>
+            </div>
             <div class="card section">
                 <div class="card-head">
                     <h2>DMX levels</h2>
@@ -615,6 +662,8 @@ td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
                             <small class="help" id="apPwHelp">8–63 characters. Leave empty to keep the current one.</small>
                         </div>
                         <div class="field"><label>Channel</label><input type="number" name="ap_channel" min="1" max="13" value="1"></div>
+                        <label class="check"><input type="checkbox" name="ap_captive" checked><span><strong>Open this page when a phone or laptop joins</strong>
+                            <small>Devices that join the node's own Wi-Fi show its setup page by themselves, like a hotel network. Turn it off if the pop-up gets in the way.</small></span></label>
                         <div class="btn-row"><button type="submit" class="btn primary">Apply</button></div>
                     </form>
                 </div>
@@ -808,6 +857,11 @@ td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
                             <small>Untick when copying settings to a second node, so both don't end up on the same static IP. Wi-Fi networks this node doesn't know need their password entered again.</small></span></label>
                         <div class="btn-row"><button type="submit" class="btn">Restore</button></div>
                     </form>
+                </div>
+                <div class="card">
+                    <div class="card-head"><h2>Memory</h2>
+                        <div class="actions"><button type="button" class="btn xs" onclick="app.loadHealth()">Refresh</button></div></div>
+                    <div id="healthBody"><small>Loading…</small></div>
                 </div>
                 <div class="card">
                     <div class="card-head"><h2>Crash report</h2></div>

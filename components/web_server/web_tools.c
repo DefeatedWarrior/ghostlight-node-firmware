@@ -16,6 +16,7 @@
  *   POST /api/system/identify      {"seconds":30} (0 = stop)
  */
 #include "web_internal.h"
+#include "web_stream.h"
 #include "diag.h"
 #include "config_manager.h"
 #include "esp_log.h"
@@ -96,6 +97,7 @@ void web_analysis_to_json(cJSON *o, const dmx_input_analysis_t *a)
     cJSON_AddNumberToObject(o, "err_framing", a->err_framing);
     cJSON_AddNumberToObject(o, "err_overflow", a->err_overflow);
     cJSON_AddNumberToObject(o, "err_short", a->err_short);
+    cJSON_AddNumberToObject(o, "dropped_late", a->dropped_late);
     cJSON_AddNumberToObject(o, "alt_start_codes", a->alt_start_codes);
     cJSON_AddNumberToObject(o, "last_alt_start_code", a->last_alt_start_code);
     cJSON_AddNumberToObject(o, "rdm_packets", a->rdm_packets);
@@ -126,14 +128,19 @@ static esp_err_t log_get(httpd_req_t *req)
     size_t n = diag_log_read(&pos, buf, LOG_CHUNK_MAX, &truncated);
     buf[n] = '\0';
 
-    cJSON *json = cJSON_CreateObject();
-    cJSON_AddNumberToObject(json, "pos", pos);
-    cJSON_AddBoolToObject(json, "truncated", truncated);
-    cJSON_AddNumberToObject(json, "capacity", (double)diag_log_capacity());
-    cJSON_AddStringToObject(json, "text", buf);
+    /* Not cJSON: it held the text three times over, 16 KB of internal RAM */
+    web_stream_t *w = web_stream_begin(req);
+    if (!w) {
+        free(buf);
+        return ESP_OK;
+    }
+    web_stream_printf(w, "{\"pos\":%lu,\"truncated\":%s,\"capacity\":%lu,\"text\":",
+                      (unsigned long)pos, truncated ? "true" : "false",
+                      (unsigned long)diag_log_capacity());
+    web_stream_string(w, buf);
     free(buf);
-    send_ok(req, json);
-    return ESP_OK;
+    web_stream_printf(w, "}");
+    return web_stream_end(w);
 }
 
 static esp_err_t log_download(httpd_req_t *req)
@@ -238,6 +245,37 @@ static esp_err_t crash_clear(httpd_req_t *req)
     }
     cJSON *json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "status", "ok");
+    send_ok(req, json);
+    return ESP_OK;
+}
+
+/* GET /api/diag/health: free memory and each task's stack headroom */
+static esp_err_t health_get(httpd_req_t *req)
+{
+    if (!web_require_auth(req)) return ESP_OK;
+    diag_health_t *h = malloc(sizeof(*h));
+    if (!h) {
+        web_send_error(req, 500, "Out of memory");
+        return ESP_OK;
+    }
+    diag_health(h);
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddNumberToObject(json, "internal_free", h->internal_free);
+    cJSON_AddNumberToObject(json, "internal_min_free", h->internal_min_free);
+    cJSON_AddNumberToObject(json, "internal_largest", h->internal_largest);
+    cJSON_AddNumberToObject(json, "internal_low", DIAG_INTERNAL_LOW_BYTES);
+    cJSON_AddNumberToObject(json, "psram_free", h->psram_free);
+    cJSON_AddNumberToObject(json, "psram_min_free", h->psram_min_free);
+    cJSON_AddNumberToObject(json, "stack_low", DIAG_STACK_LOW_BYTES);
+    cJSON *stacks = cJSON_AddArrayToObject(json, "stacks");
+    for (int i = 0; stacks && i < h->stacks; i++) {
+        cJSON *o = cJSON_CreateObject();
+        if (!o) break;
+        cJSON_AddStringToObject(o, "task", h->stack[i].name);
+        cJSON_AddNumberToObject(o, "free", h->stack[i].stack_free);
+        cJSON_AddItemToArray(stacks, o);
+    }
+    free(h);
     send_ok(req, json);
     return ESP_OK;
 }
@@ -461,6 +499,7 @@ void web_tools_register(httpd_handle_t server)
         { .uri = "/api/diag/crash",        .method = HTTP_GET,  .handler = crash_get },
         { .uri = "/api/diag/crash.bin",    .method = HTTP_GET,  .handler = crash_download },
         { .uri = "/api/diag/crash/clear",  .method = HTTP_POST, .handler = crash_clear },
+        { .uri = "/api/diag/health",       .method = HTTP_GET,  .handler = health_get },
         { .uri = "/api/tools/test",        .method = HTTP_GET,  .handler = test_get },
         { .uri = "/api/tools/test",        .method = HTTP_POST, .handler = test_post },
         { .uri = "/api/tools/analyzer",    .method = HTTP_POST, .handler = analyzer_post },

@@ -24,7 +24,14 @@ const web_server_hooks_t *web_hooks(void);
 /** Register the diagnostics / DMX tools routes (web_tools.c) */
 void web_tools_register(httpd_handle_t server);
 /** Number of routes web_tools_register() adds */
-#define WEB_TOOLS_ROUTES 12
+#define WEB_TOOLS_ROUTES 13
+
+/** Register the signal check route and the captive portal 404 handler (web_signal.c) */
+void web_signal_register(httpd_handle_t server);
+#define WEB_SIGNAL_ROUTES 2
+
+/** IPv4 address of the client, network byte order (0 if unknown) */
+uint32_t web_client_ip(httpd_req_t *req);
 
 /** Register the DMX tester routes (web_tester.c) */
 void web_tester_register(httpd_handle_t server);

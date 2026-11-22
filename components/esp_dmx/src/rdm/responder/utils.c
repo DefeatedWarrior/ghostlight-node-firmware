@@ -14,7 +14,7 @@ size_t rdm_write_ack(dmx_port_t dmx_num, const rdm_header_t *header,
   assert(rdm_format_is_valid(format));
   assert(format != NULL || pd == NULL);
   assert(pd != NULL || pdl == 0);
-  assert(pdl < 231);
+  assert(pdl <= 231);
   assert(dmx_driver_is_installed(dmx_num));
 
   // Build the response header
@@ -120,6 +120,37 @@ size_t rdm_simple_response_handler(dmx_port_t dmx_num,
       // Get the parameter from the request and write it to the RDM driver
       uint8_t pd[231];
       format = definition->set.request.format;
+
+      /* WIFIDMX: check what is being set (upstream took any value) */
+      if (definition->ds == RDM_DS_ASCII) {
+        if (header->pdl > RDM_ASCII_SIZE_MAX - 1) {
+          return rdm_write_nack_reason(dmx_num, header, RDM_NR_FORMAT_ERROR);
+        }
+        /* the whole field, or a shorter text keeps the old one's tail */
+        char text[RDM_ASCII_SIZE_MAX] = {0};
+        rdm_read_pd(dmx_num, format, text, sizeof(text));
+        dmx_parameter_set(dmx_num, header->sub_device, header->pid, text,
+                          sizeof(text));
+        return rdm_write_ack(dmx_num, header, NULL, NULL, 0);
+      } else if (definition->ds >= RDM_DS_UNSIGNED_BYTE &&
+                 definition->ds <= RDM_DS_SIGNED_DWORD) {
+        if (header->pdl != definition->pdl_size ||
+            header->pdl > sizeof(uint32_t)) {
+          return rdm_write_nack_reason(dmx_num, header, RDM_NR_FORMAT_ERROR);
+        }
+        const bool is_unsigned = definition->ds == RDM_DS_UNSIGNED_BYTE ||
+                                 definition->ds == RDM_DS_UNSIGNED_WORD ||
+                                 definition->ds == RDM_DS_UNSIGNED_DWORD;
+        uint32_t value = 0;  // big-endian on the wire
+        for (int i = 0; i < header->pdl; ++i) {
+          value = (value << 8) | dmx_driver[dmx_num]->dmx.data[24 + i];
+        }
+        if (is_unsigned && definition->max_value != 0 &&
+            (value < definition->min_value || value > definition->max_value)) {
+          return rdm_write_nack_reason(dmx_num, header,
+                                       RDM_NR_DATA_OUT_OF_RANGE);
+        }
+      }
       size_t size = rdm_read_pd(dmx_num, format, pd, header->pdl);
       dmx_parameter_set(dmx_num, header->sub_device, header->pid, pd, size);
       return rdm_write_ack(dmx_num, header, NULL, NULL, 0);
@@ -182,8 +213,6 @@ bool rdm_definition_set(dmx_port_t dmx_num, rdm_sub_device_t sub_device,
 
 const rdm_parameter_definition_t *rdm_definition_get(
     dmx_port_t dmx_num, rdm_sub_device_t sub_device, rdm_pid_t pid) {
-  assert(pid > 0);
-
   dmx_parameter_t *entry = dmx_parameter_get_entry(dmx_num, sub_device, pid);
   if (entry == NULL) {
     return NULL;

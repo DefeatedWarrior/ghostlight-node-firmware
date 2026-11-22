@@ -112,7 +112,10 @@ bool dmx_driver_install(dmx_port_t dmx_num, const dmx_config_t *config,
   // Allocate the DMX driver
   const size_t driver_size =
       sizeof(dmx_driver_t) + (sizeof(dmx_parameter_t) * root_param_count);
-  dmx_driver_t *driver = heap_caps_malloc(driver_size, MALLOC_CAP_8BIT);
+  /* WIFIDMX: internal RAM. The ISR runs from IRAM and must reach the driver
+  while the flash cache is off; plain 8-bit memory can be PSRAM. */
+  dmx_driver_t *driver =
+      heap_caps_malloc(driver_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   DMX_CHECK(driver != NULL, false, "DMX driver malloc error");
   dmx_driver[dmx_num] = driver;
   driver->mux = NULL;
@@ -123,8 +126,10 @@ bool dmx_driver_install(dmx_port_t dmx_num, const dmx_config_t *config,
   // Allocate mutex
   driver->mux = xSemaphoreCreateRecursiveMutex();
   if (driver->mux == NULL) {
-    dmx_driver_delete(dmx_num);
-    DMX_CHECK(driver->mux != NULL, false, "DMX driver mutex malloc error");
+    /* WIFIDMX: nothing is set up for dmx_driver_delete() to take apart */
+    heap_caps_free(driver);
+    dmx_driver[dmx_num] = NULL;
+    DMX_CHECK(false, false, "DMX driver mutex malloc error");
   }
 
   // Driver configuration
@@ -137,7 +142,7 @@ bool dmx_driver_install(dmx_port_t dmx_num, const dmx_config_t *config,
   driver->uid.dev_id = bswap32(*(uint32_t *)(mac + 2));
 #else
   // Set the device ID based on what the user set in the kconfig
-  driver->uid.dev_id = RDM_UID_DEVICE_UID;
+  driver->uid.dev_id = RDM_UID_DEVICE_ID;
 #endif
   *(uint8_t *)(&driver->uid.dev_id) += dmx_num;  // Increment last octect
   driver->break_len = RDM_BREAK_LEN_US;
@@ -146,12 +151,14 @@ bool dmx_driver_install(dmx_port_t dmx_num, const dmx_config_t *config,
   // Set the default values for the root device
   driver->device.root.num = RDM_SUB_DEVICE_ROOT;
   driver->device.root.next = NULL;
-  for (int i = 0; i < config->root_device_parameter_count; ++i) {
-    driver->device.root.parameters[i].pid = 0;
+  /* WIFIDMX: the count the memory was sized for, and whole entries (commit
+  reads the type of empty ones) */
+  for (int i = 0; i < root_param_count; ++i) {
+    driver->device.root.parameters[i] = (dmx_parameter_t){0};
   }
 
   // Set the default values for the DMX device
-  driver->device.parameter_count.root = config->root_device_parameter_count;
+  driver->device.parameter_count.root = root_param_count;
   driver->device.parameter_count.sub_devices =
       config->sub_device_parameter_count;
   driver->device.parameter_count.staged = 0;
@@ -171,6 +178,12 @@ bool dmx_driver_install(dmx_port_t dmx_num, const dmx_config_t *config,
   driver->dmx.controller_eop_timestamp = 0;
   driver->dmx.last_responder_pid = 0;
   driver->dmx.responder_sent_last = false;
+  driver->dmx.rx_frame_seq = 0;  // WIFIDMX: see dmx_read_received()
+  driver->dmx.rx_frame_size = 0;
+  driver->dmx.rx_short_len = 0;
+  driver->dmx.rx_err_head = 0;
+  driver->dmx.last_rx_timestamp = 0;  // WIFIDMX: see service.h
+  driver->dmx.send_start_timestamp = 0;
   driver->dmx.last_request_pid = 0;
   driver->dmx.last_request_pid_repeats = 0;
 
@@ -264,11 +277,22 @@ bool dmx_driver_delete(dmx_port_t dmx_num) {
     dmx_sniffer_disable(dmx_num);
   }
 
-  // Free hardware timer ISR
-  dmx_timer_deinit(dmx_num);
+  /* WIFIDMX: end a break that is under way (the line stayed low), and free
+  the UART's interrupt before the timer it uses */
+  taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+  dmx_timer_stop(dmx_num);
+  dmx_uart_invert_tx(dmx_num, 0);
+  taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
 
   // Disable UART module
   dmx_uart_deinit(dmx_num);
+
+  // Free hardware timer ISR
+  dmx_timer_deinit(dmx_num);
+
+  // WIFIDMX: save what RDM set since the last commit
+  while (dmx_parameter_commit(dmx_num)) {
+  }
 
   // Free parameters
   dmx_device_t *device = &driver->device.root;
@@ -279,7 +303,11 @@ bool dmx_driver_delete(dmx_port_t dmx_num) {
     for (int i = 0; i < param_count; ++i) {
       if (device->parameters[i].pid == 0) {
         break;  // No more parameters remaining
-      } else if (device->parameters[i].type != DMX_PARAMETER_TYPE_DYNAMIC) {
+      } else if (device->parameters[i].type != DMX_PARAMETER_TYPE_DYNAMIC &&
+                 device->parameters[i].type !=
+                     DMX_PARAMETER_TYPE_NON_VOLATILE &&
+                 device->parameters[i].type !=
+                     DMX_PARAMETER_TYPE_NON_VOLATILE_STAGED) {
         continue;  // Nothing to free
       }
       free(device->parameters[i].data);

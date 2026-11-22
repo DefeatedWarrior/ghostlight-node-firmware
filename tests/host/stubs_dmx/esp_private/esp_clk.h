@@ -1,0 +1,2 @@
+/* Host stub */
+#pragma once

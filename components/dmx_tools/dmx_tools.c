@@ -374,7 +374,7 @@ esp_err_t dmx_selftest_start(uint8_t out_port, uint8_t in_port)
     dmx_test_stop(out_port);
     dmx_test_stop(in_port);
 
-    if (xTaskCreate(selftest_task, "dmx_selftest", 4096, NULL, 5, NULL) != pdPASS) {
+    if (xTaskCreate(selftest_task, "dmx_selftest", 5120, NULL, 5, NULL) != pdPASS) {
         s_st.running = false;
         xSemaphoreTake(s_st.mutex, portMAX_DELAY);
         s_st.res.state = DMX_SELFTEST_FAILED;

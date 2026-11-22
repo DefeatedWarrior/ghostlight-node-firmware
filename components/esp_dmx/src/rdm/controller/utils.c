@@ -28,11 +28,16 @@ size_t rdm_send_request(dmx_port_t dmx_num, const rdm_request_t *request,
 
   dmx_driver_t *const driver = dmx_driver[dmx_num];
 
+  /* WIFIDMX: every way out leaves a true answer, never the caller's last one */
+  if (ack != NULL) {
+    *ack = (rdm_ack_t){.err = DMX_OK, .type = RDM_RESPONSE_TYPE_NONE};
+  }
+
   // Attempt to take the mutex and wait until the driver is done sending
   if (!xSemaphoreTakeRecursive(driver->mux, portMAX_DELAY)) {
     return 0;
   }
-  if (!dmx_wait_sent(dmx_num, dmx_ms_to_ticks(23))) {
+  if (!dmx_wait_sent(dmx_num, dmx_ms_to_ticks(DMX_SEND_WAIT_MS))) {
     xSemaphoreGiveRecursive(driver->mux);
     return 0;
   }
@@ -57,8 +62,10 @@ size_t rdm_send_request(dmx_port_t dmx_num, const rdm_request_t *request,
   dmx_read(dmx_num, old_data, packet_size);
 
   // Write and send the RDM request
-  rdm_write(dmx_num, &header, request->format, request->pd);
-  if (!dmx_send(dmx_num)) {
+  const uint8_t tn = header.tn;
+  /* WIFIDMX: if it can't be written, don't send what was in the buffer */
+  if (!rdm_write(dmx_num, &header, request->format, request->pd) ||
+      !dmx_send(dmx_num)) {
     dmx_write(dmx_num, old_data, packet_size);  // Write old data back
     xSemaphoreGiveRecursive(driver->mux);
     if (ack != NULL) {
@@ -76,7 +83,7 @@ size_t rdm_send_request(dmx_port_t dmx_num, const rdm_request_t *request,
   // Return early if no response is expected
   if (rdm_uid_is_broadcast(request->dest_uid) &&
       request->pid != RDM_PID_DISC_UNIQUE_BRANCH) {
-    dmx_wait_sent(dmx_num, dmx_ms_to_ticks(23));
+    dmx_wait_sent(dmx_num, dmx_ms_to_ticks(DMX_SEND_WAIT_MS));
     dmx_write(dmx_num, old_data, packet_size);  // Write old data back
     xSemaphoreGiveRecursive(driver->mux);
     if (ack != NULL) {
@@ -93,7 +100,7 @@ size_t rdm_send_request(dmx_port_t dmx_num, const rdm_request_t *request,
 
   // Attempt to receive the RDM response
   dmx_packet_t packet;
-  dmx_receive(dmx_num, &packet, dmx_ms_to_ticks(23));
+  dmx_receive(dmx_num, &packet, dmx_ms_to_ticks(RDM_EXCHANGE_WAIT_MS));
   if (ack != NULL) {
     ack->err = packet.err;
     ack->size = packet.size;
@@ -127,36 +134,70 @@ size_t rdm_send_request(dmx_port_t dmx_num, const rdm_request_t *request,
     return 0;
   }
 
-  // Copy the parameter data into the output
-  if (header.response_type == RDM_RESPONSE_TYPE_ACK &&
-      header.pid != RDM_PID_DISC_UNIQUE_BRANCH) {
-    if (pd == NULL) {
-      rdm_read_pd(dmx_num, format, pd, size);
+  /* WIFIDMX: is it the answer to this request? Upstream took any packet
+  with a good checksum: another fixture's, a late one, or its own request. */
+  bool valid;
+  if (request->pid == RDM_PID_DISC_UNIQUE_BRANCH &&
+      request->cc == RDM_CC_DISC_COMMAND) {
+    valid = header.cc == RDM_CC_DISC_COMMAND_RESPONSE &&
+            header.pid == RDM_PID_DISC_UNIQUE_BRANCH;
+  } else {
+    // a queued message brings its own PID, and the response class with it
+    const bool queued = request->pid == RDM_PID_QUEUED_MESSAGE &&
+                        request->cc == RDM_CC_GET_COMMAND;
+    valid = (header.cc == (rdm_cc_t)(request->cc + 1) ||
+             (queued && header.cc == RDM_CC_SET_COMMAND_RESPONSE)) &&
+            (header.pid == request->pid || queued) &&
+            rdm_uid_is_eq(&header.src_uid, request->dest_uid) &&
+            rdm_uid_is_eq(&header.dest_uid, rdm_uid_get(dmx_num)) &&
+            header.pdl < RDM_PD_SIZE_MAX &&
+            header.message_len == 24 + header.pdl &&
+            packet.size >= (size_t)header.message_len + 2;
+    if (valid && header.tn != tn) {
+      ESP_LOGD(TAG, "response TN %u to request TN %u", (unsigned)header.tn,
+               (unsigned)tn);  // some fixtures don't echo it: not fatal
     }
+  }
+  const bool is_timer_or_nack =
+      header.response_type == RDM_RESPONSE_TYPE_ACK_TIMER ||
+      header.response_type == RDM_RESPONSE_TYPE_NACK_REASON;
+  if (valid) {
+    valid = rdm_response_type_is_valid(header.response_type) &&
+            (!is_timer_or_nack || header.pdl == sizeof(uint16_t));
+  }
+  if (!valid) {
+    dmx_write(dmx_num, old_data, packet_size);  // Write old data back
+    xSemaphoreGiveRecursive(driver->mux);
+    if (ack != NULL) {
+      ack->type = RDM_RESPONSE_TYPE_INVALID;
+    }
+    return 0;
+  }
+
+  /* Copy the parameter data into the output (WIFIDMX: also when the caller
+  doesn't want the ack: upstream only tried with pd == NULL) */
+  if (!is_timer_or_nack && pd != NULL &&
+      header.pid != RDM_PID_DISC_UNIQUE_BRANCH) {
+    rdm_read_pd(dmx_num, format, pd, size);
   }
 
   // Copy the results into the ack struct
   if (ack != NULL) {
     memcpy(&ack->src_uid, &header.src_uid, sizeof(rdm_uid_t));
     ack->pid = header.pid;
-    if (!rdm_response_type_is_valid(header.response_type)) {
-      ack->type = RDM_RESPONSE_TYPE_INVALID;
-      ack->pdl = header.pdl;
-    } else {
-      const char *word_format = "w";
-      ack->type = header.response_type;
+    ack->type = header.response_type;
+    if (is_timer_or_nack) {
+      uint16_t value = 0;
+      rdm_read_pd(dmx_num, "w", &value, sizeof(value));
       if (header.response_type == RDM_RESPONSE_TYPE_ACK_TIMER) {
-        uint16_t timer;
-        rdm_read_pd(dmx_num, word_format, &timer, sizeof(timer));
-        ack->timer = dmx_ms_to_ticks(timer * 10);
-      } else if (header.response_type == RDM_RESPONSE_TYPE_NACK_REASON) {
-        uint16_t nack_reason;
-        rdm_read_pd(dmx_num, word_format, &nack_reason, sizeof(nack_reason));
-        ack->nack_reason = nack_reason;
+        /* WIFIDMX: in tenths of a second (upstream took them as hundredths) */
+        ack->timer = (TickType_t)((uint64_t)value * 100 * configTICK_RATE_HZ /
+                                  1000);
       } else {
-        rdm_read_pd(dmx_num, format, pd, size);
-        ack->pdl = header.pdl;
+        ack->nack_reason = value;
       }
+    } else {
+      ack->pdl = header.pdl;
     }
     ack->message_count = header.message_count;
   }

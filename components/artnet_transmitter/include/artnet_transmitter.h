@@ -31,6 +31,15 @@ esp_err_t artnet_transmitter_deinit(void);
 esp_err_t artnet_transmitter_send_port(uint16_t universe, uint8_t physical,
                                        const uint8_t *data, uint16_t length);
 
+/**
+ * Send ArtDmx unicast to each of @p ips (@p count addresses, network byte
+ * order), with one sequence number for all of them. @p count 0 sends to the
+ * broadcast destination like artnet_transmitter_send_port().
+ */
+esp_err_t artnet_transmitter_send_port_to(uint16_t universe, uint8_t physical,
+                                          const uint8_t *data, uint16_t length,
+                                          const uint32_t *ips, int count);
+
 /** Compatibility wrapper (physical port 0) */
 esp_err_t artnet_transmitter_send(uint16_t universe, const uint8_t *data, uint16_t length);
 

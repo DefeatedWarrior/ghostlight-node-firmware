@@ -57,6 +57,7 @@
 #include "dmx_tester.h"
 
 #define NPORTS      CONFIG_DMX_PORTS
+#define APP_SEND_NODES_MAX 8   /* ArtDmx unicast copies per frame (send_to "nodes") */
 
 /* Main task event bits (g_app.events) */
 #define EV_APPLY    BIT0   /* apply config to the running system */
@@ -74,6 +75,9 @@ typedef struct {
     volatile uint16_t artnet;          /* 15-bit Port-Address */
     volatile int16_t artnet_backup;    /* -1 = none */
     volatile uint16_t sacn;            /* 1..63999 */
+    volatile uint8_t local_mask;       /* output takes these ports' DMX input (bit p-1) */
+    volatile bool local_only;          /* ... and ignores the network */
+    volatile bool splitter;            /* one input, no network: follow it frame by frame */
 
     /* DMX input -> network */
     uint8_t last_tx[512];
@@ -82,6 +86,17 @@ typedef struct {
     bool tx_started;
     uint16_t tx_sacn_universe;         /* universe the sACN stream runs on */
     uint32_t err_baseline;             /* ArtAddress ResetRxFlags */
+
+    /* Where the input goes (send_to_t). The list is written by the main task
+     * and read by the DMX task: each address is one aligned word, so a
+     * change at worst sends one frame to a mix of old and new addresses. */
+    volatile uint8_t send_to;
+    volatile uint8_t send_count;
+    volatile uint32_t send_list[CONFIG_SEND_LIST_MAX];
+    /* send_to "nodes": the Art-Net nodes that output the universe (DMX task only) */
+    uint32_t node_ips[APP_SEND_NODES_MAX];
+    uint8_t node_count;
+    int64_t nodes_checked_us;
 } route_t;
 
 typedef struct {
@@ -128,6 +143,10 @@ void app_on_sacn_dmx(const sacn_packet_info_t *pkt, void *user_data);
 void app_on_artnet_sync(uint32_t source_ip, void *user_data);
 void app_on_sacn_sync(uint16_t sync_universe, const uint8_t *cid, uint32_t source_ip,
                       void *user_data);
+void app_on_artnet_poll_reply(const artnet_poll_reply_t *reply, bool ip_conflict, void *user_data);
+void app_on_sacn_discovery(const uint8_t *cid, const char *source_name, uint32_t source_ip,
+                           uint8_t page, uint8_t last_page, const uint8_t *universes_be,
+                           uint16_t count, void *user_data);
 void app_update_sacn_groups(void);
 void app_dmx_frame_source(uint8_t port, uint8_t *data, void *user_data);
 void app_on_dmx_input(uint8_t port, const uint8_t *data, size_t size, void *user_data);

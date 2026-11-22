@@ -5,6 +5,7 @@
 
 #include "sacn_receiver.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -19,7 +20,7 @@ static const char *TAG = "sacn_receiver";
 #define SACN_TASK_STACK_SIZE   6144
 #define SACN_TASK_PRIORITY     6
 #define SACN_TASK_CORE         0
-#define SACN_RX_BUF_SIZE       700
+#define SACN_RX_BUF_SIZE       1144   /* a full discovery page: 120 + 512 * 2 */
 #define SACN_RECEIVE_TIMEOUT_MS 500
 
 /* Bytes before dmp.start_code */
@@ -42,6 +43,9 @@ static struct {
     void *cb_data;
     sacn_sync_callback_t sync_cb;
     void *sync_data;
+    sacn_discovery_callback_t disc_cb;
+    void *disc_data;
+    subscription_t discovery;   /* universe 64214: discovery pages */
 
     /* Sequence tracking for synchronization packets (per source + universe) */
     struct {
@@ -139,9 +143,51 @@ static bool sync_sequence_ok(uint16_t universe, const uint8_t *cid, uint8_t seq)
 }
 
 /*
+ * Universe discovery (framing vector 0x2):
+ *   44-107 source name, 108-111 reserved,
+ *   112 flags/len, 114 vector (0x1 = universe list), 118 page, 119 last page,
+ *   120.. universes (16-bit big-endian, up to 512 per page)
+ */
+#define SACN_DISC_LIST_OFFSET 120
+#define SACN_DISC_VECTOR_LIST 0x00000001
+
+static void process_discovery(const uint8_t *buf, int len, const struct sockaddr_in *from)
+{
+    const sacn_packet_t *p = (const sacn_packet_t *)buf;
+    if (len < SACN_DISC_LIST_OFFSET) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+    uint32_t vec = ((uint32_t)buf[114] << 24) | ((uint32_t)buf[115] << 16) |
+                   ((uint32_t)buf[116] << 8) | buf[117];
+    uint16_t layer_len = (uint16_t)(((buf[112] & 0x0F) << 8) | buf[113]);
+    if (vec != SACN_DISC_VECTOR_LIST || layer_len < 8) {
+        s_sacn.stats.invalid_packets++;
+        return;
+    }
+    if (s_sacn.have_local_cid && memcmp(p->root.cid, s_sacn.local_cid, 16) == 0) {
+        s_sacn.stats.own_packets++;
+        return;
+    }
+    uint16_t count = (uint16_t)((layer_len - 8) / 2);
+    uint16_t in_packet = (uint16_t)((len - SACN_DISC_LIST_OFFSET) / 2);
+    if (count > in_packet) count = in_packet;
+    if (count > 512) count = 512;
+    char name[65];
+    memcpy(name, &buf[44], 64);
+    name[64] = '\0';
+    s_sacn.stats.discovery_packets++;
+    sacn_discovery_callback_t cb = s_sacn.disc_cb;
+    if (cb) {
+        cb(p->root.cid, name, from->sin_addr.s_addr, buf[118], buf[119],
+           &buf[SACN_DISC_LIST_OFFSET], count, s_sacn.disc_data);
+    }
+}
+
+/*
  * Extended packets: synchronization (root vector 0x8, framing vector 0x1)
  *   38 flags/len, 40 vector, 44 sequence, 45-46 sync address, 47-48 reserved
- * Universe discovery (framing vector 0x2) is ignored.
+ * and universe discovery (framing vector 0x2, above).
  */
 static void process_extended(const uint8_t *buf, int len, const struct sockaddr_in *from)
 {
@@ -152,6 +198,10 @@ static void process_extended(const uint8_t *buf, int len, const struct sockaddr_
     }
     uint32_t vec = ((uint32_t)buf[40] << 24) | ((uint32_t)buf[41] << 16) |
                    ((uint32_t)buf[42] << 8) | buf[43];
+    if (vec == SACN_EXT_VECTOR_DISCOVERY) {
+        process_discovery(buf, len, from);
+        return;
+    }
     if (vec != SACN_EXT_VECTOR_SYNC) {
         s_sacn.stats.extended_packets++;
         return;
@@ -276,7 +326,10 @@ static void sacn_receive_task(void *arg)
     }
     ESP_LOGI(TAG, "sACN receiver task started");
 
+    /* Task watchdog: recvfrom times out every SACN_RECEIVE_TIMEOUT_MS */
+    esp_task_wdt_add(NULL);
     while (s_sacn.running) {
+        esp_task_wdt_reset();
         struct sockaddr_in from;
         socklen_t from_len = sizeof(from);
         int len = recvfrom(s_sacn.sock, buf, SACN_RX_BUF_SIZE, 0,
@@ -292,6 +345,7 @@ static void sacn_receive_task(void *arg)
         process_packet(buf, len, &from);
     }
 
+    esp_task_wdt_delete(NULL);
     free(buf);
     ESP_LOGI(TAG, "sACN receiver task stopped");
     xSemaphoreGive(s_sacn.task_done);
@@ -314,6 +368,8 @@ esp_err_t sacn_receiver_init(void)
     }
     memset(&s_sacn.stats, 0, sizeof(s_sacn.stats));
     memset(s_sacn.subs, 0, sizeof(s_sacn.subs));
+    s_sacn.discovery.universe = SACN_DISCOVERY_UNIVERSE;
+    s_sacn.discovery.joined = false;
     s_sacn.initialized = true;
     ESP_LOGI(TAG, "sACN receiver initialized");
     return ESP_OK;
@@ -371,6 +427,8 @@ esp_err_t sacn_receiver_start(void)
             join_group(&s_sacn.subs[i], false);
         }
     }
+    s_sacn.discovery.joined = false;
+    join_group(&s_sacn.discovery, false);
     xSemaphoreGive(s_sacn.mutex);
 
     s_sacn.running = true;
@@ -403,6 +461,7 @@ esp_err_t sacn_receiver_stop(void)
     for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
         leave_group(&s_sacn.subs[i]);
     }
+    leave_group(&s_sacn.discovery);
     if (s_sacn.sock >= 0) {
         close(s_sacn.sock);
         s_sacn.sock = -1;
@@ -465,10 +524,12 @@ esp_err_t sacn_receiver_set_universes(const uint16_t *universes, uint8_t count)
 {
     if (!s_sacn.initialized) return ESP_ERR_INVALID_STATE;
 
-    /* Leave groups that are no longer wanted */
+    /* Leave groups that are no longer wanted. The discovery group steps
+     * aside meanwhile, so it never holds a membership a port needs. */
     uint16_t current[SACN_MAX_UNIVERSES];
     xSemaphoreTake(s_sacn.mutex, portMAX_DELAY);
     for (int i = 0; i < SACN_MAX_UNIVERSES; i++) current[i] = s_sacn.subs[i].universe;
+    leave_group(&s_sacn.discovery);
     xSemaphoreGive(s_sacn.mutex);
 
     for (int i = 0; i < SACN_MAX_UNIVERSES; i++) {
@@ -487,6 +548,9 @@ esp_err_t sacn_receiver_set_universes(const uint16_t *universes, uint8_t count)
             if (e != ESP_OK) ret = e;
         }
     }
+    xSemaphoreTake(s_sacn.mutex, portMAX_DELAY);
+    join_group(&s_sacn.discovery, false);   /* no-op until the socket is open */
+    xSemaphoreGive(s_sacn.mutex);
     return ret;
 }
 
@@ -499,6 +563,7 @@ esp_err_t sacn_receiver_refresh_subscriptions(void)
             join_group(&s_sacn.subs[i], true);
         }
     }
+    join_group(&s_sacn.discovery, true);
     xSemaphoreGive(s_sacn.mutex);
     return ESP_OK;
 }
@@ -527,6 +592,15 @@ esp_err_t sacn_receiver_set_sync_callback(sacn_sync_callback_t callback, void *u
     s_sacn.sync_cb = NULL;
     s_sacn.sync_data = user_data;
     s_sacn.sync_cb = callback;
+    return ESP_OK;
+}
+
+esp_err_t sacn_receiver_set_discovery_callback(sacn_discovery_callback_t callback, void *user_data)
+{
+    if (!s_sacn.initialized) return ESP_ERR_INVALID_STATE;
+    s_sacn.disc_cb = NULL;
+    s_sacn.disc_data = user_data;
+    s_sacn.disc_cb = callback;
     return ESP_OK;
 }
 

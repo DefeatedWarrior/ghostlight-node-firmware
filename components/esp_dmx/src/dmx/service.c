@@ -85,9 +85,11 @@ dmx_parameter_t *dmx_parameter_get_entry(dmx_port_t dmx_num,
                                          dmx_device_num_t device_num,
                                          rdm_pid_t pid) {
   assert(dmx_num < DMX_NUM_MAX);
-  assert(device_num < RDM_SUB_DEVICE_MAX);
-  assert(pid > 0);
   assert(dmx_driver_is_installed(dmx_num));
+  /* WIFIDMX: both come off the wire, so neither may be an assert */
+  if (device_num >= RDM_SUB_DEVICE_MAX || pid == 0) {
+    return NULL;
+  }
 
   dmx_device_t *const device = dmx_device_get(dmx_num, device_num);
   if (device == NULL) {

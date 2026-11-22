@@ -43,15 +43,43 @@ static void on_sync(uint16_t universe, const uint8_t *cid, uint32_t ip, void *us
     sync_rx.ip = ip;
 }
 
+static struct {
+    int calls;
+    uint8_t cid[16];
+    char name[65];
+    uint32_t ip;
+    uint8_t page, last_page;
+    uint16_t count;
+    uint16_t universes[512];
+} disc_rx;
+static void on_discovery(const uint8_t *cid, const char *name, uint32_t ip, uint8_t page,
+                         uint8_t last_page, const uint8_t *universes_be, uint16_t count,
+                         void *user_data)
+{
+    (void)user_data;
+    disc_rx.calls++;
+    memcpy(disc_rx.cid, cid, 16);
+    snprintf(disc_rx.name, sizeof(disc_rx.name), "%s", name);
+    disc_rx.ip = ip;
+    disc_rx.page = page;
+    disc_rx.last_page = last_page;
+    disc_rx.count = count;
+    for (int i = 0; i < count; i++) {   /* ASan flags a count past the packet */
+        disc_rx.universes[i] = (uint16_t)((universes_be[2 * i] << 8) | universes_be[2 * i + 1]);
+    }
+}
+
 static void reset(void)
 {
     host_fakes_reset();
     s_sacn = s_sacn_pristine;
     memset(&rx, 0, sizeof(rx));
     memset(&sync_rx, 0, sizeof(sync_rx));
+    memset(&disc_rx, 0, sizeof(disc_rx));
     sacn_receiver_init();
     sacn_receiver_set_callback(on_data, NULL);
     sacn_receiver_set_sync_callback(on_sync, NULL);
+    sacn_receiver_set_discovery_callback(on_discovery, NULL);
 }
 
 #define IP(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
@@ -74,7 +102,7 @@ static pk_sacn_t src(void)
 }
 
 static uint8_t levels[512];
-static uint8_t pkt[700];
+static uint8_t pkt[1200];
 
 /* ---- data packets ------------------------------------------------------- */
 
@@ -327,15 +355,89 @@ static void test_sync_bad(void)
     CHECK_EQ(s_sacn.stats.own_packets, 1);
 }
 
-static void test_discovery_ignored(void)
+/* ---- universe discovery ------------------------------------------------- */
+
+static void test_discovery_valid(void)
 {
+    uint16_t list[] = {1, 2, 300, 63999};
+    int n = pk_sacn_discovery(pkt, CID_B, "Desk B", 0, 1, list, 4);
+    feed(pkt, n);
+    CHECK_EQ(disc_rx.calls, 1);
+    CHECK_MEM(disc_rx.cid, CID_B, 16);
+    CHECK_STR(disc_rx.name, "Desk B");
+    CHECK_EQ(disc_rx.ip, IP(2, 0, 0, 99));
+    CHECK_EQ(disc_rx.page, 0);
+    CHECK_EQ(disc_rx.last_page, 1);
+    CHECK_EQ(disc_rx.count, 4);
+    CHECK_EQ(disc_rx.universes[2], 300);
+    CHECK_EQ(disc_rx.universes[3], 63999);
+    CHECK_EQ(s_sacn.stats.discovery_packets, 1);
+    CHECK_EQ(s_sacn.stats.extended_packets, 0);
+    CHECK_EQ(s_sacn.stats.invalid_packets, 0);
+    CHECK_EQ(rx.calls, 0);
+    CHECK_EQ(sync_rx.calls, 0);
+
+    /* An empty list is fine; a 64-byte name without a terminator is cut */
+    n = pk_sacn_discovery(pkt, CID_B, "", 0, 0, list, 0);
+    memset(&pkt[44], 'x', 64);
+    feed(pkt, n);
+    CHECK_EQ(disc_rx.calls, 2);
+    CHECK_EQ(disc_rx.count, 0);
+    CHECK_EQ(strlen(disc_rx.name), 64);
+}
+
+static void test_discovery_full_page(void)
+{
+    static uint16_t list[512];
+    for (int i = 0; i < 512; i++) list[i] = (uint16_t)(i + 1);
+    feed(pkt, pk_sacn_discovery(pkt, CID_A, "Big", 3, 3, list, 512));
+    CHECK_EQ(disc_rx.calls, 1);
+    CHECK_EQ(disc_rx.count, 512);
+    CHECK_EQ(disc_rx.universes[511], 512);
+    CHECK_EQ(disc_rx.page, 3);
+}
+
+static void test_discovery_bad(void)
+{
+    uint16_t list[] = {1, 2, 3};
+    /* Cut short of the list header */
     int n = pk_sacn_sync(pkt, CID_A, 1, 1);
     pk_be32(&pkt[40], SACN_EXT_VECTOR_DISCOVERY);
     feed(pkt, n);
-    CHECK_EQ(sync_rx.calls, 0);
-    CHECK_EQ(rx.calls, 0);
+    CHECK_EQ(disc_rx.calls, 0);
+    CHECK_EQ(s_sacn.stats.invalid_packets, 1);
+    /* Wrong discovery-layer vector */
+    n = pk_sacn_discovery(pkt, CID_A, "A", 0, 0, list, 3);
+    pk_be32(&pkt[114], 2);
+    feed(pkt, n);
+    CHECK_EQ(disc_rx.calls, 0);
+    CHECK_EQ(s_sacn.stats.invalid_packets, 2);
+    /* The layer claims more universes than the packet holds: only the real ones */
+    n = pk_sacn_discovery(pkt, CID_A, "A", 0, 0, list, 3);
+    pk_be16(&pkt[112], 0x7000 | (8 + 2 * 100));
+    feed(pkt, n);
+    CHECK_EQ(disc_rx.calls, 1);
+    CHECK_EQ(disc_rx.count, 3);
+    /* A layer shorter than its header */
+    n = pk_sacn_discovery(pkt, CID_A, "A", 0, 0, list, 3);
+    pk_be16(&pkt[112], 0x7000 | 4);
+    feed(pkt, n);
+    CHECK_EQ(disc_rx.calls, 1);
+    CHECK_EQ(s_sacn.stats.invalid_packets, 3);
+    /* An unknown extended framing vector is still just counted */
+    n = pk_sacn_sync(pkt, CID_A, 1, 1);
+    pk_be32(&pkt[40], 7);
+    feed(pkt, n);
     CHECK_EQ(s_sacn.stats.extended_packets, 1);
-    CHECK_EQ(s_sacn.stats.invalid_packets, 0);
+}
+
+static void test_discovery_own_cid_ignored(void)
+{
+    uint16_t list[] = {1};
+    sacn_receiver_set_local_cid(CID_A);
+    feed(pkt, pk_sacn_discovery(pkt, CID_A, "Me", 0, 0, list, 1));
+    CHECK_EQ(disc_rx.calls, 0);
+    CHECK_EQ(s_sacn.stats.own_packets, 1);
 }
 
 /* ---- subscriptions (no socket: bookkeeping only) -------------------------- */
@@ -381,7 +483,10 @@ int main(void)
     RUN(test_sync_valid);
     RUN(test_sync_sequence);
     RUN(test_sync_bad);
-    RUN(test_discovery_ignored);
+    RUN(test_discovery_valid);
+    RUN(test_discovery_full_page);
+    RUN(test_discovery_bad);
+    RUN(test_discovery_own_cid_ignored);
     RUN(test_subscriptions);
     return test_summary();
 }

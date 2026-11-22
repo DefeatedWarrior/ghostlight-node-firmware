@@ -203,6 +203,8 @@ esp_err_t network_wifi_ap_start(const char *ssid, const char *password, uint8_t 
 esp_err_t network_wifi_ap_stop(void);
 uint16_t network_wifi_ap_get_stations(wifi_sta_info_t *stations, uint16_t max_stations);
 void network_get_ap_info(network_ap_info_t *info);
+/** The access point's address and netmask (network byte order); false while it is off */
+bool network_ap_address(uint32_t *ip, uint32_t *netmask);
 
 /** Switch WiFi off completely (station and AP) */
 esp_err_t network_wifi_stop(void);

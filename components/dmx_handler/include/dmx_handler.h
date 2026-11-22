@@ -35,7 +35,14 @@ extern "C" {
 
 #define DMX_CHANNEL_COUNT 512
 #define DMX_FRAME_SIZE    (DMX_CHANNEL_COUNT + 1)   /* start code + 512 slots */
-#define DMX_MAX_DEVICES   32
+/* Devices listed per port. A list only takes RAM for what was found, but a
+ * discovery needs room for all of them (160 bytes each) while it runs.
+ * At most 200: one ArtTodData block. */
+#if CONFIG_SPIRAM
+#define DMX_MAX_DEVICES   128
+#else
+#define DMX_MAX_DEVICES   64
+#endif
 
 /** Input signal is considered lost after this long without a valid frame */
 #define DMX_INPUT_LOSS_MS 1000
@@ -89,6 +96,9 @@ typedef struct {
     uint32_t err_framing;     /**< improperly framed slots (bad stop bits, noise) */
     uint32_t err_overflow;    /**< UART overflow */
     uint32_t err_short;       /**< frame cut short by a new break */
+    uint32_t dropped_late;    /**< frames never forwarded: the input task was
+                                   more than a frame late and a newer frame
+                                   had replaced them */
     uint32_t alt_start_codes; /**< packets with a start code other than 0 / RDM */
     uint8_t last_alt_start_code;
     uint32_t rdm_packets;     /**< RDM packets seen on the line */
@@ -106,6 +116,7 @@ typedef struct {
     uint16_t universe;
     dmx_port_stats_t stats;
     uint8_t rdm_device_count;
+    bool rdm_list_full;               /**< DMX_MAX_DEVICES listed: there may be more */
     bool rdm_available;
     bool rdm_discovering;
     bool rdm_tod_valid;               /**< a discovery has completed since the port started */
@@ -113,7 +124,8 @@ typedef struct {
 
 typedef enum {
     DMX_DISC_FULL = 0,        /**< un-mute all, search everything; old list kept until done */
-    DMX_DISC_INCREMENTAL,     /**< check known devices, find new ones (full if no list yet) */
+    DMX_DISC_INCREMENTAL,     /**< un-mute all, check known devices (two misses drop one), find
+                                   new ones (full if no list yet) */
     DMX_DISC_FLUSH,           /**< drop the list now, then full discovery */
 } dmx_disc_mode_t;
 

@@ -34,6 +34,8 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "board.h"
+#include "board_gpio.h"
+#include "captive_dns.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -558,9 +560,9 @@ esp_err_t network_ethernet_connect(const ip_config_t *config)
         .clock_speed_hz = BOARD_ETH_SPI_MHZ * 1000 * 1000,
     };
 
-    esp_err_t isr_ret = gpio_install_isr_service(0);
-    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "gpio_install_isr_service failed: %d", isr_ret);
+    esp_err_t isr_ret = board_gpio_isr_service();
+    if (isr_ret != ESP_OK) {
+        ESP_LOGW(TAG, "GPIO ISR service failed: %d", isr_ret);
     }
 
     eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(BOARD_ETH_SPI_HOST, &devcfg);
@@ -1014,6 +1016,7 @@ esp_err_t network_wifi_ap_start(const char *ssid, const char *password, uint8_t 
         esp_netif_dhcps_stop(s_ap_netif);
         esp_netif_set_ip_info(s_ap_netif, &ip_info);
         esp_netif_dhcps_start(s_ap_netif);
+        captive_dns_start();   /* DHCP offers the node as the DNS server */
     }
 
     s_ap_on = true;
@@ -1083,6 +1086,18 @@ void network_get_ap_info(network_ap_info_t *info)
     if (esp_wifi_get_channel(&primary, &second) == ESP_OK) info->channel = primary;
     wifi_sta_list_t list;
     if (esp_wifi_ap_get_sta_list(&list) == ESP_OK) info->clients = (uint8_t)list.num;
+}
+
+bool network_ap_address(uint32_t *ip, uint32_t *netmask)
+{
+    esp_netif_ip_info_t info;
+    if (!s_ap_active || !s_ap_netif || esp_netif_get_ip_info(s_ap_netif, &info) != ESP_OK ||
+        info.ip.addr == 0) {
+        return false;
+    }
+    if (ip) *ip = info.ip.addr;
+    if (netmask) *netmask = info.netmask.addr;
+    return true;
 }
 
 esp_err_t network_wifi_stop(void)

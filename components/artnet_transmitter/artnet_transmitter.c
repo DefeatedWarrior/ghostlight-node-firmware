@@ -137,6 +137,13 @@ static uint8_t next_seq(uint16_t universe)
 esp_err_t artnet_transmitter_send_port(uint16_t universe, uint8_t physical,
                                        const uint8_t *data, uint16_t length)
 {
+    return artnet_transmitter_send_port_to(universe, physical, data, length, NULL, 0);
+}
+
+esp_err_t artnet_transmitter_send_port_to(uint16_t universe, uint8_t physical,
+                                          const uint8_t *data, uint16_t length,
+                                          const uint32_t *ips, int count)
+{
     if (!s_tx.initialized || !data) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -165,27 +172,34 @@ esp_err_t artnet_transmitter_send_port(uint16_t universe, uint8_t physical,
     memcpy(pkt.data, data, length);
     if (wire_len > length) pkt.data[length] = 0;
 
-    struct sockaddr_in dest = {
-        .sin_family      = AF_INET,
-        .sin_port        = htons(ARTNET_PORT),
-        .sin_addr.s_addr = s_tx.dest_ip ? s_tx.dest_ip : htonl(INADDR_BROADCAST),
-    };
+    const uint32_t bcast = s_tx.dest_ip ? s_tx.dest_ip : htonl(INADDR_BROADCAST);
+    if (!ips || count <= 0) {
+        ips = &bcast;
+        count = 1;
+    }
 
     int sock = s_tx.shared_sock >= 0 ? s_tx.shared_sock : s_tx.own_sock;
-    ssize_t sent = sendto(sock, &pkt, ARTNET_HEADER_LEN + wire_len, 0,
-                          (struct sockaddr *)&dest, sizeof(dest));
     esp_err_t ret = ESP_OK;
-    if (sent < 0) {
-        s_tx.stats.send_errors++;
-        /* Rate-limit: log only the first error and every 100th thereafter
-         * to avoid flooding the log at 40 Hz when the network is down. */
-        if (s_tx.stats.send_errors == 1 || (s_tx.stats.send_errors % 100) == 0) {
-            ESP_LOGW(TAG, "sendto failed: %d (total errors: %" PRIu32 ")",
-                     errno, s_tx.stats.send_errors);
+    for (int i = 0; i < count; i++) {
+        struct sockaddr_in dest = {
+            .sin_family      = AF_INET,
+            .sin_port        = htons(ARTNET_PORT),
+            .sin_addr.s_addr = ips[i],
+        };
+        ssize_t sent = sendto(sock, &pkt, ARTNET_HEADER_LEN + wire_len, 0,
+                              (struct sockaddr *)&dest, sizeof(dest));
+        if (sent < 0) {
+            s_tx.stats.send_errors++;
+            /* Rate-limit: log only the first error and every 100th thereafter
+             * to avoid flooding the log at 40 Hz when the network is down. */
+            if (s_tx.stats.send_errors == 1 || (s_tx.stats.send_errors % 100) == 0) {
+                ESP_LOGW(TAG, "sendto failed: %d (total errors: %" PRIu32 ")",
+                         errno, s_tx.stats.send_errors);
+            }
+            ret = ESP_FAIL;
+        } else {
+            s_tx.stats.packets_sent++;
         }
-        ret = ESP_FAIL;
-    } else {
-        s_tx.stats.packets_sent++;
     }
     xSemaphoreGive(s_tx.lock);
     return ret;

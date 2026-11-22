@@ -37,6 +37,16 @@ esp_err_t sacn_transmitter_deinit(void);
 esp_err_t sacn_transmitter_send(uint16_t universe, const uint8_t *data,
                                 uint16_t length, uint8_t priority);
 
+/**
+ * Like sacn_transmitter_send(), unicast to each of @p ips (@p count
+ * addresses, network byte order, at most SACN_TX_UNICAST_MAX) instead of the
+ * universe's multicast group; @p count 0 = multicast. The addresses are kept
+ * for the universe's stream termination.
+ */
+#define SACN_TX_UNICAST_MAX 4
+esp_err_t sacn_transmitter_send_to(uint16_t universe, const uint8_t *data, uint16_t length,
+                                   uint8_t priority, const uint32_t *ips, int count);
+
 /** Send the 3 Stream_Terminated packets for @p universe and forget it */
 esp_err_t sacn_transmitter_terminate(uint16_t universe);
 

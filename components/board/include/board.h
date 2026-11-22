@@ -12,7 +12,8 @@
  * (docs/DEVELOPING.md walks through it).
  *
  * A board header must define:
- *   BOARD_NAME, BOARD_DMX_PORTS,
+ *   BOARD_NAME, BOARD_ID (the boards/<name> folder name: web firmware
+ *     uploads must carry the same one), BOARD_DMX_PORTS,
  *   BOARD_DMX_UART, BOARD_DMX_TX_GPIO, BOARD_DMX_RX_GPIO, BOARD_DMX_DIR_GPIO
  *     (tables indexed by port - 1; UART numbers are esp_dmx port numbers)
  * and if it has a W5500 (CONFIG_BOARD_HAS_W5500):
@@ -42,6 +43,10 @@
 
 #if BOARD_DMX_PORTS < 1 || BOARD_DMX_PORTS > 4
 #error "BOARD_DMX_PORTS must be 1..4"
+#endif
+
+#if !defined(BOARD_ID)
+#error "The board header needs a BOARD_ID: its boards/<name> folder name"
 #endif
 
 #if CONFIG_BOARD_HAS_W5500 && !defined(BOARD_ETH_CS_GPIO)

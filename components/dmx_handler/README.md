@@ -228,7 +228,8 @@ Get list of discovered RDM devices.
 
 **Example:**
 ```c
-rdm_device_t devices[DMX_MAX_DEVICES];
+/* DMX_MAX_DEVICES is 128 with PSRAM, else 64 (160 bytes each): not on the stack */
+static rdm_device_t devices[DMX_MAX_DEVICES];
 size_t count = DMX_MAX_DEVICES;
 
 ESP_ERROR_CHECK(dmx_handler_get_rdm_devices(DMX_PORT_1, devices, &count));
@@ -342,7 +343,7 @@ static void on_rdm_discovery_complete(uint8_t port, uint8_t device_count, void *
              port, device_count);
     
     // Get device list
-    rdm_device_t devices[DMX_MAX_DEVICES];
+    static rdm_device_t devices[DMX_MAX_DEVICES];
     size_t count = DMX_MAX_DEVICES;
     
     if (dmx_handler_get_rdm_devices(port, devices, &count) == ESP_OK) {

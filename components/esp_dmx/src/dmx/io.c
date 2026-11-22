@@ -33,6 +33,44 @@ size_t dmx_read_offset(dmx_port_t dmx_num, size_t offset, void *destination,
   return size;
 }
 
+/* WIFIDMX: the last level packet, from the copy the receive ISR saved
+(rx_frame in service.h). See driver.h. */
+size_t dmx_read_received(dmx_port_t dmx_num, void *destination, size_t size,
+                         uint32_t *seq) {
+  DMX_CHECK(dmx_num < DMX_NUM_MAX, 0, "dmx_num error");
+  DMX_CHECK(destination, 0, "destination is null");
+  DMX_CHECK(seq, 0, "seq is null");
+  DMX_CHECK(dmx_driver_is_installed(dmx_num), 0, "driver is not installed");
+
+  dmx_driver_t *const driver = dmx_driver[dmx_num];
+
+  /* The ISR replaces rx_frame at most once a packet (the shortest legal one
+  lasts over 100 us, the copy about 2 us), and holds the spinlock while it
+  does, so the copy below only needs doing again if a whole new packet was
+  saved during it */
+  for (int attempt = 0; attempt < 4; attempt++) {
+    taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+    const uint32_t before = driver->dmx.rx_frame_seq;
+    size_t n = driver->dmx.rx_frame_size;
+    taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+    if (n > size) {
+      n = size;
+    }
+
+    memcpy(destination, driver->dmx.rx_frame, n);
+
+    taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+    const uint32_t after = driver->dmx.rx_frame_seq;
+    taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+    if (before == after) {
+      *seq = before;
+      return n;
+    }
+  }
+  *seq = 0;  // the frames keep changing under us: give up on this one
+  return 0;
+}
+
 size_t dmx_read(dmx_port_t dmx_num, void *destination, size_t size) {
   DMX_CHECK(dmx_num < DMX_NUM_MAX, 0, "dmx_num error");
   DMX_CHECK(destination, 0, "destination is null");
@@ -125,8 +163,7 @@ size_t dmx_receive_num(dmx_port_t dmx_num, dmx_packet_t *packet, size_t size,
   // Block until mutex is taken and driver is idle, or until a timeout
   TimeOut_t timeout;
   vTaskSetTimeOutState(&timeout);
-  if (!xSemaphoreTakeRecursive(driver->mux, wait_ticks) ||
-      (wait_ticks && xTaskCheckForTimeOut(&timeout, &wait_ticks))) {
+  if (!xSemaphoreTakeRecursive(driver->mux, wait_ticks)) {
     if (packet != NULL) {
       packet->err = DMX_ERR_TIMEOUT;
       packet->sc = -1;
@@ -134,8 +171,10 @@ size_t dmx_receive_num(dmx_port_t dmx_num, dmx_packet_t *packet, size_t size,
       packet->is_rdm = 0;
     }
     return 0;
-  } else if (!dmx_wait_sent(dmx_num, wait_ticks) ||
+  } else if ((wait_ticks && xTaskCheckForTimeOut(&timeout, &wait_ticks)) ||
+             !dmx_wait_sent(dmx_num, wait_ticks) ||
              (wait_ticks && xTaskCheckForTimeOut(&timeout, &wait_ticks))) {
+    /* WIFIDMX: out of time with the mutex taken: upstream kept it */
     xSemaphoreGiveRecursive(driver->mux);
     if (packet != NULL) {
       packet->err = DMX_ERR_TIMEOUT;
@@ -174,9 +213,19 @@ size_t dmx_receive_num(dmx_port_t dmx_num, dmx_packet_t *packet, size_t size,
   // Guard against condition where this task cannot block and data isn't ready
   int packet_status;
   int packet_size;
+  /* WIFIDMX: one lock for looking and for asking to be told, so a packet
+  that finishes in between still wakes this task. An older notification
+  can't end the wait. */
+  const TaskHandle_t current_task_handle = xTaskGetCurrentTaskHandle();
+  if (wait_ticks > 0) {
+    xTaskNotifyStateClear(current_task_handle);
+  }
   taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
   packet_status = driver->dmx.progress;
   packet_size = driver->dmx.head;
+  if (packet_status != DMX_PROGRESS_COMPLETE && wait_ticks > 0) {
+    driver->task_waiting = current_task_handle;
+  }
   taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
   if (packet_status != DMX_PROGRESS_COMPLETE && wait_ticks == 0) {
     // Not enough DMX data has been received yet - return early
@@ -193,12 +242,6 @@ size_t dmx_receive_num(dmx_port_t dmx_num, dmx_packet_t *packet, size_t size,
   // Block the task to wait for data to be ready
   dmx_err_t err;
   if (packet_status != DMX_PROGRESS_COMPLETE) {
-    // Tell the DMX driver that this task is awaiting a DMX packet
-    const TaskHandle_t current_task_handle = xTaskGetCurrentTaskHandle();
-    taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
-    driver->task_waiting = current_task_handle;
-    taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
-
     // Determine if it is necessary to set a hardware timeout alarm
     int64_t timer_alarm;
     if (driver->is_controller) {
@@ -209,14 +252,33 @@ size_t dmx_receive_num(dmx_port_t dmx_num, dmx_packet_t *packet, size_t size,
 
     // Set an alarm to timeout early if an RDM response is expected
     if (timer_alarm > 0) {
-      int64_t last_timestamp;
+      bool too_late = false;
       taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
-      last_timestamp = driver->dmx.controller_eop_timestamp;
+      const int progress = driver->dmx.progress;
+      if (progress != DMX_PROGRESS_COMPLETE) {
+        int64_t timer_elapsed = dmx_timer_get_micros_since_boot() -
+                                driver->dmx.controller_eop_timestamp;
+        if (progress == DMX_PROGRESS_IN_BREAK ||
+            (driver->dmx.head > 0 && progress == DMX_PROGRESS_IN_DATA)) {
+          /* WIFIDMX: the response is arriving (this task got here late):
+          only a gap inside it can end the wait now */
+          timer_elapsed = 0;
+          timer_alarm = RDM_TIMING_RESPONDER_INTER_SLOT_MAX;
+        }
+        if (timer_elapsed >= timer_alarm) {
+          too_late = true;
+          driver->task_waiting = NULL;  // WIFIDMX: was left set
+        } else {
+          // Set the timer
+          dmx_timer_set_counter(dmx_num, timer_elapsed);
+          dmx_timer_set_alarm(dmx_num, timer_alarm, false);
+          dmx_timer_start(dmx_num);
+        }
+      }
       taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
-      const int64_t timer_elapsed =
-          dmx_timer_get_micros_since_boot() - last_timestamp;
-      if (timer_elapsed > timer_alarm) {
+      if (too_late) {
         // Return early if the time elapsed is greater than the timer alarm
+        xTaskNotifyStateClear(current_task_handle);
         if (packet != NULL) {
           packet->err = DMX_ERR_TIMEOUT;
           packet->sc = -1;
@@ -226,13 +288,6 @@ size_t dmx_receive_num(dmx_port_t dmx_num, dmx_packet_t *packet, size_t size,
         xSemaphoreGiveRecursive(driver->mux);
         return 0;
       }
-
-      // Set the timer
-      taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
-      dmx_timer_set_counter(dmx_num, timer_elapsed);
-      dmx_timer_set_alarm(dmx_num, timer_alarm, false);
-      dmx_timer_start(dmx_num);
-      taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
     }
 
     // Wait for the DMX driver to notify this task that DMX is ready
@@ -240,9 +295,12 @@ size_t dmx_receive_num(dmx_port_t dmx_num, dmx_packet_t *packet, size_t size,
     taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
     packet_size = driver->dmx.head;
     driver->task_waiting = NULL;
+    if (timer_alarm > 0 && driver->dmx.status != DMX_STATUS_SENDING) {
+      dmx_timer_stop(dmx_num);  // WIFIDMX: not into the next packet
+    }
     taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+    xTaskNotifyStateClear(current_task_handle);  // Avoid race condition
     if (!notified) {
-      xTaskNotifyStateClear(current_task_handle);  // Avoid race condition
       if (packet != NULL) {
         packet->err = DMX_ERR_TIMEOUT;
         packet->sc = -1;
@@ -263,7 +321,14 @@ size_t dmx_receive_num(dmx_port_t dmx_num, dmx_packet_t *packet, size_t size,
 
   // Parse DMX packet data
   taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
-  driver->dmx.progress = DMX_PROGRESS_STALE;  // Prevent parsing old data
+  /* WIFIDMX: when receiving, only a finished packet is old data. By the time
+  this task runs the ISR can already be in the next packet (always, after a
+  short one: that ends at the next one's break), and marking that stale made
+  the ISR ignore all of it. A controller's RDM response keeps upstream's
+  behaviour. */
+  if (driver->is_controller || driver->dmx.progress == DMX_PROGRESS_COMPLETE) {
+    driver->dmx.progress = DMX_PROGRESS_STALE;  // Prevent parsing old data
+  }
   taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
   if (packet != NULL) {
     if (packet_size > 0) {
@@ -309,7 +374,7 @@ size_t dmx_send_num(dmx_port_t dmx_num, size_t size) {
   }
 
   // Block until the driver is done sending
-  if (!dmx_wait_sent(dmx_num, dmx_ms_to_ticks(23))) {
+  if (!dmx_wait_sent(dmx_num, dmx_ms_to_ticks(DMX_SEND_WAIT_MS))) {
     xSemaphoreGiveRecursive(driver->mux);
     return 0;
   }
@@ -360,25 +425,64 @@ size_t dmx_send_num(dmx_port_t dmx_num, size_t size) {
   taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
   timer_elapsed =
       dmx_timer_get_micros_since_boot() - driver->dmx.controller_eop_timestamp;
-  if (timer_elapsed < timer_alarm) {
-    dmx_timer_set_counter(dmx_num, timer_elapsed);
-    dmx_timer_set_alarm(dmx_num, timer_alarm, false);
-    dmx_timer_start(dmx_num);
-    driver->task_waiting = this_task_handle;
+  if (driver->is_controller &&
+      driver->dmx.last_rx_timestamp > driver->dmx.controller_eop_timestamp) {
+    /* WIFIDMX: whatever answered also needs 176 us of quiet after it (E1.20).
+    The interrupt for its last byte comes at the first stop bit, 8 us early. */
+    const int64_t after_rx = driver->dmx.last_rx_timestamp -
+                             driver->dmx.controller_eop_timestamp +
+                             RDM_TIMING_CONTROLLER_REQUEST_TO_REQUEST_MIN + 8;
+    if (after_rx > timer_alarm) {
+      timer_alarm = after_rx;
+    }
   }
   taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+  const int64_t first_elapsed = timer_elapsed;
 
-  // Block if an alarm was set
+  /* WIFIDMX: block until the time is really up. One stale notification used
+  to skip the gap, and a timeout ran into __unreachable(). */
   if (timer_elapsed < timer_alarm) {
-    if (!xTaskNotifyWait(0, ULONG_MAX, NULL, dmx_ms_to_ticks(20))) {
-      __unreachable();  // The hardware timer should always notify the task
+    TimeOut_t wait_start;
+    vTaskSetTimeOutState(&wait_start);
+    TickType_t wait_left =
+        dmx_ms_to_ticks((uint32_t)((timer_alarm - timer_elapsed) / 1000) + 20);
+    bool timed_out = false;
+    while (true) {
+      xTaskNotifyStateClear(this_task_handle);
+      taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+      timer_elapsed = dmx_timer_get_micros_since_boot() -
+                      driver->dmx.controller_eop_timestamp;
+      dmx_timer_stop(dmx_num);
+      if (timer_elapsed < timer_alarm) {
+        dmx_timer_set_counter(dmx_num, timer_elapsed);
+        dmx_timer_set_alarm(dmx_num, timer_alarm, false);
+        dmx_timer_start(dmx_num);
+        driver->task_waiting = this_task_handle;
+      } else {
+        driver->task_waiting = NULL;
+      }
+      taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+      if (timer_elapsed >= timer_alarm) {
+        break;
+      }
+      if (timed_out) {
+        taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+        dmx_timer_stop(dmx_num);
+        driver->task_waiting = NULL;
+        taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+        xTaskNotifyStateClear(this_task_handle);
+        xSemaphoreGiveRecursive(driver->mux);
+        return 0;
+      }
+      timed_out = !xTaskNotifyWait(0, ULONG_MAX, NULL, wait_left) ||
+                  xTaskCheckForTimeOut(&wait_start, &wait_left);
     }
-    driver->task_waiting = NULL;
+    xTaskNotifyStateClear(this_task_handle);
   }
 
   // Return early if it is too late to send a response packet
   if (!driver->is_controller) {
-    if (timer_elapsed > RDM_TIMING_RESPONDER_MAX) {
+    if (first_elapsed > RDM_TIMING_RESPONDER_MAX) {
       xSemaphoreGiveRecursive(driver->mux);
       return 0;
     }
@@ -431,9 +535,13 @@ size_t dmx_send_num(dmx_port_t dmx_num, size_t size) {
       header.pid == RDM_PID_DISC_UNIQUE_BRANCH) {
     // RDM discovery responses do not send a DMX break - write immediately
     taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+    dmx_timer_stop(dmx_num);
+    driver->dmx.send_start_timestamp = dmx_timer_get_micros_since_boot();
+    driver->dmx.progress = DMX_PROGRESS_IN_DATA;  // WIFIDMX: no break to come
     driver->dmx.status = DMX_STATUS_SENDING;
 
     int write_len = driver->dmx.size;
+    dmx_uart_clear_interrupt(dmx_num, DMX_INTR_TX_DONE);
     dmx_uart_write_txfifo(dmx_num, driver->dmx.data, &write_len);
     driver->dmx.head = write_len;
 
@@ -444,6 +552,7 @@ size_t dmx_send_num(dmx_port_t dmx_num, size_t size) {
     // Send the packet by starting the DMX break
     taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
     driver->dmx.head = 0;
+    driver->dmx.send_start_timestamp = dmx_timer_get_micros_since_boot();
     driver->dmx.progress = DMX_PROGRESS_IN_BREAK;
     driver->dmx.status = DMX_STATUS_SENDING;
     dmx_timer_set_counter(dmx_num, 0);
@@ -476,36 +585,69 @@ bool dmx_wait_sent(dmx_port_t dmx_num, TickType_t wait_ticks) {
   // Block until the mutex can be taken
   TimeOut_t timeout;
   vTaskSetTimeOutState(&timeout);
-  if (!xSemaphoreTakeRecursive(driver->mux, wait_ticks) ||
-      (wait_ticks && xTaskCheckForTimeOut(&timeout, &wait_ticks))) {
+  if (!xSemaphoreTakeRecursive(driver->mux, wait_ticks)) {
+    return false;
+  } else if (wait_ticks && xTaskCheckForTimeOut(&timeout, &wait_ticks)) {
+    xSemaphoreGiveRecursive(driver->mux);  // WIFIDMX: upstream kept it
     return false;
   }
 
-  // Determine if the task needs to block
-  bool result = true;
-  if (wait_ticks > 0) {
-    bool task_waiting = false;
+  /* WIFIDMX: wait for the status, not for any notification: a stale one let
+  the caller rewrite the packet while it was being sent. */
+  const TaskHandle_t this_task_handle = xTaskGetCurrentTaskHandle();
+  bool waited = false;
+  bool sending;
+  while (true) {
     taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
-    if (driver->dmx.status == DMX_STATUS_SENDING) {
-      driver->task_waiting = xTaskGetCurrentTaskHandle();
-      task_waiting = true;
+    sending = driver->dmx.status == DMX_STATUS_SENDING;
+    if (sending && wait_ticks > 0) {
+      driver->task_waiting = this_task_handle;
     }
     taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+    if (!sending || wait_ticks == 0) {
+      break;
+    }
 
     // Wait for a notification that the driver is done sending
-    if (task_waiting) {
-      result = xTaskNotifyWait(0, ULONG_MAX, NULL, wait_ticks);
-      driver->task_waiting = NULL;
+    waited = true;
+    if (!xTaskNotifyWait(0, ULONG_MAX, NULL, wait_ticks) ||
+        xTaskCheckForTimeOut(&timeout, &wait_ticks)) {
+      break;
     }
-  } else {
-    taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
-    if (driver->dmx.status == DMX_STATUS_SENDING) {
-      result = false;
-    }
-    taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+  }
+
+  bool recovered = false;
+  taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+  if (waited) {
+    driver->task_waiting = NULL;
+  }
+  sending = driver->dmx.status == DMX_STATUS_SENDING;
+  if (sending && dmx_timer_get_micros_since_boot() -
+                         driver->dmx.send_start_timestamp >
+                     (int64_t)driver->break_len + driver->mab_len +
+                         (int64_t)driver->dmx.size * 48 + 20000) {
+    /* WIFIDMX: this packet will never finish (an interrupt was lost).
+    Upstream reported "still sending" until a reboot. */
+    dmx_uart_disable_interrupt(dmx_num, DMX_INTR_TX_ALL);
+    dmx_uart_clear_interrupt(dmx_num, DMX_INTR_TX_ALL);
+    dmx_timer_stop(dmx_num);
+    dmx_uart_invert_tx(dmx_num, 0);
+    dmx_uart_txfifo_reset(dmx_num);
+    driver->dmx.status = DMX_STATUS_IDLE;
+    driver->dmx.progress = DMX_PROGRESS_COMPLETE;
+    sending = false;
+    recovered = true;
+  }
+  taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+  if (waited) {
+    xTaskNotifyStateClear(this_task_handle);
+  }
+  if (recovered) {
+    DMX_WARN("port %i: a packet never finished sending, reset the sender",
+             (int)dmx_num);
   }
 
   // Give the mutex back and return
   xSemaphoreGiveRecursive(driver->mux);
-  return result;
+  return !sending;
 }

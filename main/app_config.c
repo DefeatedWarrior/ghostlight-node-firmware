@@ -7,11 +7,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "sacn_transmitter.h"
 #include "merge_engine.h"
 #include "scene_manager.h"
 #include "rdm_bridge.h"
 #include "dmx_tools.h"
+#include "port_rules.h"
 #include "app.h"
 
 static const char *TAG = "main";
@@ -31,6 +33,69 @@ static const char *dmx_mode_to_string(dmx_mode_t mode)
 void app_config_changed(void *user_data)
 {
     xEventGroupSetBits(g_app.events, EV_APPLY);
+}
+
+/* Routing for output port @p p: which ports' DMX input it takes (see
+ * app_on_dmx_input). An input it no longer takes is dropped from the merge
+ * now instead of when it times out. */
+static void set_routing(int p, route_t *r, const port_config_t *pc)
+{
+    uint8_t mask = (!g_app.tester && app_mode_is_output(pc->mode)) ? pc->local_inputs : 0;
+    bool only = mask && pc->local_only;
+    uint8_t gone = r->local_mask & (uint8_t)~mask;
+    for (int k = 1; k <= NPORTS; k++) {
+        if (!(gone & (1u << (k - 1)))) continue;
+        static const uint8_t none[1];
+        merge_input_t in = {
+            .protocol = SOURCE_PROTOCOL_DMX_IN,
+            .source_ip = (uint32_t)k,
+            .data = none,
+            .terminated = true,
+        };
+        merge_engine_push(p, &in);
+    }
+    if (mask != r->local_mask || only != r->local_only) {
+        char list[4 * NPORTS + 1] = "";
+        size_t o = 0;
+        for (int k = 1; k <= NPORTS && o < sizeof(list); k++) {
+            if (mask & (1u << (k - 1))) o += snprintf(list + o, sizeof(list) - o, "%s%d", o ? "," : "", k);
+        }
+        if (mask) {
+            ESP_LOGI(TAG, "Port %d: routing %sDMX input of port %s", p, only ? "" : "network + ", list);
+        } else if (r->local_mask) {
+            ESP_LOGI(TAG, "Port %d: routing network only", p);
+        }
+    }
+    r->local_only = only;
+    r->splitter = only && (mask & (mask - 1)) == 0;
+    r->local_mask = mask;
+
+    /* Input ports: where to send */
+    uint8_t n = pc->send_to == SEND_TO_LIST ? pc->send_count : 0;
+    bool moved = pc->send_to != r->send_to || n != r->send_count;
+    for (uint8_t i = 0; i < n; i++) moved |= pc->send_list[i] != r->send_list[i];
+#if CONFIG_NODE_SACN
+    if (moved && r->tx_sacn_universe) {
+        /* end the stream where it went; the next frame starts the new one */
+        sacn_transmitter_terminate(r->tx_sacn_universe);
+        r->tx_sacn_universe = 0;
+    }
+#else
+    (void)moved;
+#endif
+    for (uint8_t i = 0; i < CONFIG_SEND_LIST_MAX; i++) {
+        r->send_list[i] = i < n ? pc->send_list[i] : 0;
+    }
+    r->send_count = n;
+    if (pc->send_to != r->send_to && app_mode_is_input(pc->mode)) {
+        ESP_LOGI(TAG, "Port %d: sending to %s", p,
+                 pc->send_to == SEND_TO_LIST ? "the address list (unicast)" :
+                 pc->send_to == SEND_TO_NODES ? "the Art-Net nodes that use the universe" :
+                 "everyone (broadcast / multicast)");
+    }
+    r->node_count = 0;
+    r->nodes_checked_us = 0;   /* look the nodes up again */
+    r->send_to = pc->send_to;
 }
 
 /* Failsafe look of a port: LOSS_SCENE plays the port's failsafe scene
@@ -60,8 +125,10 @@ static void apply_loss_behavior(int p, const config_t *c, const port_config_t *p
 void app_apply_config(void)
 {
     xSemaphoreTake(g_app.apply_lock, portMAX_DELAY);
-    config_t *c = config_get();
-    config_sanitize(c);
+    /* A copy: restarting a port can take seconds, and the web UI or Art-Net
+     * may change the settings meanwhile (they ask for another apply) */
+    config_t *snap = config_snapshot();
+    config_t *c = snap ? snap : config_get();   /* out of memory: the live ones */
     /* The self-test owns the port hardware until it finishes (it asks
      * for a full re-apply afterwards) */
     bool hw_locked = app_selftest_running();
@@ -84,6 +151,8 @@ void app_apply_config(void)
         merge_engine_config(p, pc->merge_mode, (uint32_t)c->merge.timeout_seconds * 1000);
         merge_engine_set_protocol_mode(p, pc->protocol_mode);
         apply_loss_behavior(p, c, pc);
+        /* patch / limit / park: node mode only, the tester sends raw levels */
+        port_rules_set(p, g_app.tester ? NULL : pc->rules, g_app.tester ? 0 : pc->rule_count);
 
         if (hw_locked) {
             continue;
@@ -98,6 +167,12 @@ void app_apply_config(void)
         }
 
         if (hw_changed) {
+            /* Restarting a port can take a few seconds: tell the task
+             * watchdog the main task is still going (before the main loop
+             * starts it is not watched yet) */
+            if (esp_task_wdt_status(NULL) == ESP_OK) {
+                esp_task_wdt_reset();
+            }
             /* stop sending first so callbacks don't route to a stopping port */
             r->mode = DMX_MODE_DISABLED;
 #if CONFIG_NODE_SACN
@@ -138,6 +213,7 @@ void app_apply_config(void)
         r->artnet = pc->universe_primary;
         r->artnet_backup = pc->universe_secondary;
         r->sacn = pc->sacn_universe;
+        set_routing(p, r, pc);
         r->mode = pc->mode;
 #if CONFIG_NODE_RDM
         rdm_bridge_set_port_address(p, pc->universe_primary);
@@ -154,6 +230,7 @@ void app_apply_config(void)
     sacn_transmitter_set_source_name(c->node_info.short_name);
 #endif
 
+    free(snap);
     xSemaphoreGive(g_app.apply_lock);
     artnet_receiver_notify_change(false);
 }

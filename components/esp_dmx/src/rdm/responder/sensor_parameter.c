@@ -36,7 +36,7 @@ static size_t rdm_rhd_get_set_sensor_value(
                    sizeof(sensor_num))) {
     return rdm_write_nack_reason(dmx_num, header, RDM_NR_FORMAT_ERROR);
   }
-  if (sensor_num > rdm_sensor_get_count(dmx_num, header->sub_device) &&
+  if (sensor_num >= rdm_sensor_get_count(dmx_num, header->sub_device) &&
       sensor_num != RDM_SENSOR_NUM_MAX) {
     return rdm_write_nack_reason(dmx_num, header, RDM_NR_DATA_OUT_OF_RANGE);
   }
@@ -90,7 +90,7 @@ static size_t rdm_rhd_set_record_sensors(
                    sizeof(sensor_num))) {
     return rdm_write_nack_reason(dmx_num, header, RDM_NR_FORMAT_ERROR);
   }
-  if (sensor_num > rdm_sensor_get_count(dmx_num, header->sub_device) &&
+  if (sensor_num >= rdm_sensor_get_count(dmx_num, header->sub_device) &&
       sensor_num != RDM_SENSOR_NUM_MAX) {
     return rdm_write_nack_reason(dmx_num, header, RDM_NR_DATA_OUT_OF_RANGE);
   }
@@ -108,12 +108,11 @@ static size_t rdm_rhd_get_sensor_definition(
     const rdm_header_t *header) {
   // Verify the requested sensor num is valid
   uint8_t sensor_num;
-  if (!rdm_read_pd(dmx_num, definition->set.request.format, &sensor_num,
+  if (!rdm_read_pd(dmx_num, definition->get.request.format, &sensor_num,
                    sizeof(sensor_num))) {
     return rdm_write_nack_reason(dmx_num, header, RDM_NR_FORMAT_ERROR);
   }
-  if (sensor_num > rdm_sensor_get_count(dmx_num, header->sub_device) &&
-      sensor_num != RDM_SENSOR_NUM_MAX) {
+  if (sensor_num >= rdm_sensor_get_count(dmx_num, header->sub_device)) {
     return rdm_write_nack_reason(dmx_num, header, RDM_NR_DATA_OUT_OF_RANGE);
   }
 
@@ -140,7 +139,7 @@ bool rdm_register_sensor_definition(dmx_port_t dmx_num, rdm_callback_t cb,
 
   // Check if this is the first time this function has been called
   const bool first_time_func_called =
-      dmx_parameter_exists(dmx_num, RDM_SUB_DEVICE_ROOT, pid);
+      !dmx_parameter_exists(dmx_num, RDM_SUB_DEVICE_ROOT, pid);
 
   // Add the parameter as an array of RDM sensor definitions
   const uint8_t sensor_count = sensors->sensor_count;
@@ -202,7 +201,7 @@ bool rdm_register_sensor_value(dmx_port_t dmx_num, uint8_t sensor_count,
 
   // Define the parameter
   static const rdm_parameter_definition_t definition = {
-      .pid_cc = RDM_CC_GET,
+      .pid_cc = RDM_CC_GET_SET,  // WIFIDMX: it has a SET handler
       .ds = RDM_DS_NOT_DEFINED,
       .get = {.handler = rdm_rhd_get_set_sensor_value,
               .request.format = "b$",
@@ -296,7 +295,7 @@ bool rdm_sensor_set(dmx_port_t dmx_num, rdm_sub_device_t sub_device,
 
   // Validate the sensor_num
   rdm_sensors_t *sensors = rdm_get_sensors(dmx_num, sub_device);
-  if (sensors == NULL || (sensor_num > sensors->sensor_count &&
+  if (sensors == NULL || (sensor_num >= sensors->sensor_count &&
                           sensor_num != RDM_SENSOR_NUM_MAX)) {
     return false;
   }
@@ -326,13 +325,13 @@ bool rdm_sensor_record(dmx_port_t dmx_num, rdm_sub_device_t sub_device,
 
   // Validate the sensor_num
   rdm_sensors_t *sensors = rdm_get_sensors(dmx_num, sub_device);
-  if (sensors == NULL || (sensor_num > sensors->sensor_count &&
+  if (sensors == NULL || (sensor_num >= sensors->sensor_count &&
                           sensor_num != RDM_SENSOR_NUM_MAX)) {
     return false;
   }
 
   if (sensor_num == 0xff) {
-    for (int i = sensors->sensor_count; i >= 0; --i) {
+    for (int i = sensors->sensor_count - 1; i >= 0; --i) {
       rdm_sensor_value_t *sensor = &sensors->sensor_value[i];
       taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
       sensor->recorded_value = sensor->present_value;
@@ -357,13 +356,13 @@ bool rdm_sensor_reset(dmx_port_t dmx_num, rdm_sub_device_t sub_device,
 
   // Validate the sensor_num
   rdm_sensors_t *sensors = rdm_get_sensors(dmx_num, sub_device);
-  if (sensors == NULL || (sensor_num > sensors->sensor_count &&
+  if (sensors == NULL || (sensor_num >= sensors->sensor_count &&
                           sensor_num != RDM_SENSOR_NUM_MAX)) {
     return false;
   }
 
   if (sensor_num == 0xff) {
-    for (int i = sensors->sensor_count; i >= 0; --i) {
+    for (int i = sensors->sensor_count - 1; i >= 0; --i) {
       rdm_sensor_value_t *sensor = &sensors->sensor_value[i];
       taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
       sensor->present_value = 0;
@@ -395,7 +394,7 @@ bool rdm_sensor_definition_add(dmx_port_t dmx_num, rdm_sub_device_t sub_device,
 
   // Validate the definition sensor number
   rdm_sensors_t *sensors = rdm_get_sensors(dmx_num, sub_device);
-  if (sensors == NULL || definition->num > sensors->sensor_count) {
+  if (sensors == NULL || definition->num >= sensors->sensor_count) {
     return false;
   }
 
@@ -426,7 +425,7 @@ const rdm_sensor_definition_t *rdm_sensor_definition_get(
 
   // Validate the definition sensor number
   rdm_sensors_t *sensors = rdm_get_sensors(dmx_num, sub_device);
-  if (sensors == NULL || sensor_num > sensors->sensor_count) {
+  if (sensors == NULL || sensor_num >= sensors->sensor_count) {
     return NULL;
   }
 

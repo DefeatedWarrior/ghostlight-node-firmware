@@ -43,7 +43,10 @@ ap.add_argument('--tester', action='store_true', help='start in DMX tester mode'
 ap.add_argument('--no-ethernet', action='store_true', help='firmware built without Ethernet')
 ap.add_argument('--off', default='', help='comma-separated features to leave out: ' + ','.join(FEATURES))
 ap.add_argument('--setup', action='store_true', help='show the first-run setup')
+ap.add_argument('--notice', default='', help='settings notice to show (as after a damaged settings file)')
 ap.add_argument('--no-login', action='store_true', help='sign-in turned off (setup done without a password)')
+ap.add_argument('--signal', default='good', choices=['good', 'offbyone', 'nothing', 'filtered', 'lossy', 'multicast', 'clash'],
+                help='what the signal check hears (default: good)')
 ap.add_argument('--root', default=ROOT, help='folder with index.html and main.js (default: the firmware\'s web_ui)')
 args = ap.parse_args()
 ROOT = args.root
@@ -65,13 +68,16 @@ def default_port(n):
         'sacn_universe': n, 'protocol_mode': 4, 'merge_mode': 0, 'rdm_enabled': True,
         'out_rate_hz': 44, 'break_us': 176, 'mab_us': 12, 'out_slots': 512,
         'startup_scene': 0, 'failsafe_scene': 0,
+        'rules': [{'type': 'park', 'channel': 512, 'count': 1, 'level': 255}] if n == 1 else [],
+        'local_inputs': [], 'local_only': False,
+        'send_to': 'all', 'send_list': [],
     }
 
 
 def default_config():
     c = {
         'network': {
-            'mode': 0, 'ap_always': False, 'ap_ssid': 'ESP-NODE-1A2B', 'ap_open': False, 'ap_channel': 6,
+            'mode': 0, 'ap_always': False, 'ap_ssid': 'ESP-NODE-1A2B', 'ap_open': False, 'ap_channel': 6, 'ap_captive': True,
             'wifi_profiles': [
                 {'ssid': 'Theatre-Tech', 'priority': 0, 'use_static_ip': False, 'static_ip': '', 'netmask': '255.255.255.0', 'gateway': '', 'has_password': True},
                 {'ssid': 'Home', 'priority': 1, 'use_static_ip': True, 'static_ip': '192.168.1.60', 'netmask': '255.255.255.0', 'gateway': '192.168.1.1', 'has_password': True},
@@ -121,6 +127,7 @@ S = {
     'identify_until': 0,
     'log': '',
     'crash': True,
+    'notice': args.notice,
     'wifi': {'state': 'connected', 'ssid': 'Theatre-Tech', 'connect_at': 0},
     'ap_linger_until': 0,
 }
@@ -339,7 +346,7 @@ def analysis_json(i):
         'alt_start_codes': an['alt'], 'last_alt_start_code': an['last_alt'], 'rdm_packets': an['rdm'],
         'interval_min_ms': 22 if sig else 0, 'interval_max_ms': 29 if sig else 0,
         'timing_on': now < an['timing_until'], 'timing_left_s': max(0, int(an['timing_until'] - now)),
-        'break_us': an['break_us'], 'mab_us': an['mab_us'],
+        'break_us': an['break_us'], 'mab_us': an['mab_us'], 'dropped_late': 0,
     }
 
 
@@ -393,6 +400,8 @@ def system_info():
         'idf_version': 'v5.2.6', 'partition': 'ota_0', 'free_heap': 182344 - random.randint(0, 3000),
         'min_free_heap': 150112, 'uptime_sec': up, 'features': FEAT,
         'tester': {'available': FEAT['tester'], 'enabled': S['tester'], 'next_boot': bool(S['config']['tester']['enabled'])},
+        'board_id': 'ghostlight-rev1',
+        **({'settings_notice': S['notice']} if S['notice'] else {}),
     }
 
 
@@ -444,13 +453,127 @@ def ports_status():
             o['analysis'] = analysis_json(i)
             o['sources'] = []
         elif mode:
-            o['sources'] = [{'protocol': 'Art-Net', 'ip': '192.168.1.20', 'name': 'Lighting desk', 'priority': 0,
-                             'per_address_priority': False, 'backup': False, 'contributing': True, 'age_ms': 23, 'packets': S['frames_sent'][i]}]
-            if FEAT['sacn'] and n == 1:
+            local, only = pc.get('local_inputs', []), pc.get('local_only', False)
+            o['sources'] = [] if local and only else [
+                {'protocol': 'Art-Net', 'ip': '192.168.1.20', 'name': 'Lighting desk', 'priority': 0,
+                 'per_address_priority': False, 'backup': False, 'contributing': True, 'age_ms': 23, 'packets': S['frames_sent'][i]}]
+            if FEAT['sacn'] and n == 1 and not only:
                 o['sources'].append({'protocol': 'sACN', 'ip': '192.168.1.31', 'name': 'Backup desk', 'priority': 90,
                                      'per_address_priority': False, 'backup': False, 'contributing': False, 'age_ms': 140, 'packets': 1200})
+            for m in local:
+                if is_input(m) and S['signal'][m - 1]:
+                    o['sources'].append({'protocol': 'DMX', 'ip': '', 'port': m, 'name': f'Port {m} DMX in', 'priority': 100,
+                                         'per_address_priority': False, 'backup': False, 'contributing': True, 'age_ms': 25,
+                                         'packets': S['an'][m - 1]['frames']})
         out.append(o)
     return out
+
+
+def port_takes(pc, proto, universe):
+    """(used, filtered) as web_signal.c works it out"""
+    if pc['mode'] not in (1, 3) or (pc.get('local_inputs') and pc.get('local_only')):
+        return False, False
+    if proto == 'artnet':
+        match = universe == pc['universe_primary'] or (
+            pc['merge_mode'] == 3 and pc['universe_secondary'] >= 0 and universe == pc['universe_secondary'])
+        blocked = pc['protocol_mode'] == 1
+    else:
+        match = universe == pc['sacn_universe']
+        blocked = pc['protocol_mode'] == 0
+    return (match and not blocked), (match and blocked)
+
+
+def network_sources():
+    """GET /api/network/sources for the --signal scenario"""
+    cfg = S['config']
+    sc = args.signal
+    p1 = cfg['port1']
+    src = []
+
+    def add(proto, ip, uni, name='', prio=100, rate=44.0, lost=0, recent=0, gap=40, age=20, preview=False, pap=False):
+        s = {'protocol': proto, 'ip': ip, 'name': name, 'universe': uni, 'slots': 512, 'sequenced': True,
+             'packets': int(rate * (time.time() - BOOT)), 'lost': lost, 'lost_recent': recent, 'late': 0,
+             'rate': rate, 'max_gap_ms': gap, 'age_ms': age}
+        if proto == 'sacn':
+            s.update({'priority': prio, 'pap': pap, 'preview': preview})
+        s['ports'] = [n for n in range(1, NP + 1) if port_takes(cfg[f'port{n}'], proto, uni)[0]]
+        s['filtered'] = [n for n in range(1, NP + 1) if port_takes(cfg[f'port{n}'], proto, uni)[1]]
+        src.append(s)
+
+    adverts = []
+    if sc == 'good':
+        add('artnet', '192.168.1.20', p1['universe_primary'])
+        if FEAT['sacn']:
+            add('sacn', '192.168.1.31', p1['sacn_universe'], 'Backup desk', prio=90, rate=22.1, gap=180)
+            add('sacn', '192.168.1.31', 7, 'Backup desk', prio=90, rate=0.0, age=41000)
+            adverts.append({'ip': '192.168.1.31', 'name': 'Backup desk', 'universes': [p1['sacn_universe'], 7], 'count': 2, 'age_ms': 3200})
+    elif sc == 'offbyone':
+        add('artnet', '2.0.0.10', p1['universe_primary'] + 1)
+        if FEAT['sacn']:
+            adverts.append({'ip': '2.0.0.10', 'name': 'ETC Eos', 'universes': [p1['sacn_universe'] + 1, p1['sacn_universe'] + 2], 'count': 2, 'age_ms': 5000})
+    elif sc == 'filtered':
+        add('artnet', '192.168.1.20', p1['universe_primary'])
+        cfg['port1']['protocol_mode'] = 1
+        for s in src:
+            s['ports'], s['filtered'] = [], [1]
+    elif sc == 'lossy':
+        add('sacn' if FEAT['sacn'] else 'artnet', '192.168.1.31', p1['sacn_universe'] if FEAT['sacn'] else p1['universe_primary'],
+            'Tablet', rate=31.5, lost=240, recent=37, gap=1450)
+    elif sc == 'multicast':
+        adverts.append({'ip': '192.168.1.31', 'name': 'Backup desk', 'universes': [p1['sacn_universe']], 'count': 1, 'age_ms': 2100})
+
+    ifs = [{'name': 'wifi', 'ip': '192.168.1.47', 'netmask': '255.255.255.0', 'rssi': -78 if sc == 'lossy' else -58,
+            'ssid': S['wifi']['ssid'], 'channel': 6}]
+    ports = []
+    for n in range(1, NP + 1):
+        pc = cfg[f'port{n}']
+        ports.append({'port': n, 'mode': pc['mode'], 'output': pc['mode'] in (1, 3), 'protocol_mode': pc['protocol_mode'],
+                      'merge_mode': pc['merge_mode'], 'artnet': pc['universe_primary'], 'artnet_backup': pc['universe_secondary'],
+                      'sacn': pc['sacn_universe'], 'live_sources': 0, 'contributing': 0, 'rules': bool(pc.get('rules')),
+                      'local_inputs': pc.get('local_inputs', []) if pc['mode'] in (1, 3) else [],
+                      'local_only': pc['mode'] in (1, 3) and bool(pc.get('local_inputs')) and bool(pc.get('local_only')),
+                      'input': is_input(n)})
+        if is_input(n):
+            ports[-1]['signal'] = S['signal'][n - 1]
+    return {'listening': not cfg['tester']['enabled'], 'interfaces': ifs, 'ports': ports,
+            'sources': src, 'advertised': adverts}
+
+
+LAST_POLL = [0.0]
+
+
+def network_nodes():
+    """GET /api/network/nodes: other Art-Net nodes for the --signal scenario"""
+    now = time.time()
+    polled = now - LAST_POLL[0] >= 5
+    if polled:
+        LAST_POLL[0] = now
+    sc = args.signal
+
+    def port(out=None, inp=None, out_data=True, in_data=True):
+        return {'output': out is not None, 'input': inp is not None, 'protocol': 0,
+                'in': inp or 0, 'out': out or 0, 'in_data': inp is not None and in_data,
+                'out_data': out is not None and out_data}
+
+    def node(ip, mac, short, long='', ports=(), style=0, bind=1, conflict=False, age=1200, dhcp=False):
+        return {'ip': ip, 'mac': mac, 'short_name': short, 'long_name': long, 'firmware': 0x0104, 'oem': 0x2BC0,
+                'esta': 0x7FF0, 'style': style, 'bind_index': bind, 'dhcp': dhcp, 'conflict': conflict,
+                'replies': 12, 'age_ms': age, 'ports': list(ports)}
+
+    nodes = []
+    if sc not in ('nothing',):
+        nodes.append(node('192.168.1.20', '00:1c:2d:00:11:22', 'Lighting desk', 'Desk, Art-Net out',
+                          [port(inp=0), port(inp=2)], style=1, age=800))
+        nodes.append(node('192.168.1.60', '24:6f:28:aa:bb:01', 'Stage left', 'Stage left rack',
+                          [port(out=0)], bind=1, dhcp=True))
+        nodes.append(node('192.168.1.60', '24:6f:28:aa:bb:01', 'Stage left', 'Stage left rack',
+                          [port(out=4, out_data=False)], bind=2, dhcp=True))
+    if sc == 'clash':
+        nodes.append(node('192.168.1.47', 'b8:27:eb:12:34:56', 'Pi visualiser', '', [], style=6, conflict=True, age=2100))
+        nodes.append(node('192.168.1.71', '00:50:c2:01:02:03', 'Old splitter', 'Two-port gateway', [port(inp=1)]))
+        nodes.append(node('192.168.1.80', '00:50:c2:0a:0b:0c', 'FOH node', '', [port(out=7)]))
+        nodes.append(node('192.168.1.80', '00:50:c2:0d:0e:0f', 'Spare node', '', [port(out=8)]))
+    return {'listening': not S['config']['tester']['enabled'], 'polled': polled, 'nodes': nodes}
 
 
 def tester_json():
@@ -648,12 +771,28 @@ class H(SimpleHTTPRequestHandler):
                     b['network']['ap_open'] = b['network'].pop('ap_password') == ''
                 if not FEAT['ethernet'] and b['network'].get('mode') == 1:
                     b['network']['mode'] = 0
+            for n in range(1, NP + 1):
+                lp = (b.get(f'port{n}') or {}).get('local_inputs')
+                if lp is not None:
+                    if not isinstance(lp, list) or any(not isinstance(m, int) or isinstance(m, bool) or not 1 <= m <= NP for m in lp):
+                        raise Err(400, 'Routed inputs must be a list of port numbers')
+                    if n in lp:
+                        raise Err(400, 'A port cannot take its own DMX input')
+                    b[f'port{n}']['local_inputs'] = sorted(set(lp))
             merge(cfg, b)
+            for n in range(1, NP + 1):
+                pc = cfg[f'port{n}']
+                if not pc.get('local_inputs'):
+                    pc['local_only'] = False
             log('I', 'config', 'Configuration saved')
             return {'status': 'ok'}
 
         if p == '/api/network/status':
             return network_status()
+        if p == '/api/network/sources':
+            return network_sources()
+        if p == '/api/network/nodes':
+            return network_nodes()
         if p == '/api/network/wifi-scan':
             time.sleep(0.8)
             saved = {x['ssid'] for x in cfg['network']['wifi_profiles']}
@@ -822,6 +961,16 @@ class H(SimpleHTTPRequestHandler):
         if p == '/api/diag/crash/clear':
             S['crash'] = False
             return {'status': 'ok'}
+        if p == '/api/system/notice/clear':
+            S['notice'] = ''
+            return {'status': 'ok'}
+        if p == '/api/diag/health':
+            stacks = [('led_task', 1980), ('reset_btn', 684), ('IDLE1', 696), ('IDLE0', 716), ('ipc0', 724),
+                      ('ipc1', 768), ('dmx_out_1', 1532), ('rdm_bridge', 1780), ('tiT', 1948), ('dmx_in_2', 2900)]
+            return {'internal_free': 59403 - random.randint(0, 2000), 'internal_min_free': 38919,
+                    'internal_largest': 24576, 'internal_low': 16384, 'psram_free': 8348740,
+                    'psram_min_free': 8348436, 'stack_low': 512,
+                    'stacks': [{'task': t, 'free': f} for t, f in sorted(stacks, key=lambda x: x[1])]}
         raise Err(404, f'No such endpoint: {m} {p}')
 
     # -- WebSocket: binary level frames at 10 Hz, JSON commands in ----------

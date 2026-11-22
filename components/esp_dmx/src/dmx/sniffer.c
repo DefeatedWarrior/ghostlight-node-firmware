@@ -7,6 +7,8 @@
 bool dmx_sniffer_enable(dmx_port_t dmx_num, int intr_pin) {
   DMX_CHECK(dmx_num < DMX_NUM_MAX, false, "dmx_num error");
   DMX_CHECK(dmx_sniffer_pin_is_valid(intr_pin), false, "intr_pin error");
+  DMX_CHECK(dmx_driver_is_installed(dmx_num), false,
+            "driver is not installed");  // WIFIDMX
   DMX_CHECK(!dmx_sniffer_is_enabled(dmx_num), false,
             "sniffer is already enabled");
 
@@ -14,6 +16,9 @@ bool dmx_sniffer_enable(dmx_port_t dmx_num, int intr_pin) {
 
   // Set sniffer default values
   driver->sniffer.last_neg_edge_ts = -1;  // Negative edge hasn't been seen yet
+  /* WIFIDMX: no readings until there are some (it was uninitialised memory) */
+  driver->sniffer.metadata[0] = (dmx_metadata_t){0};
+  driver->sniffer.metadata[1] = (dmx_metadata_t){0};
 
   dmx_driver[dmx_num]->sniffer.is_enabled = true;
 

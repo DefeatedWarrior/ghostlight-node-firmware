@@ -1,6 +1,6 @@
 <div align="center">
 
-# ESP-NODE-2RDM
+# Ghostlight Node Firmware
 
 ### Professional Art-Net / sACN to DMX512/RDM Converter
 
@@ -28,7 +28,7 @@
 
 ## 🎯 Overview
 
-ESP-NODE-2RDM is a professional lighting control device that converts network protocols (Art-Net/sACN) to DMX512/RDM signals. It runs on ESP32-S3 and ESP32 boards, with Ethernet (W5500) and WiFi and 2 independent DMX/RDM ports.
+Ghostlight Node is a professional lighting control device that converts network protocols (Art-Net/sACN) to DMX512/RDM signals. It runs on ESP32-S3 and ESP32 boards, with Ethernet (W5500) and WiFi and 2 independent DMX/RDM ports.
 
 It is the firmware for the **Ghostlight Node**, whose hardware (KiCad
 project, BOM, assembly and docs) is in [ghostlight-node](https://github.com/DefeatedWarrior/ghostlight-node).
@@ -54,14 +54,16 @@ with a W5500 and two RS485 transceivers, and other boards can be added. See
 ### DMX512 & RDM
 - ✅ **Dual Independent Ports** - 2 fully configurable DMX/RDM ports
 - ✅ **DMX Output** - ~44 Hz refresh rate, 512 channels per port
-- ✅ **DMX Input** - Monitor incoming DMX data
+- ✅ **DMX Input** - Monitor incoming DMX data and send it to the network: to everyone (broadcast / multicast), to the Art-Net nodes that output that universe, or to up to 4 addresses you list. The last two send unicast, which Wi-Fi delivers far more reliably
 - ✅ **RDM Master** - Device discovery, parameter get/set
 - ✅ **RDM Responder** - Respond to RDM queries
 - ✅ **Flexible Universe Mapping** - Per-port universe configuration with offset support
+- ✅ **Channel Rules** - Per output port, up to 8: **patch** a block of channels onto others, **limit** channels to a maximum level, **park** channels at a fixed level, whatever the console sends
+- ✅ **DMX Splitter / Merger** - An output port can take another port's DMX input: on its own (a splitter that follows the desk frame by frame and ignores the network) or merged with the network sources like another console
 
 ### Advanced Merge Engine
 - ✅ **HTP** (Highest Takes Precedence) - For intensity control
-- ✅ **LTP** (Lowest Takes Precedence) - Alternative merge mode
+- ✅ **LTP** (Latest Takes Precedence) - The most recent change to a channel wins
 - ✅ **LAST** - Last received packet wins
 - ✅ **BACKUP** - Primary/backup source failover
 - ✅ **Configurable Timeout** - Source timeout detection (2-10 seconds)
@@ -69,7 +71,7 @@ with a W5500 and two RS485 transceivers, and other boards can be added. See
 ### Network Connectivity
 - ✅ **W5500 Ethernet** - Primary connection via SPI
 - ✅ **WiFi Station** - Multiple profile support with priority
-- ✅ **WiFi Access Point** - Fallback configuration mode
+- ✅ **WiFi Access Point** - Fallback configuration mode; phones and laptops that join it open the setup page by themselves (captive portal, can be turned off)
 - ✅ **Auto-Fallback** - Automatic failover: Ethernet → WiFi STA → WiFi AP
 - ✅ **Static/DHCP** - Support for both IP assignment methods
 
@@ -78,7 +80,11 @@ with a W5500 and two RS485 transceivers, and other boards can be added. See
 - ✅ **Real-Time Monitoring** - Live DMX channel display via WebSocket
 - ✅ **RDM Control Panel** - Device discovery and parameter management
 - ✅ **Network Statistics** - Connection status and performance metrics
-- ✅ **Firmware OTA Update** - Over-the-air firmware updates
+- ✅ **Signal Check** - Every Art-Net / sACN sender the node hears (also on universes no port uses), with packet rate, lost packets and gaps, and plain-language hints: universe off by one, protocol filtered out, preview data, sACN announced but blocked, console on another subnet, weak Wi-Fi
+- ✅ **Other Art-Net Nodes** - Every node, console and gateway that answers an ArtPoll, with its ports and universes; warns about IP address clashes (also with this node) and two inputs sending the same universe
+- ✅ **Firmware OTA Update** - Over-the-air firmware updates. The node refuses firmware built for another board; firmware from before this check goes on over USB with the browser flasher
+- ✅ **Safe Settings** - Each save keeps the previous copy; a damaged settings file falls back to it, and the web UI says so instead of quietly going back to factory settings
+- ✅ **Diagnostics** - Log, crash report, and memory / task-stack headroom (also logged every 30 s, as a warning when low)
 
 ### DMX Tester Mode
 - ✅ **One switch in the web UI** - turns the node into a DMX tester; it stays one after a restart until you switch back
@@ -100,7 +106,7 @@ with a W5500 and two RS485 transceivers, and other boards can be added. See
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     ESP-NODE-2RDM System                     │
+│                   Ghostlight Node System                    │
 ├─────────────────────────────────────────────────────────────┤
 │                                                               │
 │  ┌─────────────┐        ┌──────────────┐                    │
@@ -372,18 +378,38 @@ See [UPGRADE_ROADMAP.md](docs/history/UPGRADE_ROADMAP.md) for future versions (v
 - Try AP mode to reconfigure
 
 **Q: No DMX output**
+- Look at the **Signal check** card on the Overview page first
+- A **park** or **limit** channel rule (Ports page) holds channels whatever arrives
+- A port set to take another port's DMX **input only (splitter)** ignores Art-Net and sACN
 - Verify DMX port mode is set to "Output" in configuration
 - Check universe assignment matches your controller
 - Ensure network connection is active (check LED status)
 - Verify RS485 transceiver wiring
 
+**Q: The web UI says there was a settings problem at start-up**
+- The settings file was damaged (usually power lost mid-save, or worn flash). The
+  node started with the copy saved before the last change, or with factory
+  settings if that copy was damaged too, and says which. Check the settings,
+  then click **Got it**
+
+**Q: A firmware upload is refused**
+- "This firmware is for the ... board": pick the file for this board (System page
+  shows which board the node is)
+- "This file does not say which board it is for": firmware from before the board
+  check. Install it over USB with the browser flasher
+
 **Q: Can't access web interface**
+- Another device may have the same IP address: the **Other Art-Net nodes** card
+  on the Overview page flags address clashes
 - Check network connection and device IP address
 - In AP mode, connect to "ArtnetNode-XXXX" network
 - Try pinging device IP address
 - Check firewall settings
 
 **Q: Art-Net/sACN data not received**
+- Open the **Signal check** card on the Overview page: it lists everything the node
+  hears and says what looks wrong (wrong universe, protocol filtered, preview data,
+  multicast blocked, another subnet)
 - Verify correct universe configuration
 - Check network firewall allows UDP traffic
 - Ensure controller is sending to correct IP/multicast address
@@ -419,7 +445,6 @@ Contributions are welcome! When contributing to this project, please:
 ## 📞 Support
 
 - **Issues**: [GitHub Issues](https://github.com/DefeatedWarrior/ghostlight-node-firmware/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/thinhh0321/ESP-NODE-2RDM/discussions)
 - **Author**: thinhh0321
 
 ## 📄 License

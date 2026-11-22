@@ -185,9 +185,10 @@ esp_err_t led_manager_init(void) {
     current_state.priority = LED_PRIORITY_LOWEST; // value 255
     // ============================================================
 
-    // 3. Task
+    // 3. Task. 4 KB: led_strip_refresh goes through the RMT driver, and
+    // 2 KB left only 20 bytes free on the S3 (see /api/diag/health)
     is_running = true;
-    BaseType_t res = xTaskCreatePinnedToCore(led_task, "led_task", 2048, NULL, 3, &led_task_handle, BOARD_CORE_DMX);
+    BaseType_t res = xTaskCreatePinnedToCore(led_task, "led_task", 4096, NULL, 3, &led_task_handle, BOARD_CORE_DMX);
     if (res != pdPASS) {
         ESP_LOGE(TAG, "Failed to create task");
         return ESP_FAIL;

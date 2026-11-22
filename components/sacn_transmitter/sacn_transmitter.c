@@ -84,6 +84,8 @@ typedef struct {
     uint8_t  priority;
     uint16_t length;
     int64_t  last_tx_us;
+    uint8_t  n_unicast;     /* 0 = multicast */
+    uint32_t unicast[SACN_TX_UNICAST_MAX];
     uint8_t  last_data[512];
 } tx_universe_t;
 
@@ -278,28 +280,40 @@ static esp_err_t send_packet(tx_universe_t *u, const uint8_t *data, uint16_t len
     pkt.start_code         = 0x00;
     memcpy(pkt.data, data, length);
 
-    struct sockaddr_in dest = {
-        .sin_family      = AF_INET,
-        .sin_port        = htons(SACN_PORT),
-        .sin_addr.s_addr = universe_to_mcast(u->universe),
-    };
-
-    ssize_t sent = sendto(s_tx.sock, &pkt, total_len, 0,
-                          (struct sockaddr *)&dest, sizeof(dest));
-    if (sent < 0) {
-        s_tx.stats.send_errors++;
-        if (s_tx.stats.send_errors == 1 || (s_tx.stats.send_errors % 100) == 0) {
-            ESP_LOGW(TAG, "sendto universe %u failed: %d (total errors: %" PRIu32 ")",
-                     u->universe, errno, s_tx.stats.send_errors);
+    const uint32_t mcast = universe_to_mcast(u->universe);
+    const uint32_t *ips = u->n_unicast ? u->unicast : &mcast;
+    int count = u->n_unicast ? u->n_unicast : 1;
+    esp_err_t ret = ESP_OK;
+    for (int i = 0; i < count; i++) {
+        struct sockaddr_in dest = {
+            .sin_family      = AF_INET,
+            .sin_port        = htons(SACN_PORT),
+            .sin_addr.s_addr = ips[i],
+        };
+        ssize_t sent = sendto(s_tx.sock, &pkt, total_len, 0,
+                              (struct sockaddr *)&dest, sizeof(dest));
+        if (sent < 0) {
+            s_tx.stats.send_errors++;
+            if (s_tx.stats.send_errors == 1 || (s_tx.stats.send_errors % 100) == 0) {
+                ESP_LOGW(TAG, "sendto universe %u failed: %d (total errors: %" PRIu32 ")",
+                         u->universe, errno, s_tx.stats.send_errors);
+            }
+            ret = ESP_FAIL;
+        } else {
+            s_tx.stats.packets_sent++;
         }
-        return ESP_FAIL;
     }
-    s_tx.stats.packets_sent++;
-    return ESP_OK;
+    return ret;
 }
 
 esp_err_t sacn_transmitter_send(uint16_t universe, const uint8_t *data,
                                 uint16_t length, uint8_t priority)
+{
+    return sacn_transmitter_send_to(universe, data, length, priority, NULL, 0);
+}
+
+esp_err_t sacn_transmitter_send_to(uint16_t universe, const uint8_t *data, uint16_t length,
+                                   uint8_t priority, const uint32_t *ips, int count)
 {
     if (!s_tx.initialized || !data) {
         return ESP_ERR_INVALID_STATE;
@@ -308,8 +322,13 @@ esp_err_t sacn_transmitter_send(uint16_t universe, const uint8_t *data,
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (!ips || count < 0) count = 0;
+    if (count > SACN_TX_UNICAST_MAX) count = SACN_TX_UNICAST_MAX;
+
     xSemaphoreTake(s_tx.lock, portMAX_DELAY);
     tx_universe_t *u = find_universe(universe, true);
+    u->n_unicast = (uint8_t)count;
+    if (count) memcpy(u->unicast, ips, sizeof(uint32_t) * count);
     esp_err_t ret = send_packet(u, data, length, priority, 0);
     u->priority = priority;
     u->length = length;

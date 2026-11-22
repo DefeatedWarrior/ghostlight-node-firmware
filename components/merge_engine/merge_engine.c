@@ -81,6 +81,11 @@ typedef struct {
     int64_t last_sync_us;
     uint8_t held[512];
 
+    /* Art-Net AcCancelMerge */
+    int64_t cancel_until_us;   /* the next ArtDmx takes over, 0 = not asked */
+    bool sole;                 /* only sole_ip's ArtDmx is taken */
+    uint32_t sole_ip;
+
     merge_stats_t stats;
 } port_ctx_t;
 
@@ -110,6 +115,11 @@ static const char *proto_name(source_protocol_t p)
 static void log_source(const char *what, uint8_t port, const source_t *s)
 {
     uint32_t ip = s->ip;
+    if (s->protocol == SOURCE_PROTOCOL_DMX_IN) {
+        /* source_ip is the input port number */
+        ESP_LOGI(TAG, "Port %u: %s DMX-in source port %u", port, what, (unsigned)ip);
+        return;
+    }
     ESP_LOGI(TAG, "Port %u: %s %s source %u.%u.%u.%u \"%s\" prio %u%s",
              port, what, proto_name(s->protocol),
              (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
@@ -127,7 +137,53 @@ static void remove_source(port_ctx_t *ctx, uint8_t idx)
     if (ctx->owner == idx) {
         ctx->owner = NO_SOURCE;
     }
+    const source_t *s = &ctx->sources[idx];
+    if (ctx->sole && s->protocol == SOURCE_PROTOCOL_ARTNET && s->ip == ctx->sole_ip) {
+        ctx->sole = false;     /* the console that took over has gone */
+    }
     memset(&ctx->sources[idx], 0, sizeof(source_t));
+}
+
+static void cancel_clear(port_ctx_t *ctx)
+{
+    ctx->cancel_until_us = 0;
+    ctx->sole = false;
+}
+
+/* AcCancelMerge: false if this ArtDmx is to be discarded */
+static bool cancel_filter(port_ctx_t *ctx, uint8_t port, const merge_input_t *in, int64_t now)
+{
+    if (ctx->cancel_until_us) {
+        bool due = now <= ctx->cancel_until_us;
+        ctx->cancel_until_us = 0;
+        if (due) {
+            /* The sources before the lock, so removing them can't clear it */
+            ctx->sole = false;
+            for (uint8_t i = 0; i < MERGE_MAX_SOURCES; i++) {
+                const source_t *s = &ctx->sources[i];
+                if (s->in_use && s->protocol == SOURCE_PROTOCOL_ARTNET && s->ip != in->source_ip) {
+                    remove_source(ctx, i);
+                }
+            }
+            ctx->sole = true;
+            ctx->sole_ip = in->source_ip;
+            uint32_t ip = in->source_ip;
+            ESP_LOGI(TAG, "Port %u: merge cancelled, only %u.%u.%u.%u's ArtDmx is taken", port,
+                     (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
+                     (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF));
+            return true;
+        }
+    }
+    if (!ctx->sole || in->source_ip == ctx->sole_ip) return true;
+    for (int i = 0; i < MERGE_MAX_SOURCES; i++) {
+        const source_t *s = &ctx->sources[i];
+        if (s->in_use && s->protocol == SOURCE_PROTOCOL_ARTNET && s->ip == ctx->sole_ip &&
+            now - s->last_rx_us <= ctx->timeout_us) {
+            return false;
+        }
+    }
+    ctx->sole = false;         /* it stopped */
+    return true;
 }
 
 static void expire_sources(port_ctx_t *ctx, uint8_t port, int64_t now)
@@ -234,6 +290,7 @@ esp_err_t merge_engine_config(uint8_t port, merge_mode_t mode, uint32_t timeout_
     if (ctx->mode != mode) {
         memset(ctx->ltp_src, NO_SOURCE, sizeof(ctx->ltp_src));
         ctx->owner = NO_SOURCE;
+        cancel_clear(ctx);
     }
     ctx->mode = mode;
     ctx->timeout_us = (int64_t)timeout_ms * 1000;
@@ -304,6 +361,13 @@ esp_err_t merge_engine_push(uint8_t port, const merge_input_t *in)
     xSemaphoreTake(ctx->mutex, portMAX_DELAY);
 
     if (!protocol_allowed(ctx->protocol_mode, in->protocol)) {
+        ctx->stats.packets_filtered++;
+        xSemaphoreGive(ctx->mutex);
+        return ESP_OK;
+    }
+
+    if (in->protocol == SOURCE_PROTOCOL_ARTNET && !in->terminated &&
+        !cancel_filter(ctx, port, in, now)) {
         ctx->stats.packets_filtered++;
         xSemaphoreGive(ctx->mutex);
         return ESP_OK;
@@ -766,6 +830,36 @@ bool merge_engine_is_output_active(uint8_t port)
     return active;
 }
 
+esp_err_t merge_engine_cancel_merge(uint8_t port)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    int64_t now = esp_timer_get_time();
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    expire_sources(ctx, port, now);
+    int artnet = 0;
+    for (int i = 0; i < MERGE_MAX_SOURCES; i++) {
+        const source_t *s = &ctx->sources[i];
+        if (s->in_use && s->protocol == SOURCE_PROTOCOL_ARTNET) artnet++;
+    }
+    /* "If Node is currently in merge mode, cancel merge mode upon receipt of
+     * next ArtDmx": when that is later than a source may be silent for, the
+     * merge has ended by itself */
+    if (artnet > 1) ctx->cancel_until_us = now + ctx->timeout_us;
+    xSemaphoreGive(ctx->mutex);
+    return ESP_OK;
+}
+
+esp_err_t merge_engine_resume_merge(uint8_t port)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(ctx->mutex, portMAX_DELAY);
+    cancel_clear(ctx);
+    xSemaphoreGive(ctx->mutex);
+    return ESP_OK;
+}
+
 esp_err_t merge_engine_blackout(uint8_t port)
 {
     port_ctx_t *ctx = ctx_for(port);
@@ -780,6 +874,7 @@ esp_err_t merge_engine_blackout(uint8_t port)
     ctx->local_active = false;
     ctx->net_active = false;
     ctx->sync = MERGE_SYNC_NONE;
+    cancel_clear(ctx);
     xSemaphoreGive(ctx->mutex);
     ESP_LOGI(TAG, "Port %u blackout", port);
     return ESP_OK;

@@ -1,0 +1,1 @@
+{"network":{"ap_captive":false},"port1":{"rules":[{"type":"patch","channel":101,"count":10,"from":1},{"type":"limit","channel":20,"count":2,"level":128},{"type":"park","channel":5,"count":1,"level":255}]},"port2":{"rules":[{"type":"park","channel":1,"count":512,"level":0},{"type":"nope","channel":1,"count":1,"level":1}]}}
