@@ -40,7 +40,9 @@ bool rdm_register_identify_device(dmx_port_t dmx_num, rdm_callback_t cb,
   // Allocate parameter data
   uint8_t init_value = 0;
   if (!dmx_parameter_add(dmx_num, RDM_SUB_DEVICE_ROOT, pid,
-                         DMX_PARAMETER_TYPE_NON_VOLATILE, &init_value,
+                         /* WIFIDMX: E1.20 says it doesn't survive a restart:
+                         saving it only wore the flash */
+                         DMX_PARAMETER_TYPE_DYNAMIC, &init_value,
                          sizeof(init_value))) {
     return false;
   }

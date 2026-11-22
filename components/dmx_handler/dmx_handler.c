@@ -17,7 +17,9 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
+#include "esp_heap_caps.h"
 #include "driver/gpio.h"
+#include "board_gpio.h"
 #include "dmx/sniffer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,6 +32,7 @@
 
 #include "rdm/controller.h"
 #include "rdm/responder.h"
+#include "dmx/include/parameter.h"          /* dmx_parameter_commit() */
 #include "rdm/include/driver.h"             /* rdm_uid_get() */
 #include "rdm/include/uid.h"
 #include "rdm/controller/include/utils.h"   /* rdm_send_request(), rdm_request_t */
@@ -55,7 +58,12 @@ static const int8_t k_bias_pin[DMX_PORT_MAX] = BOARD_DMX_BIAS_GPIO;
 #define DMX_DISC_STACK_SIZE   6144
 #define DMX_DISC_PRIORITY     4
 
+/* The task that installs a port's driver, see install_on_dmx_core() */
+#define DMX_INSTALL_STACK_SIZE 6144
+#define DMX_INSTALL_PRIORITY  6
+
 #define DMX_RX_POLL_MS        200
+#define RDM_SAVE_MS           2000        /* responder: save what RDM set this often */
 #define DMX_TIMING_MAX_S      600         /* break/MAB measurement auto-off */
 
 /* RDM (E1.20) controller timing window */
@@ -63,6 +71,13 @@ static const int8_t k_bias_pin[DMX_PORT_MAX] = BOARD_DMX_BIAS_GPIO;
 #define RDM_BREAK_MAX_US      352
 #define RDM_MAB_MAX_US        88
 #define DMX_TASK_STOP_MS      1500
+/* A raw request and its response: both full, 2.8 ms apart, take 26.3 ms, more
+ * with gaps between slots. Without a response the driver gives up after 2.8 ms. */
+#define RDM_EXCHANGE_MS       50
+/* A fixture may ask for time (ACK_TIMER): most we wait per fixture, in all */
+#define RDM_ACK_TIMER_MAX_MS  1000
+/* Background discovery takes a fixture off the list after this many misses */
+#define DISC_MISSES_MAX       2
 
 #define DISC_IDLE_BIT         BIT0
 
@@ -105,7 +120,8 @@ typedef struct {
     volatile uint32_t timing_until_ms;  /* break/MAB measurement end (0 = off) */
     bool sniffer_on;
 
-    rdm_device_t devices[DMX_MAX_DEVICES];
+    rdm_device_t *devices;          /* device_count long (data_mutex) */
+    uint8_t dev_misses[DMX_MAX_DEVICES];    /* background passes that missed it */
     uint8_t device_count;
     volatile bool discovering;
     volatile bool disc_abort;
@@ -189,13 +205,58 @@ static esp_err_t install_driver(port_t *p)
     return ESP_OK;
 }
 
-static void uninstall_driver(port_t *p)
+static bool uninstall_driver(port_t *p)
 {
-    if (p->driver_installed) {
-        dmx_driver_delete(p->dmx_num);   /* also removes the sniffer ISR */
-        p->driver_installed = false;
-        p->sniffer_on = false;
+    if (!p->driver_installed) return true;
+    /* It refuses while a task is inside it, which is over within a packet */
+    for (int i = 0; i < 10; i++) {
+        if (!dmx_driver_is_installed(p->dmx_num) ||
+            dmx_driver_delete(p->dmx_num)) {    /* also removes the sniffer ISR */
+            p->driver_installed = false;
+            p->sniffer_on = false;
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
+    ESP_LOGE(TAG, "Port %u: the driver is busy and wasn't removed", p->port_num);
+    return false;
+}
+
+typedef struct {
+    port_t *p;
+    esp_err_t err;
+    SemaphoreHandle_t done;
+} install_job_t;
+
+static void install_task(void *arg)
+{
+    install_job_t *job = (install_job_t *)arg;
+    job->err = install_driver(job->p);
+    xSemaphoreGive(job->done);
+    vTaskDelete(NULL);
+}
+
+/*
+ * ESP-IDF puts an interrupt on the core that asks for it. Ports are started
+ * from the network side, which put the DMX timer and UART interrupts on the
+ * Wi-Fi core, so install from a task pinned to the DMX core. (Checking the
+ * caller's core wouldn't do: one that isn't pinned can move half-way.)
+ */
+static esp_err_t install_on_dmx_core(port_t *p)
+{
+    install_job_t job = {.p = p, .err = ESP_FAIL, .done = xSemaphoreCreateBinary()};
+    if (job.done) {
+        if (xTaskCreatePinnedToCore(install_task, "dmx_install", DMX_INSTALL_STACK_SIZE, &job,
+                                    DMX_INSTALL_PRIORITY, NULL, DMX_TASK_CORE) == pdPASS) {
+            xSemaphoreTake(job.done, portMAX_DELAY);
+            vSemaphoreDelete(job.done);
+            return job.err;
+        }
+        vSemaphoreDelete(job.done);
+    }
+    ESP_LOGW(TAG, "Port %u: no memory for the install task, interrupts stay on this core",
+             p->port_num);
+    return install_driver(p);
 }
 
 static bool port_has_rdm(const port_t *p)
@@ -398,8 +459,8 @@ static void sniffer_service(port_t *p)
     uint32_t until = p->timing_until_ms;
     bool want = until && (int32_t)(until - now_ms()) > 0;
     if (want && !p->sniffer_on) {
-        esp_err_t r = gpio_install_isr_service(0);
-        if (r != ESP_OK && r != ESP_ERR_INVALID_STATE) {
+        esp_err_t r = board_gpio_isr_service();
+        if (r != ESP_OK) {
             ESP_LOGW(TAG, "Port %u: GPIO ISR service failed (%d)", p->port_num, r);
             p->timing_until_ms = 0;
             return;
@@ -426,6 +487,7 @@ static void input_task(void *arg)
     uint8_t slots_buf[DMX_CHANNEL_COUNT];   /* the last frame forwarded */
     uint32_t last_seq = 0;   /* the driver's number of the last frame used */
     bool holding = false;    /* slots_buf holds a frame from the current signal */
+    uint32_t saved_ms = now_ms();
     memset(slots_buf, 0, sizeof(slots_buf));
 
     ESP_LOGI(TAG, "Port %u: input task running (%s)", p->port_num,
@@ -471,6 +533,13 @@ static void input_task(void *arg)
                 }
             } else if (pkt.err != DMX_OK && pkt.err != DMX_ERR_NOT_ENOUGH_SLOTS) {
                 p->stats.error_count++;
+            }
+        }
+        /* The driver only saves what RDM set when a receive times out, which
+         * never happens while DMX keeps arriving */
+        if (p->mode == DMX_MODE_RDM_RESPONDER && p->run && t - saved_ms >= RDM_SAVE_MS) {
+            saved_ms = t;
+            while (dmx_parameter_commit(p->dmx_num)) {
             }
         }
 
@@ -649,6 +718,7 @@ esp_err_t dmx_handler_deinit(void)
     }
     for (int i = 0; i < DMX_PORT_MAX; i++) {
         port_t *p = &s_dmx.ports[i];
+        free(p->devices);
         vSemaphoreDelete(p->bus);
         vSemaphoreDelete(p->data_mutex);
         vSemaphoreDelete(p->out_done);
@@ -659,6 +729,14 @@ esp_err_t dmx_handler_deinit(void)
     vSemaphoreDelete(s_dmx.state_mutex);
     s_dmx.initialized = false;
     return ESP_OK;
+}
+
+/* Caller holds data_mutex */
+static void devices_clear(port_t *p)
+{
+    free(p->devices);
+    p->devices = NULL;
+    p->device_count = 0;
 }
 
 esp_err_t dmx_handler_configure_port(uint8_t port, const port_config_t *config)
@@ -685,7 +763,7 @@ esp_err_t dmx_handler_configure_port(uint8_t port, const port_config_t *config)
 
     xSemaphoreTake(p->data_mutex, portMAX_DELAY);
     memset(p->buffer, 0, DMX_CHANNEL_COUNT);
-    p->device_count = 0;
+    devices_clear(p);
     p->tod_valid = false;
     xSemaphoreGive(p->data_mutex);
     xSemaphoreGive(s_dmx.state_mutex);
@@ -711,7 +789,10 @@ esp_err_t dmx_handler_start_port(uint8_t port)
         return ESP_OK;
     }
 
-    esp_err_t ret = install_driver(p);
+    /* Still there if the last stop couldn't remove it */
+    xSemaphoreTake(p->bus, portMAX_DELAY);
+    esp_err_t ret = uninstall_driver(p) ? install_on_dmx_core(p) : ESP_ERR_INVALID_STATE;
+    xSemaphoreGive(p->bus);
     if (ret != ESP_OK) {
         xSemaphoreGive(s_dmx.state_mutex);
         return ret;
@@ -945,7 +1026,7 @@ bool dmx_handler_rdm_available(uint8_t port)
  * port may have been reconfigured since the caller's first check. */
 static bool rdm_bus_ok(const port_t *p)
 {
-    return p->driver_installed && port_has_rdm(p);
+    return p->is_active && p->driver_installed && port_has_rdm(p);
 }
 
 /* Take the bus for an RDM request (the output task lets it in between frames) */
@@ -1027,7 +1108,7 @@ static int run_discovery(port_t *p, rdm_uid_t *found, bool unmute_all, disc_diag
     stack[sp].upper_bound = RDM_UID_MAX;
     sp++;
 
-    while (sp > 0 && !p->disc_abort && count < DMX_MAX_DEVICES) {
+    while (sp > 0 && !p->disc_abort && count < DMX_MAX_DEVICES) {    /* until the list is full */
         if (++transactions > DISC_MAX_TRANSACTIONS) {
             ESP_LOGW(TAG, "Port %u: discovery transaction limit reached", p->port_num);
             break;
@@ -1102,15 +1183,39 @@ static int run_discovery(port_t *p, rdm_uid_t *found, bool unmute_all, disc_diag
     return count;
 }
 
+/*
+ * The fixture answered "ask again in a while" (ACK_TIMER): wait, off the bus,
+ * and say whether to ask again. @p left is what this fixture may still cost,
+ * and every wait takes some of it.
+ */
+static bool ack_timer_wait(const port_t *p, const rdm_ack_t *ack, uint32_t *left)
+{
+    if (ack->type != RDM_RESPONSE_TYPE_ACK_TIMER || *left == 0) return false;
+    uint32_t ms = clamp_u32((uint32_t)ack->timer * portTICK_PERIOD_MS, 20, RDM_ACK_TIMER_MAX_MS);
+    if (ms > *left) ms = *left;
+    *left -= ms;
+    while (ms && !p->disc_abort) {
+        uint32_t step = ms < 50 ? ms : 50;
+        vTaskDelay(pdMS_TO_TICKS(step) ? pdMS_TO_TICKS(step) : 1);
+        ms -= step;
+    }
+    return !p->disc_abort;
+}
+
 static void read_device_info(port_t *p, rdm_device_t *dev)
 {
-    rdm_ack_t ack = ACK_INIT;
+    rdm_ack_t ack;
     rdm_device_info_t info;
+    uint32_t left = RDM_ACK_TIMER_MAX_MS;
+    size_t got;
 
     memset(&info, 0, sizeof(info));
-    if (RDM_LOCKED(p, rdm_send_get_device_info(p->dmx_num, &dev->uid,
-                                               RDM_SUB_DEVICE_ROOT, &info, &ack)) > 0 &&
-        ack.type == RDM_RESPONSE_TYPE_ACK) {
+    do {
+        ack = ACK_INIT;
+        got = RDM_LOCKED(p, rdm_send_get_device_info(p->dmx_num, &dev->uid,
+                                                     RDM_SUB_DEVICE_ROOT, &info, &ack));
+    } while (ack_timer_wait(p, &ack, &left));
+    if (got > 0 && ack.type == RDM_RESPONSE_TYPE_ACK) {
         p->stats.rdm_responses_rx++;
         dev->device_model = info.model_id;
         dev->dmx_footprint = info.footprint;
@@ -1133,10 +1238,12 @@ static void read_device_info(port_t *p, rdm_device_t *dev)
             .cc = RDM_CC_GET_COMMAND,
             .pid = labels[i].pid,
         };
-        char tmp[33] = {0};
-        ack = ACK_INIT;
-        if (RDM_LOCKED(p, rdm_send_request(p->dmx_num, &req, "a$", tmp, 32, &ack)) > 0 &&
-            ack.type == RDM_RESPONSE_TYPE_ACK) {
+        char tmp[33] = {0};     /* 32 characters and the null */
+        do {
+            ack = ACK_INIT;
+            got = RDM_LOCKED(p, rdm_send_request(p->dmx_num, &req, "a$", tmp, sizeof(tmp), &ack));
+        } while (ack_timer_wait(p, &ack, &left));
+        if (got > 0 && ack.type == RDM_RESPONSE_TYPE_ACK) {
             p->stats.rdm_responses_rx++;
             memcpy(labels[i].dst, tmp, 32);
             labels[i].dst[32] = '\0';
@@ -1144,10 +1251,12 @@ static void read_device_info(port_t *p, rdm_device_t *dev)
     }
 
     char sw[33] = {0};
-    ack = ACK_INIT;
-    if (RDM_LOCKED(p, rdm_send_get_software_version_label(p->dmx_num, &dev->uid,
-                                                          RDM_SUB_DEVICE_ROOT, sw, 32, &ack)) > 0 &&
-        ack.type == RDM_RESPONSE_TYPE_ACK) {
+    do {
+        ack = ACK_INIT;
+        got = RDM_LOCKED(p, rdm_send_get_software_version_label(
+                                p->dmx_num, &dev->uid, RDM_SUB_DEVICE_ROOT, sw, sizeof(sw), &ack));
+    } while (ack_timer_wait(p, &ack, &left));
+    if (got > 0 && ack.type == RDM_RESPONSE_TYPE_ACK) {
         memcpy(dev->software_label, sw, 32);
         dev->software_label[32] = '\0';
     }
@@ -1160,20 +1269,53 @@ static void log_device(const port_t *p, int i, const rdm_device_t *d)
              d->dmx_footprint, d->manufacturer_label, d->device_label);
 }
 
-static bool dev_listed(const rdm_device_t *devs, int n, const rdm_uid_t *uid)
+static int dev_index(const rdm_device_t *devs, int n, const rdm_uid_t *uid)
 {
     for (int i = 0; i < n; i++) {
-        if (rdm_uid_is_eq(&devs[i].uid, uid)) return true;
+        if (rdm_uid_is_eq(&devs[i].uid, uid)) return i;
     }
-    return false;
+    return -1;
+}
+
+/* Device lists go in PSRAM where there is some */
+static void *list_alloc(size_t count, size_t size)
+{
+#if CONFIG_SPIRAM
+    void *mem = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (mem) return mem;
+#endif
+    return calloc(count, size);
+}
+
+/* Make @p devs the port's list, in a block of just that size */
+static bool devices_store(port_t *p, const rdm_device_t *devs, const uint8_t *misses, int n)
+{
+    rdm_device_t *list = NULL;
+    if (n) {
+        list = list_alloc(n, sizeof(rdm_device_t));
+        if (!list) return false;
+        memcpy(list, devs, sizeof(rdm_device_t) * n);
+    }
+    xSemaphoreTake(p->data_mutex, portMAX_DELAY);
+    rdm_device_t *old = p->devices;
+    p->devices = list;
+    p->device_count = (uint8_t)n;
+    memcpy(p->dev_misses, misses, n);
+    p->tod_valid = true;
+    xSemaphoreGive(p->data_mutex);
+    free(old);
+    return true;
 }
 
 /*
  * Full discovery: un-mute everything, search the whole UID space and read
  * the details of every device.
- * Incremental discovery (Art-Net background discovery): mute each known
- * device to confirm it is still there (devices that don't answer are
- * dropped), then search without un-muting, so only new devices answer.
+ * Incremental discovery (Art-Net background discovery): un-mute everything,
+ * mute each known device to confirm it is still there, then search, so only
+ * the others answer. Without the un-mute, a fixture that was muted but has
+ * left the list (a lost reply, a cable out for a moment) never answers a
+ * search again until it is power-cycled. A known device is dropped when
+ * DISC_MISSES_MAX passes in a row neither mute nor find it.
  * Only new devices have their details read.
  */
 static void discovery_task(void *arg)
@@ -1183,30 +1325,50 @@ static void discovery_task(void *arg)
     bool incremental = p->disc_mode == DMX_DISC_INCREMENTAL && p->tod_valid;
 
     rdm_uid_t *found = calloc(DMX_MAX_DEVICES, sizeof(rdm_uid_t));
-    rdm_device_t *devs = calloc(DMX_MAX_DEVICES, sizeof(rdm_device_t));
-    rdm_device_t *known = incremental ? calloc(DMX_MAX_DEVICES, sizeof(rdm_device_t)) : NULL;
-    int n = 0, kept = 0, added = 0, lost = 0;
+    uint8_t *misses = calloc(DMX_MAX_DEVICES, 1);
+    rdm_device_t *devs = list_alloc(DMX_MAX_DEVICES, sizeof(rdm_device_t));
+    int n = 0, added = 0, lost = 0;
     disc_diag_t diag = {0};
 
-    if (found && devs && (!incremental || known)) {
+    if (found && devs && misses) {
         if (incremental) {
             xSemaphoreTake(p->data_mutex, portMAX_DELAY);
-            int kn = p->device_count;
-            memcpy(known, p->devices, sizeof(rdm_device_t) * kn);
+            n = p->device_count;
+            if (n) {
+                memcpy(devs, p->devices, sizeof(rdm_device_t) * n);
+                memcpy(misses, p->dev_misses, n);
+            }
             xSemaphoreGive(p->data_mutex);
-            for (int i = 0; i < kn && !p->disc_abort; i++) {
-                if (disc_mute(p, &known[i].uid)) {
-                    devs[n++] = known[i];
-                    kept++;
-                } else {
-                    ESP_LOGI(TAG, "Port %u: " UIDSTR " is gone", p->port_num, UID2STR(known[i].uid));
-                    lost++;
-                }
+            rdm_uid_t all = RDM_UID_BROADCAST_ALL;
+            for (int i = 0; i < 2 && !p->disc_abort; i++) {
+                (void)RDM_LOCKED(p, rdm_send_disc_un_mute(p->dmx_num, &all, NULL, NULL));
+            }
+            for (int i = 0; i < n && !p->disc_abort; i++) {
+                misses[i] = disc_mute(p, &devs[i].uid) ? 0 : misses[i] + 1;
             }
         }
         int nf = p->disc_abort ? 0 : run_discovery(p, found, !incremental, &diag);
+        if (incremental && !p->disc_abort) {
+            for (int i = 0; i < nf; i++) {
+                int at = dev_index(devs, n, &found[i]);
+                if (at >= 0) misses[at] = 0;
+            }
+            int keep = 0;
+            for (int i = 0; i < n; i++) {
+                if (misses[i] >= DISC_MISSES_MAX) {
+                    ESP_LOGI(TAG, "Port %u: " UIDSTR " is gone", p->port_num, UID2STR(devs[i].uid));
+                    lost++;
+                } else {
+                    devs[keep] = devs[i];
+                    misses[keep++] = misses[i];
+                }
+            }
+            n = keep;
+        }
         for (int i = 0; i < nf && n < DMX_MAX_DEVICES && !p->disc_abort; i++) {
-            if (dev_listed(devs, n, &found[i])) continue;
+            if (dev_index(devs, n, &found[i]) >= 0) continue;
+            memset(&devs[n], 0, sizeof(devs[n]));
+            misses[n] = 0;
             devs[n].uid = found[i];
             read_device_info(p, &devs[n]);
             log_device(p, n, &devs[n]);
@@ -1214,18 +1376,20 @@ static void discovery_task(void *arg)
             added++;
         }
         if (!p->disc_abort) {
-            xSemaphoreTake(p->data_mutex, portMAX_DELAY);
-            memcpy(p->devices, devs, sizeof(rdm_device_t) * n);
-            p->device_count = (uint8_t)n;
-            p->tod_valid = true;
-            xSemaphoreGive(p->data_mutex);
+            if (!devices_store(p, devs, misses, n)) {
+                ESP_LOGE(TAG, "Port %u: no memory for %d devices, the list is unchanged",
+                         p->port_num, n);
+            } else if (n == DMX_MAX_DEVICES && added) {
+                ESP_LOGW(TAG, "Port %u: the RDM list is full (%d): any more fixtures aren't listed",
+                         p->port_num, n);
+            }
         }
     } else {
         ESP_LOGE(TAG, "Port %u: discovery out of memory", p->port_num);
     }
     free(found);
+    free(misses);
     free(devs);
-    free(known);
 
     int64_t ms = (esp_timer_get_time() - t0) / 1000;
     if (incremental) {
@@ -1274,7 +1438,7 @@ esp_err_t dmx_handler_rdm_discover_mode(uint8_t port, dmx_disc_mode_t mode)
     }
     if (mode == DMX_DISC_FLUSH) {
         xSemaphoreTake(p->data_mutex, portMAX_DELAY);
-        p->device_count = 0;
+        devices_clear(p);
         p->tod_valid = false;
         xSemaphoreGive(p->data_mutex);
         mode = DMX_DISC_FULL;
@@ -1330,6 +1494,24 @@ size_t dmx_handler_get_rdm_uids(uint8_t port, rdm_uid_t *uids, size_t max)
 }
 
 /*
+ * Is @p resp the answer to @p req? From the fixture asked, to whoever asked
+ * (the console's UID, not ours), for that PID. A queued message comes with
+ * its own PID and the command class that goes with it.
+ */
+static bool rdm_reply_matches(const uint8_t *req, const uint8_t *resp)
+{
+    uint16_t pid = ((uint16_t)req[21] << 8) | req[22];
+    if (resp[2] != 24 + resp[23] || memcmp(&resp[3], &req[9], 6) != 0 ||
+        memcmp(&resp[9], &req[3], 6) != 0) {
+        return false;
+    }
+    if (pid == RDM_PID_QUEUED_MESSAGE && req[20] == RDM_CC_GET_COMMAND) {
+        return resp[20] == RDM_CC_GET_COMMAND_RESPONSE || resp[20] == RDM_CC_SET_COMMAND_RESPONSE;
+    }
+    return resp[20] == req[20] + 1 && resp[21] == req[21] && resp[22] == req[22];
+}
+
+/*
  * Raw RDM pass-through (Art-Net ArtRdm). @p req is a complete request with
  * start code and checksum, built by the controller (its own source UID and
  * transaction number are kept). The response, if any, is checked and copied
@@ -1346,8 +1528,8 @@ esp_err_t dmx_handler_rdm_transaction(uint8_t port, const uint8_t *req, size_t r
         req[2] < 24 || req_len < (size_t)req[2] + 2) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (req[20] == RDM_CC_DISC_COMMAND) {
-        return ESP_ERR_NOT_SUPPORTED;   /* discovery is the node's job */
+    if (req[20] != RDM_CC_GET_COMMAND && req[20] != RDM_CC_SET_COMMAND) {
+        return ESP_ERR_NOT_SUPPORTED;   /* discovery is the node's job, and only requests go out */
     }
     size_t len = (size_t)req[2] + 2;
     /* All-devices or manufacturer broadcast: nobody answers */
@@ -1367,7 +1549,7 @@ esp_err_t dmx_handler_rdm_transaction(uint8_t port, const uint8_t *req, size_t r
             if (broadcast) {
                 dmx_wait_sent(p->dmx_num, pdMS_TO_TICKS(50));
             } else {
-                got = dmx_receive(p->dmx_num, &pkt, pdMS_TO_TICKS(23));
+                got = dmx_receive(p->dmx_num, &pkt, pdMS_TO_TICKS(RDM_EXCHANGE_MS));
                 if (got > 0) {
                     if (got > resp_size) got = resp_size;
                     dmx_read(p->dmx_num, resp, got);
@@ -1388,6 +1570,9 @@ esp_err_t dmx_handler_rdm_transaction(uint8_t port, const uint8_t *req, size_t r
     for (size_t i = 0; i < ml; i++) sum += resp[i];
     if (sum != (((uint16_t)resp[ml] << 8) | resp[ml + 1])) {
         return ESP_ERR_INVALID_CRC;
+    }
+    if (!rdm_reply_matches(req, resp)) {
+        return ESP_ERR_INVALID_RESPONSE;    /* another fixture's, a late one or our own echo */
     }
     p->stats.rdm_responses_rx++;
     *resp_len = ml + 2;
@@ -1415,7 +1600,7 @@ esp_err_t dmx_handler_get_rdm_devices(uint8_t port, rdm_device_t *devices, size_
     if (!p || !devices || !count) return ESP_ERR_INVALID_ARG;
     xSemaphoreTake(p->data_mutex, portMAX_DELAY);
     size_t n = p->device_count < *count ? p->device_count : *count;
-    memcpy(devices, p->devices, n * sizeof(rdm_device_t));
+    if (n) memcpy(devices, p->devices, n * sizeof(rdm_device_t));
     *count = n;
     xSemaphoreGive(p->data_mutex);
     return ESP_OK;
@@ -1531,6 +1716,7 @@ esp_err_t dmx_handler_get_port_status(uint8_t port, dmx_port_status_t *status)
     status->universe = p->universe;
     status->stats = p->stats;
     status->rdm_device_count = p->device_count;
+    status->rdm_list_full = p->device_count >= DMX_MAX_DEVICES;
     status->rdm_available = dmx_handler_rdm_available(port);
     status->rdm_discovering = p->discovering;
     status->rdm_tod_valid = p->tod_valid;

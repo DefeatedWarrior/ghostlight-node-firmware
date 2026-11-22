@@ -171,6 +171,18 @@ merge_sync_t merge_engine_get_sync_state(uint8_t port);
 /** Synchronization universes the port's sACN sources use (deduplicated) */
 uint16_t merge_engine_sync_universes(uint8_t port, uint16_t *out, uint8_t max);
 
+/**
+ * Art-Net AcCancelMerge. If the port is merging Art-Net sources, the sender
+ * of the next ArtDmx takes it over and other Art-Net senders are discarded.
+ * sACN and local sources are untouched. The takeover ends when that sender
+ * stops, on merge_engine_resume_merge(), a merge mode change or a blackout;
+ * it isn't saved.
+ */
+esp_err_t merge_engine_cancel_merge(uint8_t port);
+
+/** Undo merge_engine_cancel_merge() (AcMergeLtp / AcMergeHtp) */
+esp_err_t merge_engine_resume_merge(uint8_t port);
+
 /** Drop all sources, clear the local layer and zero the output */
 esp_err_t merge_engine_blackout(uint8_t port);
 

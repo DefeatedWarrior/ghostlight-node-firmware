@@ -53,9 +53,9 @@ rdm_pid_t dmx_parameter_at(dmx_port_t dmx_num, rdm_sub_device_t sub_device,
 
   // Return early if the parameter index is out of bounds
   if ((sub_device == RDM_SUB_DEVICE_ROOT &&
-       index > driver->device.parameter_count.root) ||
+       index >= driver->device.parameter_count.root) ||
       (sub_device > RDM_SUB_DEVICE_ROOT &&
-       index > driver->device.parameter_count.sub_devices)) {
+       index >= driver->device.parameter_count.sub_devices)) {
     return 0;
   }
 

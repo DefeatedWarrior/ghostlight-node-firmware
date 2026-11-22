@@ -27,7 +27,8 @@ static size_t rdm_rhd_discovery(dmx_port_t dmx_num,
 
     // Get the discovery branch parameters
     rdm_disc_unique_branch_t branch;
-    if (!rdm_read_pd(dmx_num, definition->get.request.format, &branch,
+    if (header->pdl != sizeof(branch) ||  // WIFIDMX: half a range matched
+        !rdm_read_pd(dmx_num, definition->get.request.format, &branch,
                      sizeof(branch))) {
       return 0;  // Don't send NACK on error
     }
@@ -48,7 +49,7 @@ static size_t rdm_rhd_discovery(dmx_port_t dmx_num,
 
     // Get the binding UID of this device
     int num_ports = 0;
-    rdm_disc_mute_t mute;
+    rdm_disc_mute_t mute = {0};  // WIFIDMX: reserved bits went out
     for (int i = 0; i < DMX_NUM_MAX; ++i) {
       if (dmx_driver_is_installed(i)) {
         ++num_ports;

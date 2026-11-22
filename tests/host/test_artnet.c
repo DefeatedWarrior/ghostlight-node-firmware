@@ -400,8 +400,8 @@ static void test_artaddress_program(void)
     CHECK_EQ(addr.cmd.port, 2);
     CHECK_EQ(addr.cmd.net, 5);
     CHECK_EQ(addr.cmd.sub, 3);
-    CHECK_EQ(addr.cmd.universe, 0x0A);
-    CHECK(!addr.cmd.reset_address);
+    CHECK_EQ(addr.cmd.universe_out, 0x0A);
+    CHECK_EQ(addr.cmd.universe_in, ARTNET_FIELD_KEEP);
     CHECK_EQ(addr.cmd.command, ARTNET_AC_MERGE_LTP0);
     CHECK_EQ(addr.cmd.acn_priority, 150);
     CHECK_STR(addr.short_name, "Stage L");
@@ -419,20 +419,63 @@ static void test_artaddress_no_change_and_reset(void)
     CHECK_EQ(addr.cmd.port, 1);     /* BindIndex 0 means the first port */
     CHECK_EQ(addr.cmd.net, -1);
     CHECK_EQ(addr.cmd.sub, -1);
-    CHECK_EQ(addr.cmd.universe, -1);
-    CHECK(!addr.cmd.reset_address);
+    CHECK_EQ(addr.cmd.universe_in, ARTNET_FIELD_KEEP);
+    CHECK_EQ(addr.cmd.universe_out, ARTNET_FIELD_KEEP);
     CHECK(addr.cmd.short_name == NULL);
     CHECK(addr.cmd.long_name == NULL);
 
-    a.net = 0x00;                   /* 0 = reset to the default address */
+    /* port 2 at 5:3:A, default 0:0:1 */
+    const uint16_t now = 0x053A, dflt = 0x0001;
+
+    a.net = 0x00;                   /* 0 = reset that field, and only that one */
     feed(b, pk_artaddress(b, &a));
-    CHECK(addr.cmd.reset_address);
+    CHECK_EQ(addr.cmd.net, ARTNET_FIELD_RESET);
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, false, dflt), 0x003A);
+
     a.net = 0x7F; a.sub = 0x00;
     feed(b, pk_artaddress(b, &a));
-    CHECK(addr.cmd.reset_address);
-    a.sub = 0x7F; a.swin = 0x80 | 0x04;   /* SwIn used when SwOut has no change */
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, false, dflt), 0x050A);
+
+    a.sub = 0x7F; a.swout = 0x00;
     feed(b, pk_artaddress(b, &a));
-    CHECK_EQ(addr.cmd.universe, 4);
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, false, dflt), 0x0531);
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, true, dflt), now);    /* not an input's field */
+
+    a.swout = 0x7F; a.swin = 0x00;
+    feed(b, pk_artaddress(b, &a));
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, true, dflt), 0x0531);
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, false, dflt), now);
+
+    a.swin = 0x80 | 0x04;           /* SwIn is never an output's universe */
+    feed(b, pk_artaddress(b, &a));
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, true, dflt), 0x0534);
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, false, dflt), now);
+
+    a.swout = 0x80 | 0x07;          /* both given: each port takes its own */
+    feed(b, pk_artaddress(b, &a));
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, true, dflt), 0x0534);
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, false, dflt), 0x0537);
+
+    a.net = a.sub = 0x00; a.swout = 0x80 | 0x02;    /* a reset beside a value */
+    feed(b, pk_artaddress(b, &a));
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, false, dflt), 0x0002);
+
+    a.net = a.sub = a.swin = a.swout = 0x00;
+    feed(b, pk_artaddress(b, &a));
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, false, dflt), dflt);
+    CHECK_EQ(artnet_address_apply(&addr.cmd, now, true, dflt), dflt);
+}
+
+static void test_pollreply_acn_priority(void)
+{
+    uint8_t r[ARTNET_REPLY_LEN];
+    artnet_node_status_t st = node;
+    st.sacn_priority = 150;
+    build_reply(r, &st, 1);
+    CHECK_EQ(r[194], 150);
+    st.sacn_priority = 0;           /* a legal priority */
+    build_reply(r, &st, 1);
+    CHECK_EQ(r[194], 0);
 }
 
 static void test_artaddress_names_not_terminated(void)
@@ -733,6 +776,7 @@ int main(void)
     RUN(test_poll_reply_long_names_terminated);
     RUN(test_artaddress_program);
     RUN(test_artaddress_no_change_and_reset);
+    RUN(test_pollreply_acn_priority);
     RUN(test_artaddress_names_not_terminated);
     RUN(test_artaddress_bad);
     RUN(test_artsync);

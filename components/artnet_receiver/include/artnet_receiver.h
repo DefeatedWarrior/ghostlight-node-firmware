@@ -125,22 +125,46 @@ typedef struct {
     uint16_t firmware_version;
     uint8_t failsafe;       /**< artnet_failsafe_t: output on data loss */
     uint8_t indicator;      /**< 0 normal, 1 locate, 2 mute */
+    uint8_t sacn_priority;  /**< AcnPriority: of the sACN the node makes from DMX input */
     artnet_port_status_t ports[ARTNET_NODE_PORTS];
 } artnet_node_status_t;
 
-/** Parsed ArtAddress packet (fields set to -1 / NULL mean "no change") */
+/* An ArtAddress address field, when it isn't a value */
+#define ARTNET_FIELD_KEEP   (-1)    /**< no change */
+#define ARTNET_FIELD_RESET  (-2)    /**< sent as 0x00: back to this field's default */
+
+/** Parsed ArtAddress packet (names: NULL means "no change") */
 typedef struct {
     uint8_t port;           /**< target port 1..ARTNET_NODE_PORTS (from BindIndex) */
     const char *short_name; /**< NULL = no change */
     const char *long_name;  /**< NULL = no change */
-    int16_t net;            /**< -1 = no change, else 0..127 */
-    int16_t sub;            /**< -1 = no change, else 0..15 */
-    int16_t universe;       /**< -1 = no change, else 0..15 (SwOut/SwIn low nibble) */
-    bool reset_address;     /**< a field asked to reset to the default */
+    int16_t net;            /**< 0..127 or ARTNET_FIELD_* */
+    int16_t sub;            /**< 0..15 or ARTNET_FIELD_* */
+    int16_t universe_in;    /**< SwIn, for input ports: 0..15 or ARTNET_FIELD_* */
+    int16_t universe_out;   /**< SwOut, for output ports: 0..15 or ARTNET_FIELD_* */
     uint8_t command;        /**< ARTNET_AC_* */
     uint8_t acn_priority;   /**< 0..200, 255 = no change */
     uint32_t source_ip;
 } artnet_address_cmd_t;
+
+static inline uint16_t artnet_address_field(int16_t field, uint16_t now, uint16_t dflt)
+{
+    return field == ARTNET_FIELD_RESET ? dflt : (field < 0 ? now : (uint16_t)field);
+}
+
+/**
+ * The Port-Address after @p cmd: each field on its own, SwIn for an input
+ * port and SwOut for an output. @p dflt is the port's default Port-Address.
+ */
+static inline uint16_t artnet_address_apply(const artnet_address_cmd_t *cmd, uint16_t addr,
+                                            bool is_input, uint16_t dflt)
+{
+    uint16_t net = artnet_address_field(cmd->net, (addr >> 8) & 0x7F, (dflt >> 8) & 0x7F);
+    uint16_t sub = artnet_address_field(cmd->sub, (addr >> 4) & 0x0F, (dflt >> 4) & 0x0F);
+    uint16_t uni = artnet_address_field(is_input ? cmd->universe_in : cmd->universe_out,
+                                        addr & 0x0F, dflt & 0x0F);
+    return (uint16_t)((net & 0x7F) << 8 | (sub & 0x0F) << 4 | (uni & 0x0F));
+}
 
 typedef struct {
     uint32_t packets_received;

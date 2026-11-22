@@ -47,12 +47,16 @@ static size_t rdm_rhd_get_queued_message(
   rdm_pid_t pid;
   rdm_header_t response_header = *header;
   const rdm_parameter_definition_t *response_definition;
-  if (rdm_queue_size(dmx_num) > 0) {
-    pid = rdm_queue_pop(dmx_num);
-    response_definition = rdm_definition_get(dmx_num, RDM_SUB_DEVICE_ROOT, pid);
-    assert(response_definition != NULL);
+  if (status_type == RDM_STATUS_GET_LAST_MESSAGE) {
+    pid = rdm_queue_previous(dmx_num);  // WIFIDMX: the same one again
   } else {
-    pid = RDM_PID_STATUS_MESSAGE;
+    pid = rdm_queue_pop(dmx_num);
+  }
+  response_definition =
+      pid ? rdm_definition_get(dmx_num, RDM_SUB_DEVICE_ROOT, pid) : NULL;
+  if (response_definition == NULL ||
+      response_definition->get.handler == NULL) {
+    pid = RDM_PID_STATUS_MESSAGE;  // nothing (that can be read) is queued
     response_definition = rdm_definition_get(dmx_num, RDM_SUB_DEVICE_ROOT, pid);
     if (response_definition == NULL) {
       response_header.pid = RDM_PID_STATUS_MESSAGE;
@@ -88,8 +92,9 @@ bool rdm_register_queued_message(dmx_port_t dmx_num, uint32_t max_count,
       .pid_cc = RDM_CC_GET,
       .ds = RDM_DS_NOT_DEFINED,
       .get = {.handler = rdm_rhd_get_queued_message,
-              .request.format = NULL,
-              .response.format = "b$"},
+              /* WIFIDMX: the request carries the byte (esp_dmx issue 229) */
+              .request.format = "b$",
+              .response.format = NULL},
       .set = {.handler = NULL, .request.format = NULL, .response.format = NULL},
       .pdl_size = sizeof(uint8_t),
       .max_value = RDM_STATUS_ERROR,
@@ -116,10 +121,9 @@ bool rdm_queue_push(dmx_port_t dmx_num, rdm_pid_t pid) {
   bool already_queued = false;
   taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
   // Iterate the queue to ensure that the PID isn't already queued
-  for (int i = queue->tail; i != queue->head; ++i) {
-    if (i == queue->max_size) {
-      i = 0;
-    }
+  /* WIFIDMX: wrap in the step. Upstream never met a head of 0 again and
+  looped for ever, with interrupts off. */
+  for (int i = queue->tail; i != queue->head; i = (i + 1) % queue->max_size) {
     if (queue->data[i] == pid) {
       already_queued = true;
       success = true;

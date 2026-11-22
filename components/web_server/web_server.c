@@ -1121,6 +1121,7 @@ static esp_err_t api_ports_status_handler(httpd_req_t *req)
         cJSON_AddBoolToObject(o, "rdm_available", st.rdm_available);
         cJSON_AddBoolToObject(o, "rdm_discovering", st.rdm_discovering);
         cJSON_AddNumberToObject(o, "rdm_devices", st.rdm_device_count);
+        cJSON_AddBoolToObject(o, "rdm_list_full", st.rdm_list_full);
         cJSON_AddBoolToObject(o, "rdm_tod_valid", st.rdm_tod_valid);
         cJSON_AddBoolToObject(o, "output_active", merge_engine_is_output_active(p));
         merge_sync_t sync = merge_engine_get_sync_state(p);
@@ -1570,13 +1571,18 @@ static esp_err_t api_rdm_discover_handler(httpd_req_t *req)
     return api_rdm_devices_handler(req);
 }
 
-static void add_rdm_devices(cJSON *json, int p)
+/* A port's devices as JSON array items, one at a time: built as one document,
+ * a full list takes about 1 KB of internal RAM per device. */
+static esp_err_t send_rdm_devices(httpd_req_t *req, int p, bool *first)
 {
-    rdm_device_t *devices = malloc(sizeof(rdm_device_t) * DMX_MAX_DEVICES);
-    if (!devices) return;
-    size_t count = DMX_MAX_DEVICES;
+    dmx_port_status_t st;
+    if (dmx_handler_get_port_status(p, &st) != ESP_OK || st.rdm_device_count == 0) return ESP_OK;
+    size_t count = st.rdm_device_count;
+    rdm_device_t *devices = malloc(sizeof(rdm_device_t) * count);
+    if (!devices) return ESP_ERR_NO_MEM;
+    esp_err_t err = ESP_OK;
     if (dmx_handler_get_rdm_devices(p, devices, &count) == ESP_OK) {
-        for (size_t i = 0; i < count; i++) {
+        for (size_t i = 0; i < count && err == ESP_OK; i++) {
             cJSON *d = cJSON_CreateObject();
             char uid_str[32];
             snprintf(uid_str, sizeof(uid_str), "%04x:%08lx",
@@ -1594,10 +1600,20 @@ static void add_rdm_devices(cJSON *json, int p)
             cJSON_AddNumberToObject(d, "footprint", devices[i].dmx_footprint);
             cJSON_AddNumberToObject(d, "personality", devices[i].current_personality);
             cJSON_AddNumberToObject(d, "personality_count", devices[i].personality_count);
-            cJSON_AddItemToArray(json, d);
+            char *text = cJSON_PrintUnformatted(d);
+            cJSON_Delete(d);
+            if (!text) {
+                err = ESP_ERR_NO_MEM;
+                break;
+            }
+            if (!*first) err = httpd_resp_send_chunk(req, ",", 1);
+            if (err == ESP_OK) err = httpd_resp_send_chunk(req, text, HTTPD_RESP_USE_STRLEN);
+            *first = false;
+            free(text);
         }
     }
     free(devices);
+    return err;
 }
 
 /**
@@ -1608,13 +1624,18 @@ static esp_err_t api_rdm_devices_handler(httpd_req_t *req)
     server_state.total_requests++;
     if (!require_auth(req)) return ESP_OK;
 
-    cJSON *json = cJSON_CreateArray();
-    for (int p = 1; p <= CONFIG_DMX_PORTS; p++) {
-        add_rdm_devices(json, p);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send_chunk(req, "[", 1);
+    bool first = true;
+    for (int p = 1; p <= CONFIG_DMX_PORTS && err == ESP_OK; p++) {
+        err = send_rdm_devices(req, p, &first);
     }
-    send_json_response(req, json, 200);
-    cJSON_Delete(json);
-    return ESP_OK;
+    /* Part of the answer has gone: failing closes the connection, so half a
+     * list can't pass for all of it */
+    if (err != ESP_OK) return ESP_FAIL;
+    err = httpd_resp_send_chunk(req, "]", 1);
+    if (err == ESP_OK) err = httpd_resp_send_chunk(req, NULL, 0);
+    return err;
 }
 
 static bool parse_uid(const char *s, rdm_uid_t *uid)

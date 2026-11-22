@@ -10,7 +10,7 @@
 #include "rdm/include/driver.h"
 #include "rdm/include/uid.h"
 
-static size_t rdm_format_encode(void *restrict dest,
+static size_t rdm_format_encode(void *restrict dest, size_t dest_size,
                                 const char *restrict format,
                                 const void *restrict src, size_t src_size,
                                 bool encode_nulls) {
@@ -36,6 +36,19 @@ static size_t rdm_format_encode(void *restrict dest,
       size_t token_size;
       if (c >= 'A' && c <= 'Z') {
         c += 'a' - 'A';  // Convert token to lowercase (was c += 'A', a bug)
+      }
+      /* WIFIDMX: data that ends inside a token ends the copy. The size used
+      to wrap (a 1-byte NACK reason never stopped copying), and a token could
+      land past the end of the destination. */
+      const size_t dest_left = dest_size - encoded;
+      if (c != 'a') {
+        const size_t need = c == 'w'                 ? sizeof(uint16_t)
+                            : c == 'd'               ? sizeof(uint32_t)
+                            : (c == 'u' || c == 'v') ? sizeof(rdm_uid_t)
+                                                     : sizeof(uint8_t);
+        if (dest_left < need || (c != 'v' && src_size < need)) {
+          return encoded;
+        }
       }
       if (c == 'b') {
         token_size = sizeof(uint8_t);
@@ -71,7 +84,14 @@ static size_t rdm_format_encode(void *restrict dest,
           return encoded;
         }
       } else if (c == 'a') {
-        token_size = strnlen(src, (src_size < 32 ? src_size : 32));
+        size_t max = src_size < 32 ? src_size : 32;
+        if (encode_nulls) {
+          if (dest_left == 0) return encoded;  // WIFIDMX: no room for the null
+          if (max > dest_left - 1) max = dest_left - 1;
+        } else if (max > dest_left) {
+          max = dest_left;
+        }
+        token_size = strnlen(src, max);
         memcpy(dest, src, token_size);
         if (encode_nulls) {
           // Only null-terminate the string if desired by the caller
@@ -207,10 +227,13 @@ size_t rdm_read_pd(dmx_port_t dmx_num, const char *format, void *destination,
 
   // Deserialize the parameter data into the destination buffer
   if (destination != NULL) {
-    size = pdl < size ? pdl : size;
+    if (format == NULL) {
+      return 0;  // WIFIDMX: nothing says how to read it (was a null pointer)
+    }
+    const size_t src_size = pdl < size ? pdl : size;
     const bool encode_nulls = true;
     const uint8_t *pd = &driver->dmx.data[24];
-    rdm_format_encode(destination, format, pd, size, encode_nulls);
+    rdm_format_encode(destination, size, format, pd, src_size, encode_nulls);
   }
 
   return pdl;
@@ -223,11 +246,14 @@ size_t rdm_write(dmx_port_t dmx_num, const rdm_header_t *header,
   DMX_CHECK(
       header->message_len >= 24 && header->message_len == 24 + header->pdl, 0,
       "header->message_len error");
-  DMX_CHECK(header->sub_device < RDM_SUB_DEVICE_MAX ||
+  /* WIFIDMX: only in requests. A response echoes whatever was asked, so
+  that "no such sub-device" can be said at all. */
+  DMX_CHECK(!rdm_cc_is_request(header->cc) ||
+                header->sub_device < RDM_SUB_DEVICE_MAX ||
                 header->sub_device == RDM_SUB_DEVICE_ALL,
             0, "header->sub_device error");
   DMX_CHECK(rdm_cc_is_valid(header->cc), 0, "header->cc error");
-  DMX_CHECK(header->pdl < 231, 0, "header->pdl error");
+  DMX_CHECK(header->pdl <= 231, 0, "header->pdl error");  // WIFIDMX: 231 is legal
   if (rdm_cc_is_request(header->cc)) {
     DMX_CHECK(header->port_id > 0, 0, "header->port_id error");
   } else {
@@ -275,13 +301,13 @@ size_t rdm_write(dmx_port_t dmx_num, const rdm_header_t *header,
   } else {
     // Serialize the header and pd into the driver buffer
     const char *header_format = "xCCx01buubbbwbwb";
-    rdm_format_encode(driver->dmx.data, header_format, header, sizeof(*header),
-                      encode_nulls);
+    rdm_format_encode(driver->dmx.data, sizeof(*header), header_format, header,
+                      sizeof(*header), encode_nulls);
     size_t message_len;
     void *data = &driver->dmx.data[24];
     if (pd != NULL && header->pdl > 0) {
       size_t pdl =
-          rdm_format_encode(data, format, pd, header->pdl, encode_nulls);
+          rdm_format_encode(data, 231, format, pd, header->pdl, encode_nulls);
       if (header->pdl != pdl) {
         message_len = 24 + pdl;
         driver->dmx.data[2] = message_len;  // Encode updated message_len

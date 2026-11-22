@@ -44,6 +44,7 @@ void app_artnet_status(artnet_node_status_t *st, void *user_data)
         default:            st->failsafe = ARTNET_FAILSAFE_HOLD; break;
     }
     st->indicator = g_app.indicator;
+    st->sacn_priority = c->node_info.sacn_priority;
 
     for (int p = 0; p < ARTNET_NODE_PORTS && p < NPORTS; p++) {
         const port_config_t *pc = config_port(c, p + 1);
@@ -117,12 +118,12 @@ void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
         long_named = changed = true;
     }
 
-    uint16_t addr = pc->universe_primary;
-    uint16_t old_addr = addr;
-    if (cmd->reset_address) addr = (uint16_t)(p - 1);   /* default: port N on universe N-1 */
-    if (cmd->net >= 0)      addr = (addr & 0x00FF) | ((uint16_t)(cmd->net & 0x7F) << 8);
-    if (cmd->sub >= 0)      addr = (addr & 0x7F0F) | ((uint16_t)(cmd->sub & 0x0F) << 4);
-    if (cmd->universe >= 0) addr = (addr & 0x7FF0) | (uint16_t)(cmd->universe & 0x0F);
+    /* SwIn or SwOut goes by the direction the port has after this packet */
+    bool input = app_mode_is_input(pc->mode);
+    if (idx == 0 && (hi == 0x20 || hi == 0x30)) input = hi == 0x30;
+    uint16_t old_addr = pc->universe_primary;
+    /* default: port N on universe N-1, net and sub-net 0 */
+    uint16_t addr = artnet_address_apply(cmd, old_addr, input, (uint16_t)(p - 1));
     if (addr != pc->universe_primary) {
         pc->universe_primary = addr;
         changed = true;
@@ -186,6 +187,9 @@ void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
                 }
             }
             break;
+        case ARTNET_AC_CANCEL_MERGE:
+            merge_engine_cancel_merge(p);
+            break;
         case ARTNET_AC_FAIL_RECORD:
 #if CONFIG_NODE_SCENES
             /* File writes: done on the main task */
@@ -195,6 +199,9 @@ void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
 #endif
             break;
         default:
+            if (idx == 0 && (hi == ARTNET_AC_MERGE_LTP0 || hi == ARTNET_AC_MERGE_HTP0)) {
+                merge_engine_resume_merge(p);
+            }
             if (idx == 0 && hi == ARTNET_AC_CLEAR_OP0) {
 #if CONFIG_NODE_SCENES
                 scene_release(p, 0);

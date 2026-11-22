@@ -136,6 +136,7 @@ static esp_err_t tester_get(httpd_req_t *req)
             cJSON_AddNumberToObject(o, "frames_received", st.stats.frames_received);
             cJSON_AddNumberToObject(o, "errors", st.stats.error_count);
             cJSON_AddNumberToObject(o, "rdm_devices", st.rdm_device_count);
+            cJSON_AddBoolToObject(o, "rdm_list_full", st.rdm_list_full);
             cJSON_AddBoolToObject(o, "rdm_discovering", st.rdm_discovering);
             cJSON_AddBoolToObject(o, "rdm_tod_valid", st.rdm_tod_valid);
         }

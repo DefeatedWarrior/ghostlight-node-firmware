@@ -60,11 +60,13 @@ static size_t rdm_rhd_get_dmx_personality_description(
     return rdm_write_nack_reason(dmx_num, header, RDM_NR_DATA_OUT_OF_RANGE);
   }
 
-  rdm_dmx_personality_description_t pd;
+  rdm_dmx_personality_description_t pd = {0};  // WIFIDMX: esp_dmx issue 224
   pd.personality_num = personality_num;
   pd.footprint = dmx_get_footprint(dmx_num, personality_num);
   const char *desc = dmx_get_personality_description(dmx_num, personality_num);
-  memcpy(pd.description, desc, strnlen(desc, RDM_ASCII_SIZE_MAX));
+  if (desc != NULL) {
+    memcpy(pd.description, desc, strnlen(desc, RDM_ASCII_SIZE_MAX - 1));
+  }
 
   const size_t pdl = sizeof(pd);
   return rdm_write_ack(dmx_num, header, definition->get.response.format, &pd,

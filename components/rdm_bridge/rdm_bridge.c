@@ -58,6 +58,9 @@ static struct {
     QueueHandle_t queue;
     TaskHandle_t task;
     bridge_port_t ports[BRIDGE_PORTS];
+    /* refresh_tod() scratch, bridge task only: too big for its stack */
+    rdm_uid_t tod_uids[DMX_MAX_DEVICES];
+    uint8_t tod_bytes[DMX_MAX_DEVICES][6];
     struct {
         uint32_t ip;
         int64_t last_us;
@@ -111,9 +114,9 @@ static void add_subscriber(uint32_t ip)
 static bool refresh_tod(int idx)
 {
     bridge_port_t *bp = &s_br.ports[idx];
-    rdm_uid_t uids[DMX_MAX_DEVICES];
+    rdm_uid_t *uids = s_br.tod_uids;
     size_t n = dmx_handler_get_rdm_uids((uint8_t)(idx + 1), uids, DMX_MAX_DEVICES);
-    uint8_t bytes[DMX_MAX_DEVICES][6];
+    uint8_t (*bytes)[6] = s_br.tod_bytes;
     for (size_t i = 0; i < n; i++) {
         uid_to_bytes(&uids[i], bytes[i]);
     }

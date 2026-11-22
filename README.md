@@ -1,6 +1,6 @@
 <div align="center">
 
-# ESP-NODE-2RDM
+# Ghostlight Node Firmware
 
 ### Professional Art-Net / sACN to DMX512/RDM Converter
 
@@ -28,7 +28,7 @@
 
 ## 🎯 Overview
 
-ESP-NODE-2RDM is a professional lighting control device that converts network protocols (Art-Net/sACN) to DMX512/RDM signals. It runs on ESP32-S3 and ESP32 boards, with Ethernet (W5500) and WiFi and 2 independent DMX/RDM ports.
+Ghostlight Node is a professional lighting control device that converts network protocols (Art-Net/sACN) to DMX512/RDM signals. It runs on ESP32-S3 and ESP32 boards, with Ethernet (W5500) and WiFi and 2 independent DMX/RDM ports.
 
 It is the firmware for the **Ghostlight Node**, whose hardware (KiCad
 project, BOM, assembly and docs) is in [ghostlight-node](https://github.com/DefeatedWarrior/ghostlight-node).
@@ -63,7 +63,7 @@ with a W5500 and two RS485 transceivers, and other boards can be added. See
 
 ### Advanced Merge Engine
 - ✅ **HTP** (Highest Takes Precedence) - For intensity control
-- ✅ **LTP** (Lowest Takes Precedence) - Alternative merge mode
+- ✅ **LTP** (Latest Takes Precedence) - The most recent change to a channel wins
 - ✅ **LAST** - Last received packet wins
 - ✅ **BACKUP** - Primary/backup source failover
 - ✅ **Configurable Timeout** - Source timeout detection (2-10 seconds)
@@ -106,7 +106,7 @@ with a W5500 and two RS485 transceivers, and other boards can be added. See
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     ESP-NODE-2RDM System                     │
+│                   Ghostlight Node System                    │
 ├─────────────────────────────────────────────────────────────┤
 │                                                               │
 │  ┌─────────────┐        ┌──────────────┐                    │
@@ -445,7 +445,6 @@ Contributions are welcome! When contributing to this project, please:
 ## 📞 Support
 
 - **Issues**: [GitHub Issues](https://github.com/DefeatedWarrior/ghostlight-node-firmware/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/thinhh0321/ESP-NODE-2RDM/discussions)
 - **Author**: thinhh0321
 
 ## 📄 License

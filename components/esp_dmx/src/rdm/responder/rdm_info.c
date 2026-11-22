@@ -71,7 +71,7 @@ static size_t rdm_rhd_get_parameter_description(
     return rdm_write_nack_reason(dmx_num, header, RDM_NR_DATA_OUT_OF_RANGE);
   }
 
-  rdm_parameter_description_t pd;
+  rdm_parameter_description_t pd = {0};
   pd.pid = pid;
   pd.pdl_size = requested_definition->pdl_size;
   pd.data_type = requested_definition->ds;
@@ -81,8 +81,10 @@ static size_t rdm_rhd_get_parameter_description(
   pd.min_value = requested_definition->min_value;
   pd.max_value = requested_definition->max_value;
   pd.default_value = requested_definition->default_value;
-  strncpy(pd.description, requested_definition->description,
-          RDM_ASCII_SIZE_MAX - 1);
+  if (requested_definition->description != NULL) {
+    strncpy(pd.description, requested_definition->description,
+            RDM_ASCII_SIZE_MAX - 1);
+  }
   pd.description[RDM_ASCII_SIZE_MAX - 1] = '\0';
 
   return rdm_write_ack(dmx_num, header, definition->get.response.format, &pd,
@@ -126,16 +128,14 @@ size_t rdm_get_supported_parameters(dmx_port_t dmx_num, uint16_t *pids,
   DMX_CHECK(dmx_num < DMX_NUM_MAX, false, "dmx_num error");
   DMX_CHECK(dmx_driver_is_installed(dmx_num), false, "driver is not installed");
 
-  int i = 0;
   uint32_t pid_count = 0;
 
   // Write PIDs to the destination buffer
   if (pids == NULL) {
     size = 0;  // Guard against null pointer writes
-  } else if (size % sizeof(uint16_t) != 0) {
-    size -= 1;
   }
-  for (; size > 0; size -= sizeof(uint16_t)) {
+  /* WIFIDMX: upstream stuck on the first PID it left out */
+  for (int i = 0;; ++i) {
     uint16_t pid = dmx_parameter_at(dmx_num, RDM_SUB_DEVICE_ROOT, i);
     if (pid == 0) {
       break;
@@ -152,13 +152,10 @@ size_t rdm_get_supported_parameters(dmx_port_t dmx_num, uint16_t *pids,
       case RDM_PID_IDENTIFY_DEVICE:
         continue;  // Minimum required PIDs are not reported
     }
-    pids[pid_count] = pid;
+    if ((pid_count + 1) * sizeof(uint16_t) <= size) {
+      pids[pid_count] = pid;
+    }
     ++pid_count;
-    ++i;
-  }
-  while (dmx_parameter_at(dmx_num, RDM_SUB_DEVICE_ROOT, i) != 0) {
-    ++pid_count;
-    ++i;
   }
 
   return pid_count * sizeof(uint16_t);

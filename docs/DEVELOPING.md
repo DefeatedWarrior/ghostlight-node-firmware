@@ -431,6 +431,43 @@ yet. Slots a short frame
 leaves out keep their last level (as fixtures do) instead of dropping to
 zero; after a signal loss they start from zero again.
 
+## esp_dmx: send, RDM and other fixes
+
+`components/esp_dmx` is esp_dmx 4.1.0 with fixes, each marked WIFIDMX.
+Updating it from upstream loses them, so run the host tests after any update.
+
+- **Timing:** the mark after break is counted from the real end of the
+  break, and a controller leaves 176 us of quiet after any reply or garbled
+  reply. Waits for a frame being sent are 30 ms (upstream's 23 ms could end
+  before a full frame had), and an RDM exchange may take 50 ms. Both end on
+  the interrupt, long before that.
+- **Locks and waits:** every way out gives the driver's lock back, a stale
+  task notification can't end a wait, and a send that never finishes is reset.
+- **Responder:** a request can't assert. Wrong lengths, sub-devices and PIDs
+  are NACKed, non-requests ignored, SET values checked, and what RDM sets is
+  saved every 2 s (by the input task: the driver only saved when DMX stopped)
+  and when the driver is removed.
+- **Controller:** a reply only counts if its class, PID, UIDs and length
+  answer the request, reads are bounded by the caller's buffer, and ACK_TIMER
+  is in tenths of a second. A string needs room for its null: 32 characters
+  need a buffer, and a `size`, of 33.
+
+`test_dmx_rdm.c` runs the whole driver on a simulated clock and wire. It has
+one task and exact timing, so races between cores rest on reading the code.
+
+In `dmx_handler`:
+
+- Drivers are installed from a task on the DMX core, because ESP-IDF puts an
+  interrupt on the core that asks for it. They can be removed from any core.
+- Background discovery un-mutes everything first, then mutes what it knows:
+  a muted fixture that had dropped off the list could otherwise never be
+  found again. A fixture leaves the list after two missed passes.
+- The list holds 128 fixtures with PSRAM and 64 without (`DMX_MAX_DEVICES`,
+  at most 200). It only takes RAM for what was found, but a discovery needs
+  160 bytes per possible fixture while it runs.
+- The Art-Net RDM relay only passes on requests, and only the answer from
+  the fixture that was asked.
+
 ## Captive portal
 
 When the node's own access point starts, `network_manager` starts a small
@@ -539,13 +576,15 @@ and the core logic:
 |---|---|
 | `test_artnet.c` | Art-Net parsing: ArtDmx, ArtPoll/ArtPollReply, ArtAddress, ArtSync, ArtTod*, ArtRdm, ArtIpProg, other nodes' replies and IP clashes, sending ArtPoll, bad lengths and IDs |
 | `test_sacn.c` | E1.31 parsing: data, per-address priority, sync, universe discovery, priorities, preview / stream-terminated, bad headers |
-| `test_merge.c` | merge engine: HTP, LTP, last source, backup, disable, priorities, timeouts, failsafe, sync, another port's DMX input |
+| `test_merge.c` | merge engine: HTP, LTP, last source, backup, disable, priorities, timeouts, failsafe, sync, another port's DMX input, AcCancelMerge |
 | `test_config.c` | `config_to_json` / `config_from_json` round trip, loading the file, `config_sanitize`, channel rules, DMX from another port, "Send to" lists, the largest settings file, the previous copy (`config.bak`): damaged files, a power cut between the two renames, the start-up notice |
 | `test_rules.c` | channel rules: patch, limit and park, their order, bad rules, per-port copies |
 | `test_srcmon.c` | the signal check's sender table: sequence loss and wrap-around, rate, gaps, ageing, discovery lists, the other-node table and the nodes that output a universe |
 | `test_dns.c` | captive portal DNS answers: A / other types / off, EDNS, malformed queries |
 | `test_webstream.c` | the chunked JSON writer for large responses: the same text as cJSON, chunk edges, a failed send |
 | `test_dmx_rx.c` | esp_dmx's receive interrupt and `dmx_receive()`: short, cut, growing and mixed-length frames, stray breaks, other start codes, RDM between frames; each with both orders of break and framing error, and a task that wakes late |
+| `test_dmx_rdm.c` | the whole esp_dmx driver: RDM responder against any request, controller matching, waits and gaps, break / MAB, lock release, install and delete |
+| `test_dmx_handler.c` | `dmx_handler.c` with a fake driver: RDM discovery with lost replies and pulled cables, the list limit, the raw relay, ACK_TIMER, saving, the install core |
 | `test_fwtag.c` | finding the board marker in a firmware upload: in one piece, split across every chunk boundary, false starts, bad IDs |
 
 You need `make` and a C compiler (clang or gcc):

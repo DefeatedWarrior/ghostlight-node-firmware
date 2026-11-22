@@ -32,6 +32,9 @@ static bool DMX_ISR_ATTR dmx_timer_isr(
       driver->dmx.progress = DMX_PROGRESS_IN_MAB;
 
       // Reset the alarm for the end of the DMX mark-after-break
+      /* WIFIDMX: count the MAB from here. The counter restarted when the break
+      was due to end, so a late interrupt made the MAB shorter by as much. */
+      dmx_timer_set_counter(dmx_num, 0);
       dmx_timer_set_alarm(dmx_num, driver->mab_len, false);
     } else if (driver->dmx.progress != DMX_PROGRESS_IN_DATA) {
       /* WIFIDMX: write the first FIFO chunk only once per frame; a second
@@ -40,6 +43,7 @@ static bool DMX_ISR_ATTR dmx_timer_isr(
 
       // Write data to the UART
       int write_len = driver->dmx.size;
+      dmx_uart_clear_interrupt(dmx_num, DMX_INTR_TX_DONE);  // WIFIDMX: an old one
       dmx_uart_write_txfifo(dmx_num, driver->dmx.data, &write_len);
       driver->dmx.head = write_len;
 
@@ -51,12 +55,16 @@ static bool DMX_ISR_ATTR dmx_timer_isr(
     }
   } else {
     taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-    if (driver->task_waiting) {
-      xTaskNotifyFromISR(driver->task_waiting, DMX_OK, eSetValueWithOverwrite,
-                         &task_awoken);
+    /* WIFIDMX: stop first, under the lock. The task this wakes starts the
+    next break with the same timer, and stopping that left the line low. */
+    if (driver->dmx.status != DMX_STATUS_SENDING) {
+      dmx_timer_stop(dmx_num);
+      if (driver->task_waiting) {
+        xTaskNotifyFromISR(driver->task_waiting, DMX_OK, eSetValueWithOverwrite,
+                           &task_awoken);
+      }
     }
     taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-    dmx_timer_stop(dmx_num);  // TODO: is this needed?
   }
 
   return task_awoken;
@@ -77,9 +85,14 @@ bool dmx_timer_init(dmx_port_t dmx_num, void *isr_context, int isr_flags) {
     return NULL;
   }
   const gptimer_event_callbacks_t gptimer_cb = {.on_alarm = dmx_timer_isr};
-  gptimer_register_event_callbacks(timer->gptimer_handle, &gptimer_cb,
-                                   isr_context);
-  gptimer_enable(timer->gptimer_handle);
+  /* WIFIDMX: without its interrupt a break never ends (line held low) */
+  if (gptimer_register_event_callbacks(timer->gptimer_handle, &gptimer_cb,
+                                       isr_context) != ESP_OK ||
+      gptimer_enable(timer->gptimer_handle) != ESP_OK) {
+    gptimer_del_timer(timer->gptimer_handle);
+    timer->gptimer_handle = NULL;
+    return false;
+  }
 #else
   timer->group = dmx_num / 2;
 #ifdef CONFIG_IDF_TARGET_ESP32C3

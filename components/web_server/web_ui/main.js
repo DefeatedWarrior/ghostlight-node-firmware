@@ -1035,7 +1035,7 @@ const app = {
         let rdm = '--';
         if (p.rdm_available) {
             rdm = p.rdm_discovering ? 'Discovering…'
-                : p.rdm_tod_valid ? plural(p.rdm_devices, 'device') : 'Waiting for discovery';
+                : p.rdm_tod_valid ? plural(p.rdm_devices, 'device') + (p.rdm_list_full ? ' (list full)' : '') : 'Waiting for discovery';
         } else if (!input && p.mode !== 0) {
             rdm = 'Off';
         }
@@ -2320,7 +2320,7 @@ const app = {
             else if (role === 'off') sub = 'switched off';
             else if (role === 'receive') sub = p.signal ? `${a.refresh_hz ?? '--'} Hz · ${a.slots ?? '--'} slots` : 'no signal';
             else if (p.test) sub = `test pattern: ${p.test.mode}`;
-            else if (role === 'rdm') sub = p.rdm_discovering ? 'discovering…' : (p.rdm_tod_valid ? plural(p.rdm_devices, 'device') : 'sending');
+            else if (role === 'rdm') sub = p.rdm_discovering ? 'discovering…' : (p.rdm_tod_valid ? plural(p.rdm_devices, 'device') + (p.rdm_list_full ? ' (list full)' : '') : 'sending');
             else sub = p.timing ? `sending ${p.timing.rate_hz} Hz` : 'sending';
             setText('tsTabSub' + n, sub);
             const tab = $('tsTab' + n);
@@ -3496,7 +3496,11 @@ const app = {
             (cfg.network.wifi_profiles || []).forEach(p => { delete p.password; delete p.has_password; });
         }
         const from = meta.node ? ` from "${meta.node}"${meta.created ? ` (${meta.created.slice(0, 10)})` : ''}` : '';
-        if (!confirm(`Restore the settings${from}? The current settings are replaced` +
+        const here = (this.info && this.info.board) || '';
+        const other = meta.board && here && meta.board !== here
+            ? `Careful: this backup was saved on a different board (${meta.board}; this node is ${here}). ` +
+              'Port settings may not fit it.\n\n' : '';
+        if (!confirm(`${other}Restore the settings${from}? The current settings are replaced` +
                      (withNet ? ' and the network may reconnect at a different address.' : ' (network settings are kept).'))) {
             return false;
         }

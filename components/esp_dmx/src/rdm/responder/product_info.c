@@ -146,8 +146,16 @@ bool rdm_register_device_label(dmx_port_t dmx_num, const char *device_label,
   }
 
   // Allocate parameter data
-  char init_value[RDM_ASCII_SIZE_MAX];
-  strncpy(init_value, device_label, 32);
+  char init_value[RDM_ASCII_SIZE_MAX] = {0};
+  /* WIFIDMX: the saved label (upstream saved it and never read it back) */
+  if (!dmx_nvs_get(dmx_num, RDM_SUB_DEVICE_ROOT, pid, init_value,
+                   sizeof(init_value))) {
+    memset(init_value, 0, sizeof(init_value));
+    if (device_label != NULL) {
+      strncpy(init_value, device_label, sizeof(init_value) - 1);
+    }
+  }
+  init_value[sizeof(init_value) - 1] = '\0';
   if (!dmx_parameter_add(dmx_num, RDM_SUB_DEVICE_ROOT, pid,
                          DMX_PARAMETER_TYPE_NON_VOLATILE, init_value,
                          sizeof(init_value))) {
@@ -265,7 +273,7 @@ bool rdm_register_manufacturer_label(dmx_port_t dmx_num,
   DMX_CHECK(dmx_num < DMX_NUM_MAX, false, "dmx_num error");
   DMX_CHECK(dmx_driver_is_installed(dmx_num), false, "driver is not installed");
   if (dmx_parameter_get_data(dmx_num, RDM_SUB_DEVICE_ROOT,
-                        RDM_PID_SOFTWARE_VERSION_LABEL) == NULL) {
+                        RDM_PID_MANUFACTURER_LABEL) == NULL) {
     DMX_CHECK(manufacturer_label != NULL, false, "manufacturer_label is null");
     DMX_CHECK(
         strnlen(manufacturer_label, RDM_ASCII_SIZE_MAX) < RDM_ASCII_SIZE_MAX,
@@ -378,7 +386,7 @@ bool rdm_register_language(dmx_port_t dmx_num, const char *language,
   if (dmx_parameter_get_data(dmx_num, RDM_SUB_DEVICE_ROOT, RDM_PID_LANGUAGE) ==
       NULL) {
     DMX_CHECK(language != NULL, false, "language is null");
-    DMX_CHECK(strnlen(language, 3) != 2, false, "language error");
+    DMX_CHECK(strnlen(language, 3) == 2, false, "language error");
   }
 
   const rdm_pid_t pid = RDM_PID_LANGUAGE;
@@ -424,7 +432,7 @@ size_t rdm_get_language(dmx_port_t dmx_num, char *language) {
 
 bool rdm_set_language(dmx_port_t dmx_num, const char *language) {
   DMX_CHECK(dmx_num < DMX_NUM_MAX, 0, "dmx_num error");
-  DMX_CHECK(strnlen(language, 3) != 2, false, "language error");
+  DMX_CHECK(strnlen(language, 3) == 2, false, "language error");
   DMX_CHECK(dmx_driver_is_installed(dmx_num), 0, "driver is not installed");
 
   // Null-terminate the language string in case it isn't
@@ -432,7 +440,7 @@ bool rdm_set_language(dmx_port_t dmx_num, const char *language) {
   strncpy(pd, language, 2);
   pd[2] = '\0';
 
-  const rdm_pid_t pid = RDM_PID_DEVICE_LABEL;
+  const rdm_pid_t pid = RDM_PID_LANGUAGE;
   if (!dmx_parameter_set(dmx_num, RDM_SUB_DEVICE_ROOT, pid, pd, sizeof(pd))) {
     return false;
   }

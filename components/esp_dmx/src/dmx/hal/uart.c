@@ -79,6 +79,11 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
         dmx_uart_clear_interrupt(dmx_num, DMX_INTR_RX_ALL);
         continue;
       }
+      if (driver->is_controller) {
+        taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+        driver->dmx.last_rx_timestamp = now;  // WIFIDMX: see service.h
+        taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+      }
 
       // Read data into the DMX buffer if there is enough space
       int dmx_head;
@@ -151,10 +156,12 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
 
         // Reset the DMX buffer for the next packet
         taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-        driver->dmx.rx_err_head = 0;  // WIFIDMX
-        driver->dmx.status = DMX_STATUS_RECEIVING;
-        driver->dmx.progress = DMX_PROGRESS_IN_BREAK;
-        driver->dmx.head = 0;
+        if (driver->dmx.status != DMX_STATUS_SENDING) {  // WIFIDMX: just began
+          driver->dmx.rx_err_head = 0;  // WIFIDMX
+          driver->dmx.status = DMX_STATUS_RECEIVING;
+          driver->dmx.progress = DMX_PROGRESS_IN_BREAK;
+          driver->dmx.head = 0;
+        }
         taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
         continue;  // Nothing else to do on DMX break
       } else if (driver->dmx.progress == DMX_PROGRESS_IN_BREAK ||
@@ -189,17 +196,25 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
           rdm_type = RDM_TYPE_IS_DISCOVERY;
         } else {
           rdm_type = RDM_TYPE_IS_NOT_RDM;
-          taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-          // Get the best resolution on the controller EOP timestamp
-          driver->dmx.controller_eop_timestamp = now;
-          taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+          /* WIFIDMX: not on a controller, where this is a garbled reply (a
+          discovery collision) and the gap still counts from the request */
+          if (!driver->is_controller) {
+            taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+            // Get the best resolution on the controller EOP timestamp
+            driver->dmx.controller_eop_timestamp = now;
+            taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+          }
         }
 
         // Set inter-slot timer for RDM response packets
         if (driver->is_controller && rdm_type != RDM_TYPE_IS_NOT_RDM) {
-          dmx_timer_set_counter(dmx_num, 0);
-          dmx_timer_set_alarm(dmx_num, RDM_TIMING_RESPONDER_INTER_SLOT_MAX,
-                              false);
+          taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+          if (driver->dmx.status != DMX_STATUS_SENDING) {  // WIFIDMX: its break
+            dmx_timer_set_counter(dmx_num, 0);
+            dmx_timer_set_alarm(dmx_num, RDM_TIMING_RESPONDER_INTER_SLOT_MAX,
+                                false);
+          }
+          taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
         }
 
         err = DMX_OK;
@@ -294,10 +309,12 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
         } else {
           // Parse a standard DMX packet
           // TODO: verify that a data collision hasn't happened
-          taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-          driver->dmx.last_controller_pid = 0;
-          driver->dmx.responder_sent_last = false;
-          taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+          if (!driver->is_controller) {  // WIFIDMX: see above
+            taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+            driver->dmx.last_controller_pid = 0;
+            driver->dmx.responder_sent_last = false;
+            taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+          }
           packet_is_complete = (dmx_head >= driver->dmx.size);
           break;
         }
@@ -305,10 +322,15 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
       if (!packet_is_complete) {
         continue;
       }
-      dmx_timer_stop(dmx_num);
-
       // Set driver flags and notify task
       taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+      if (driver->dmx.status == DMX_STATUS_SENDING) {
+        /* WIFIDMX: a task on the other core started sending meanwhile, and
+        the timer is now timing its break */
+        taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+        continue;
+      }
+      dmx_timer_stop(dmx_num);
       driver->dmx.progress = DMX_PROGRESS_COMPLETE;
       driver->dmx.status = DMX_STATUS_IDLE;  // Could still be receiving data
       if (err == DMX_ERR_IMPROPER_SLOT && !driver->is_controller) {
@@ -329,59 +351,72 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
     else if (intr_flags & DMX_INTR_TX_DATA) {
       // Write data to the UART and clear the interrupt
       int write_len = driver->dmx.size - driver->dmx.head;
-      dmx_uart_write_txfifo(dmx_num, &driver->dmx.data[driver->dmx.head],
-                            &write_len);
-      driver->dmx.head += write_len;
+      if (write_len > 0) {
+        /* WIFIDMX: if the FIFO had run dry, its "done" is about the bytes
+        before these. Nothing may hold this up between the write and the clear:
+        the last byte's own "done" follows 44 us later, and would be lost. */
+        taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+        dmx_uart_write_txfifo(dmx_num, &driver->dmx.data[driver->dmx.head],
+                              &write_len);
+        driver->dmx.head += write_len;
+        if (write_len > 0) {
+          dmx_uart_clear_interrupt(dmx_num, DMX_INTR_TX_DONE);
+        }
+        taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+      } else {
+        /* WIFIDMX: the size changed under the transmitter. Upstream passed
+        the negative length on as a huge one. */
+        driver->dmx.head = driver->dmx.size;
+      }
       dmx_uart_clear_interrupt(dmx_num, DMX_INTR_TX_DATA);
 
       // Allow FIFO to empty when done writing data
-      if (driver->dmx.head == driver->dmx.size) {
+      if (driver->dmx.head >= driver->dmx.size) {
         dmx_uart_disable_interrupt(dmx_num, DMX_INTR_TX_DATA);
       }
     } else if (intr_flags & DMX_INTR_TX_DONE) {
+      if (driver->dmx.head < driver->dmx.size) {
+        /* WIFIDMX: the FIFO ran dry (interrupts held up): not the end */
+        dmx_uart_clear_interrupt(dmx_num, DMX_INTR_TX_DONE);
+        continue;
+      }
       // Disable write interrupts and clear the interrupt
       dmx_uart_disable_interrupt(dmx_num, DMX_INTR_TX_ALL);
       dmx_uart_clear_interrupt(dmx_num, DMX_INTR_TX_DONE);
 
-      // Record the EOP timestamp if this device is the DMX controller
-      if (driver->is_controller) {
-        taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-        driver->dmx.controller_eop_timestamp = now;
-        taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-      }
-
-      // Update the DMX status and notify task
+      /* WIFIDMX: all under one lock, and the task is told last. On the other
+      core it could start receiving before the bus was turned round, and lose
+      a discovery response (which has no break to find it by). */
       taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+
+      // Update the DMX status
       driver->dmx.progress = DMX_PROGRESS_COMPLETE;
       driver->dmx.status = DMX_STATUS_IDLE;
+
+      if (driver->is_controller) {
+        // Record the EOP timestamp if this device is the DMX controller
+        driver->dmx.controller_eop_timestamp = now;
+
+        // Turn the bus round if an RDM response is expected
+        const rdm_pid_t pid = driver->dmx.last_controller_pid;
+        if (pid != 0 && (!driver->dmx.last_request_was_broadcast ||
+                         pid == RDM_PID_DISC_UNIQUE_BRANCH)) {
+          if (pid == RDM_PID_DISC_UNIQUE_BRANCH) {
+            driver->dmx.progress = DMX_PROGRESS_IN_DATA;
+            driver->dmx.head = 0;  // Not expecting a DMX break
+          } else {
+            driver->dmx.progress = DMX_PROGRESS_STALE;
+            driver->dmx.head = DMX_HEAD_WAITING_FOR_BREAK;
+          }
+          dmx_uart_rxfifo_reset(dmx_num);
+          dmx_uart_set_rts(dmx_num, 1);
+        }
+      }
+
       if (driver->task_waiting) {
         xTaskNotifyFromISR(driver->task_waiting, DMX_OK, eNoAction,
                            &task_awoken);
       }
-      taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-
-      // Skip the rest of the ISR loop if an RDM response is not expected
-      if (!driver->is_controller || driver->dmx.last_controller_pid == 0 ||
-          (driver->dmx.last_request_was_broadcast &&
-           driver->dmx.last_controller_pid != RDM_PID_DISC_UNIQUE_BRANCH)) {
-        continue;
-      }
-
-      // Determine if a DMX break is expected in the response packet
-      int progress;
-      if (driver->dmx.last_controller_pid == RDM_PID_DISC_UNIQUE_BRANCH) {
-        progress = DMX_PROGRESS_IN_DATA;
-        driver->dmx.head = 0;  // Not expecting a DMX break
-      } else {
-        progress = DMX_PROGRESS_STALE;
-        driver->dmx.head = DMX_HEAD_WAITING_FOR_BREAK;
-      }
-
-      // Flip the DMX bus so the response may be read
-      taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-      dmx_uart_rxfifo_reset(dmx_num);
-      dmx_uart_set_rts(dmx_num, 1);
-      driver->dmx.progress = progress;
       taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
     }
   }
@@ -571,6 +606,7 @@ void DMX_ISR_ATTR dmx_uart_write_txfifo(dmx_port_t dmx_num, const void *buf,
   struct dmx_uart_t *uart = &dmx_uart_context[dmx_num];
   const int txfifo_len = uart_ll_get_txfifo_len(uart->dev);
   if (*size > txfifo_len) *size = txfifo_len;
+  if (*size < 0) *size = 0;  // WIFIDMX: never a huge unsigned length
   uart_ll_write_txfifo(uart->dev, (uint8_t *)buf, *size);
 }
 

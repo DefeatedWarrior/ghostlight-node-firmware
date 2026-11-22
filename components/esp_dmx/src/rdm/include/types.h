@@ -25,7 +25,10 @@ extern "C" {
 #define UID2STR(uid) (uid).man_id, (uid).dev_id
 
 /** @brief Evaluates to true if the rdm_cc_t is a valid value.*/
-#define rdm_cc_is_valid(cc) (((cc) >> 8) < 0x4 && ((cc) & 0xf) < 0x2)
+/* WIFIDMX: the class is the high nibble; upstream shifted a byte by 8, so
+ * this was always true. */
+#define rdm_cc_is_valid(cc) \
+  (((cc) >> 4) >= 0x1 && ((cc) >> 4) < 0x4 && ((cc) & 0xf) < 0x2)
 
 /** @brief Evaluates to true if the rdm_cc_t is either RDM_CC_GET_COMMAND,
  * RDM_CC_SET_COMMAND, or RDM_CC_DISC_COMMAND.*/

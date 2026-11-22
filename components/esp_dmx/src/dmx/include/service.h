@@ -23,6 +23,18 @@ extern "C" {
 #define DMX_CHECK(a, err_code, format, ...) \
   ESP_RETURN_ON_FALSE(a, err_code, TAG, format, ##__VA_ARGS__)
 
+/* WIFIDMX: upstream waited 23 ms for both of these. A wait of 23 ticks can end
+after 22 ms and a full frame takes 22.76 ms, so most requests made just after
+a frame started were never sent. Both waits normally end early, on the
+interrupt. */
+/** @brief The longest wait for the packet already being sent: a full frame
+ * with a 1 ms break and a 1 ms mark takes 24.6 ms.*/
+#define DMX_SEND_WAIT_MS 30
+/** @brief The longest wait for an RDM response, counted from the start of the
+ * request: two full packets and the responder's 2.8 ms take 26.3 ms, more if
+ * the responder leaves gaps between slots.*/
+#define RDM_EXCHANGE_WAIT_MS 50
+
 /** @brief Logs a warning message on the terminal if the condition is not met.*/
 #define DMX_ERR(format, ...)              \
   do {                                    \
@@ -153,6 +165,13 @@ typedef struct dmx_driver_t {
     null byte is a framing error, which can be flagged before the break: if
     nothing else arrives before the break, the packet was a short one. */
     int rx_err_head;
+    /* WIFIDMX: when something was last heard on a controller's line. The next
+    packet waits until the line has been quiet long enough after it (upstream
+    timed only from the end of the request: esp_dmx issue 177). */
+    int64_t last_rx_timestamp;
+    /* WIFIDMX: when the packet being sent was started, so dmx_wait_sent() can
+    tell one that will never finish. */
+    int64_t send_start_timestamp;
     union {
       struct {
         rdm_pid_t last_request_pid;  // The PID of the last packet which targeted this device. Is only used when this device is a DMX responder.

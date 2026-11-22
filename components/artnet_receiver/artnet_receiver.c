@@ -156,7 +156,7 @@ static void build_reply(uint8_t *r, const artnet_node_status_t *st, int port_idx
         r[213] = gob;                          /* GoodOutputB */
         memcpy(&r[218], p->responder_uid, 6); /* DefaultRespUID */
     }
-    r[194] = 100;                              /* AcnPriority */
+    r[194] = st->sacn_priority;                /* AcnPriority */
     r[200] = 0x00;                             /* Style: StNode */
     memcpy(&r[201], st->mac, 6);
     memcpy(&r[207], st->ip, 4);                /* BindIp */
@@ -181,6 +181,7 @@ static uint32_t fnv1a(uint32_t h, const uint8_t *d, size_t n)
 static bool get_status(artnet_node_status_t *st)
 {
     memset(st, 0, sizeof(*st));
+    st->sacn_priority = 100;    /* unless the application says otherwise */
     if (!s_an.status_cb) {
         return false;
     }
@@ -338,6 +339,14 @@ static void handle_poll(const uint8_t *b, int len, const struct sockaddr_in *fro
     }
 }
 
+/* NetSwitch, SubSwitch, SwIn, SwOut: bit 7 programs, 0x00 resets that field
+ * and no other, anything else changes nothing */
+static int16_t address_field(uint8_t v, uint8_t mask)
+{
+    if (v & 0x80) return v & mask;
+    return v == 0x00 ? ARTNET_FIELD_RESET : ARTNET_FIELD_KEEP;
+}
+
 static void handle_address(const uint8_t *b, int len, const struct sockaddr_in *from)
 {
     if (len < 107) {
@@ -349,7 +358,10 @@ static void handle_address(const uint8_t *b, int len, const struct sockaddr_in *
     uint8_t bind = b[13];
     artnet_address_cmd_t cmd = {
         .port = (bind <= 1) ? 1 : bind,
-        .net = -1, .sub = -1, .universe = -1,
+        .net = address_field(b[12], 0x7F),
+        .sub = address_field(b[104], 0x0F),
+        .universe_in = address_field(b[96], 0x0F),
+        .universe_out = address_field(b[100], 0x0F),
         .command = b[106],
         .acn_priority = b[105],
         .source_ip = from->sin_addr.s_addr,
@@ -370,16 +382,8 @@ static void handle_address(const uint8_t *b, int len, const struct sockaddr_in *
         cmd.long_name = long_name;
     }
 
-    uint8_t net = b[12], sub = b[104], swin = b[96], swout = b[100];
-    if (net & 0x80)        cmd.net = net & 0x7F;
-    else if (net == 0x00)  cmd.reset_address = true;
-    if (sub & 0x80)        cmd.sub = sub & 0x0F;
-    else if (sub == 0x00)  cmd.reset_address = true;
-    if (swout & 0x80)      cmd.universe = swout & 0x0F;
-    else if (swin & 0x80)  cmd.universe = swin & 0x0F;
-
-    ESP_LOGI(TAG, "ArtAddress port %u: net %d sub %d uni %d cmd 0x%02X%s%s",
-             cmd.port, cmd.net, cmd.sub, cmd.universe, cmd.command,
+    ESP_LOGI(TAG, "ArtAddress port %u: net %d sub %d in %d out %d cmd 0x%02X%s%s",
+             cmd.port, cmd.net, cmd.sub, cmd.universe_in, cmd.universe_out, cmd.command,
              cmd.short_name ? " short-name" : "", cmd.long_name ? " long-name" : "");
 
     artnet_address_callback_t cb = s_an.addr_cb;

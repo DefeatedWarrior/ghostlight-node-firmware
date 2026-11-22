@@ -34,6 +34,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "board.h"
+#include "board_gpio.h"
 #include "captive_dns.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -559,9 +560,9 @@ esp_err_t network_ethernet_connect(const ip_config_t *config)
         .clock_speed_hz = BOARD_ETH_SPI_MHZ * 1000 * 1000,
     };
 
-    esp_err_t isr_ret = gpio_install_isr_service(0);
-    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "gpio_install_isr_service failed: %d", isr_ret);
+    esp_err_t isr_ret = board_gpio_isr_service();
+    if (isr_ret != ESP_OK) {
+        ESP_LOGW(TAG, "GPIO ISR service failed: %d", isr_ret);
     }
 
     eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(BOARD_ETH_SPI_HOST, &devcfg);
