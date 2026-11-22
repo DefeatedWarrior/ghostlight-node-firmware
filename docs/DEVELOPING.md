@@ -495,7 +495,7 @@ with a lost address or admin password back. One command per line, JSON after
 
 ```
 #GL {"id":1,"cmd":"info"}
-#GL> {"ok":true,"firmware_version":"1.1.0","board":"Ghostlight Node rev1",...,"id":1}
+#GL> {"ok":true,"firmware_version":"1.2.0","board":"Ghostlight Node rev1",...,"id":1}
 #GL {"id":2,"cmd":"set","config":{"node_info":{"short_name":"Stage Left"}}}
 #GL> {"ok":true,"restart_needed":false,"id":2}
 ```
