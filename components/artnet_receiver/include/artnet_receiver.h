@@ -152,6 +152,7 @@ typedef struct {
     uint32_t unsupported_packets;
     uint32_t invalid_packets;
     uint32_t own_packets;
+    uint32_t peer_replies;      /**< ArtPollReply from other nodes */
     uint32_t sequence_errors;   /**< kept for API compatibility (merge engine counts drops) */
 } artnet_stats_t;
 
@@ -217,6 +218,41 @@ typedef struct {
 typedef void (*artnet_ipprog_callback_t)(const artnet_ipprog_cmd_t *cmd,
                                          artnet_ipprog_reply_t *reply, void *user_data);
 
+/** Another node's ArtPollReply. Nodes with many ports send one per group of
+ *  ports (BindIndex 1, 2, ...). Addresses in network byte order. */
+#define ARTNET_REPLY_PORTS 4
+typedef struct {
+    uint32_t ip;                /**< the node's address (IpAddress field) */
+    uint32_t from_ip;           /**< where the packet came from */
+    uint8_t mac[6];             /**< all zero if the node does not say */
+    uint8_t bind_index;         /**< 0 = not given */
+    char short_name[18];        /**< NUL-terminated */
+    char long_name[64];
+    uint16_t firmware;          /**< VersInfo */
+    uint16_t oem;
+    uint16_t esta;              /**< ESTA manufacturer code */
+    uint8_t style;              /**< StNode 0, StController 1, StMedia 2, StRoute 3, ... */
+    uint8_t status2;            /**< bit 1 DHCP in use, bit 3 15-bit addresses */
+    uint8_t num_ports;          /**< 0-4 */
+    struct {
+        uint8_t type;           /**< PortTypes: bit 7 output, bit 6 input, bits 5-0 protocol (0 = DMX512) */
+        uint8_t good_input;     /**< bit 7: data received */
+        uint8_t good_output;    /**< bit 7: data being output */
+        uint16_t in_address;    /**< 15-bit Port-Address (Net:Sub-Net:SwIn) */
+        uint16_t out_address;   /**< ... (Net:Sub-Net:SwOut) */
+    } ports[ARTNET_REPLY_PORTS];
+} artnet_poll_reply_t;
+
+/** Parse an ArtPollReply (the whole UDP payload). False if it is not one. */
+bool artnet_parse_poll_reply(const uint8_t *b, int len, artnet_poll_reply_t *out);
+
+/**
+ * ArtPollReply from another node. @p ip_conflict: it uses this node's IP
+ * address (a different device, going by its MAC address).
+ */
+typedef void (*artnet_poll_reply_callback_t)(const artnet_poll_reply_t *reply, bool ip_conflict,
+                                             void *user_data);
+
 esp_err_t artnet_receiver_init(void);
 esp_err_t artnet_receiver_deinit(void);
 esp_err_t artnet_receiver_start(void);
@@ -231,6 +267,16 @@ esp_err_t artnet_receiver_set_ipprog_callback(artnet_ipprog_callback_t callback,
 /** Set the NodeReport code and text shown in ArtPollReply */
 esp_err_t artnet_receiver_set_rdm_callback(artnet_rdm_callback_t callback, void *user_data);
 esp_err_t artnet_receiver_set_sync_callback(artnet_sync_callback_t callback, void *user_data);
+esp_err_t artnet_receiver_set_poll_reply_callback(artnet_poll_reply_callback_t callback, void *user_data);
+
+/**
+ * Ask the other nodes to announce themselves: broadcast an ArtPoll (from the
+ * receive task, shortly after). Polls at most every ARTNET_SELF_POLL_MS; true
+ * if this call queued one. Art-Net 4 nodes answer the poller directly, so
+ * without this the node only hears the ones that broadcast their replies.
+ */
+#define ARTNET_SELF_POLL_MS 5000
+bool artnet_receiver_poll_network(void);
 
 /**
  * Unicast ArtTodData for one port to @p dest_ip (network byte order).

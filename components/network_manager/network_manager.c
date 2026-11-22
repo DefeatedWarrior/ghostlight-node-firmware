@@ -34,6 +34,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "board.h"
+#include "captive_dns.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -1014,6 +1015,7 @@ esp_err_t network_wifi_ap_start(const char *ssid, const char *password, uint8_t 
         esp_netif_dhcps_stop(s_ap_netif);
         esp_netif_set_ip_info(s_ap_netif, &ip_info);
         esp_netif_dhcps_start(s_ap_netif);
+        captive_dns_start();   /* DHCP offers the node as the DNS server */
     }
 
     s_ap_on = true;
@@ -1083,6 +1085,18 @@ void network_get_ap_info(network_ap_info_t *info)
     if (esp_wifi_get_channel(&primary, &second) == ESP_OK) info->channel = primary;
     wifi_sta_list_t list;
     if (esp_wifi_ap_get_sta_list(&list) == ESP_OK) info->clients = (uint8_t)list.num;
+}
+
+bool network_ap_address(uint32_t *ip, uint32_t *netmask)
+{
+    esp_netif_ip_info_t info;
+    if (!s_ap_active || !s_ap_netif || esp_netif_get_ip_info(s_ap_netif, &info) != ESP_OK ||
+        info.ip.addr == 0) {
+        return false;
+    }
+    if (ip) *ip = info.ip.addr;
+    if (netmask) *netmask = info.netmask.addr;
+    return true;
 }
 
 esp_err_t network_wifi_stop(void)

@@ -131,21 +131,28 @@ components/
   dmx_handler         DMX/RDM ports on top of esp_dmx (one task per port)
   esp_dmx             DMX/RDM UART driver (vendored, with local fixes)
   merge_engine        per-port HTP/LTP/priority merge of network sources
+                      (and of another port's DMX input, see "DMX splitter / merger")
+  port_rules          per-port channel rules (patch, limit, park) on what goes out
+  source_monitor      every Art-Net / sACN sender heard, for the signal check,
+                      and the other Art-Net nodes (their ArtPollReply)
   artnet_receiver     Art-Net 4 node (ArtPoll/Reply, ArtDmx, ArtAddress, ...)
   artnet_transmitter  ArtDmx out for DMX input ports
-  sacn_receiver       E1.31 receive, multicast groups, sync
+  sacn_receiver       E1.31 receive, multicast groups, sync, universe discovery
   sacn_transmitter    E1.31 out for DMX input ports
   rdm_bridge          RDM over Art-Net (ArtTod*, ArtRdm)
   scene_manager       scenes stored in LittleFS, fades
   dmx_tools           test patterns, loopback self-test
   dmx_tester          tester mode: levels to send, receive statistics, flicker watch
   serial_setup        settings over the console UART / native USB (browser flasher)
-  network_manager     Ethernet / Wi-Fi / AP with automatic fallback
+  network_manager     Ethernet / Wi-Fi / AP with automatic fallback;
+                      captive_dns.c answers DNS for devices on the node's own AP
   web_server          HTTP API and the web UI (web_ui/, built into web_files.h);
-                      web_tools.c = diagnostics and tools, web_tester.c = /api/tester
+                      web_tools.c = diagnostics and tools, web_tester.c = /api/tester,
+                      web_signal.c = /api/network/sources, /api/network/nodes
+                      and the captive redirect, fw_tag.c = board check on uploads
   led_manager         WS2812 status LED
-  diag                log ring buffer, reset reason, core dump
-  storage_manager     LittleFS mount
+  diag                log ring buffer, reset reason, core dump, memory / stacks
+  storage_manager     LittleFS mount, whole-file writes (temp file + rename)
 boards/<board>/       per-board sdkconfig.defaults
 tools/                build.sh, idf_env.sh, check_compile.sh, gen_web_files.py,
                       ui_mock.py (the web UI against a fake node, no hardware),
@@ -168,7 +175,275 @@ console on the inputs, one flickering channel, a signal loss every 45 s), RDM
 fixtures and a log. `--tester` starts in tester mode, `--no-ethernet`,
 `--ports N` and `--off rdm,scenes,...` mimic other builds, `--setup`
 shows the first-run setup and `--no-login` starts with sign-in turned off.
-It needs nothing beyond Python 3.
+`--signal good|offbyone|nothing|filtered|lossy|multicast` picks what the
+signal check hears. It needs nothing beyond Python 3.
+
+## Channel rules
+
+Each port's settings have a `rules` list (at most 8), applied to what an
+output port sends, after the merge and before the DMX frame goes out
+(`app_dmx_frame_source` in `main/app_routing.c`, through `port_rules`):
+
+```json
+"port1": {"rules": [
+  {"type": "patch", "channel": 101, "count": 10, "from": 1},
+  {"type": "limit", "channel": 20,  "count": 2,  "level": 128},
+  {"type": "park",  "channel": 5,   "count": 1,  "level": 255}
+]}
+```
+
+All patches go first and each reads the levels as they arrived, so two
+patches can swap blocks. Then limits cap channels, then parks set them.
+`config_port_rule_problem()` checks a rule; `POST /api/config` and USB
+`set` refuse a list with a bad rule, while a settings file keeps the good
+rules and drops the bad ones. A posted `rules` list replaces the port's
+whole list (`[]` clears it). Rules do nothing in tester mode or while a DMX
+tools test pattern runs. Scenes and the failsafe record what arrives,
+before the rules.
+
+## DMX splitter / merger
+
+An output port can take other ports' DMX input (boards with 2 or more
+ports). The web UI sets one input per port ("DMX from another port" in the
+port's settings); the setting itself takes a list, so a board with more
+ports could merge several.
+
+```json
+"port1": {"local_inputs": [2, 4], "local_only": false}
+```
+
+`local_inputs` lists the input ports (never the port itself; stored as a
+bit mask, bit p-1 = port p); `local_only` drops the network for that port
+and is cleared while the list is empty. `app_on_dmx_input()` hands every
+received frame to each output port that takes it (`feed_local_outputs()` in
+`main/app_routing.c`) as a merge engine source with protocol
+`SOURCE_PROTOCOL_DMX_IN` (the input port number stands in for the sender's
+address, so it never matches an Art-Net sender). Each input joins the
+port's other sources under its merge mode, and the protocol filter never
+drops it. With `local_only` the port ignores Art-Net and sACN
+(`app_on_*_dmx` skip it, its sACN universe is not joined). With exactly one
+input and no network it is a splitter: it triggers its output on every
+input frame, so the DMX goes out right after it arrives instead of at the
+port's own refresh rate (with several inputs it keeps its refresh rate).
+The output still uses its own slot count, break and MAB; RDM does not pass
+through. A lost input is handled like a lost network source (merge timeout,
+then the failsafe). The input port keeps sending to the network as before.
+An input the port no longer takes is dropped from the merge at once.
+Nothing is routed in tester mode or during the loopback self-test.
+
+## Other Art-Net nodes
+
+`artnet_receiver` parses other nodes' ArtPollReply
+(`artnet_parse_poll_reply()`), before the filter that drops the node's own
+packets: a reply from (or naming) this node's IP address with a different
+MAC address is an IP address clash. `source_monitor` keeps one row per node
+and BindIndex for 30 s. Art-Net 4 nodes answer the poller directly, so
+`GET /api/network/nodes` also queues an ArtPoll (broadcast from the receive
+task, at most every 5 s, `artnet_receiver_poll_network()`); the node only
+polls while someone has the Overview page open:
+
+```json
+{"listening": true, "polled": true,
+ "nodes": [{"ip": "192.168.1.60", "mac": "24:6f:28:aa:bb:01", "short_name": "Stage left",
+            "long_name": "Stage left rack", "firmware": 260, "oem": 11200, "esta": 32752,
+            "style": 0, "bind_index": 1, "dhcp": true, "conflict": false, "replies": 12, "age_ms": 1200,
+            "ports": [{"output": true, "input": false, "protocol": 0, "in": 0, "out": 0,
+                       "in_data": false, "out_data": true}]}]}
+```
+
+The page groups the rows by IP and MAC address and the signal check adds the
+clashes: another device on this node's address, two other devices sharing
+an address, and two inputs (this node's or others') sending the same
+Art-Net universe.
+
+## Signal check
+
+`GET /api/network/sources` (signed in) is the "why is nothing lighting
+up?" data behind the Overview page's Signal check card:
+
+```json
+{"listening": true,
+ "interfaces": [{"name": "wifi", "ip": "192.168.1.47", "netmask": "255.255.255.0", "rssi": -58, "ssid": "Venue", "channel": 6}],
+ "ports": [{"port": 1, "output": true, "mode": 1, "protocol_mode": 4, "merge_mode": 0,
+            "artnet": 0, "artnet_backup": -1, "sacn": 1, "live_sources": 1, "contributing": 1, "rules": false,
+            "local_inputs": [], "local_only": false, "input": false}],
+ "sources": [{"protocol": "sacn", "ip": "192.168.1.31", "name": "Desk", "universe": 1,
+              "priority": 100, "pap": false, "preview": false, "slots": 512, "sequenced": true,
+              "packets": 5120, "lost": 3, "lost_recent": 0, "late": 0, "rate": 44.0,
+              "max_gap_ms": 31, "age_ms": 12, "ports": [1], "filtered": []}],
+ "advertised": [{"ip": "192.168.1.31", "name": "Desk", "universes": [1, 2], "count": 2, "age_ms": 4100}]}
+```
+
+`source_monitor` keeps one row per protocol, sender (sACN: CID) and
+universe, whether a port uses it or not. Art-Net arrives by broadcast, so
+the node hears every universe; sACN multicast arrives only for the
+universes the node joins, so `sacn_receiver` also joins the universe
+discovery group (239.255.250.214) and `advertised` lists what consoles say
+they send. `lost` counts missing sequence numbers, `lost_recent` and
+`max_gap_ms` cover the last 10-20 s, a 2 s pause restarts the sequence check,
+and rows are dropped after a minute of silence. `ports` / `filtered`
+follow the routing rules: `filtered` is a port on that universe whose
+protocol setting drops this protocol. The hints themselves are worked out in
+the browser (`sourceHints()` in `main.js`).
+
+## Input ports: Send to
+
+An input port (DMX in, sent to the network) has `send_to` in its settings:
+
+```json
+"port2": {"mode": 2, "send_to": "list", "send_list": ["10.0.0.20", "10.0.0.21"]}
+```
+
+- `"all"` (default): Art-Net broadcast and sACN multicast, as before.
+- `"nodes"`: Art-Net unicast to every node whose ArtPollReply has an output
+  on the port's universe (`srcmon_output_nodes()`, looked up once a second;
+  the main loop keeps polling while a port uses this). Broadcast while no
+  node is known. sACN stays multicast.
+- `"list"`: Art-Net and sACN unicast to up to 4 addresses
+  (`CONFIG_SEND_LIST_MAX`). Not multicast, not 0.0.0.0 or 255.255.255.255,
+  and at least one.
+
+Wi-Fi access points hold broadcast and multicast frames until the next
+DTIM beacon and never resend a lost one, so on Wi-Fi unicast is the
+reliable choice. Changing the destination ends a running sACN stream first
+(stream-terminated packets to the old destinations).
+
+## Settings files and the start-up notice
+
+`config_save()` writes `config.json` through a temporary file and two
+renames (`storage_replace_file()`), keeping the version it replaces as
+`config.bak`. LittleFS renames are atomic, so a power cut leaves a whole
+file. At start-up a `config.json` that can't be read or parsed is renamed
+to `config.bad` and `config.bak` is loaded instead; if that fails too the
+node starts with factory settings. A storage partition that would not mount
+is formatted (`storage_was_formatted()`), except on a blank board.
+
+Either way `config_boot_notice()` returns a sentence for the user. It is
+`settings_notice` in `GET /api/system/info` and the USB `info` command, the
+web UI shows it as a banner, and `POST /api/system/notice/clear` ("Got it")
+hides it until the next restart. A factory reset deletes `config.bak` and
+`config.bad`.
+
+All settings changes go through `config_lock()` (recursive). Saves are
+numbered under the lock and written in order under a separate mutex, so a
+slower writer can't overwrite a newer file with older settings. Slow work
+(PBKDF2, restarting ports, writing scenes) runs outside the lock, and
+`app_apply_config()` works from `config_snapshot()`.
+
+## Firmware upload check
+
+Every image carries `"\x01GLBOARD\x02" BOARD_ID "\x03"` (`k_board_tag` in
+`web_server.c`). `POST /api/system/firmware-upload` scans the upload for it
+as it streams in (`fw_tag.c`) and stops as soon as it finds another board's
+ID. An image without the marker (firmware from before the check, or not
+this firmware) is refused at the end. Nothing is written to the boot
+partition in either case. Install those over USB with the browser flasher.
+
+## Memory and task stacks
+
+`GET /api/diag/health` (System page, Memory card):
+
+```json
+{"internal_free": 59403, "internal_min_free": 38919, "internal_largest": 24576, "internal_low": 16384,
+ "psram_free": 8348740, "psram_min_free": 8348436, "stack_low": 512,
+ "stacks": [{"task": "reset_btn", "free": 684}, {"task": "IDLE1", "free": 696}]}
+```
+
+Internal RAM is what Wi-Fi, lwIP and drivers need (PSRAM can't stand in),
+and `stacks` lists the tasks with the least stack left over since start-up,
+in bytes (`uxTaskGetSystemState()`, so `CONFIG_FREERTOS_USE_TRACE_FACILITY`
+is on). The main loop logs the same every 30 s, marked "LOW" below 16 KB of
+internal RAM or 512 bytes of stack: as a warning while internal RAM is low
+right now or when a lowest figure falls further, otherwise as information.
+On esp-node-2rdm, received packets and lwIP buffers go in PSRAM
+(`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`). It isn't free: the option rules
+out dynamic Wi-Fi transmit buffers, and 16 static ones (1.6 KB each) are
+allocated at start-up. All told, 16.5 KB less internal RAM is free when idle.
+Measured on the prototype on 2026-11-23, same source both ways, four restarts
+each, about 1,900 Art-Net packets/s sent:
+
+| | free when idle | lowest, flood alone | lowest, flood + one web client | smallest largest block seen | failed requests |
+|---|---|---|---|---|---|
+| without the option | 56.8 KB | 20.6 KB | 5.3 KB | 20.5 KB | 2 |
+| with it, as shipped | 40.3 KB | 34.9 KB | 23.7 KB | 29.7 KB | 0 |
+
+(KB = 1,000 bytes.) With RDM on, a background discovery pass runs on each
+output port every 30 s, the first about 33 s after start-up, and briefly
+takes about 17 KB of internal RAM with nothing connected (6.5 KB for the
+task, the rest for its device lists). A low-water mark taken before the first
+pass looks much better than one taken after, so compare like with like. That
+pass takes an idle node to 23.8 KB, and the largest free block was seen at
+12.8 KB during one. Without the option the mark fell to 15.3 KB over the same
+period, further than a pass explains.
+
+The table is not the worst case either. With the option and two or three web
+clients polling during a flood, the same build fell to 17.4 KB, and to
+16.9 KB in a 12 minute soak: about 0.5 KB above the 16 KB warning line. A
+flood can also hold up `/main.js` for seconds (7.2 s once, one timeout at
+10 s). The build without the option was not measured with several clients.
+
+The option also changes Kconfig defaults: 16 RX buffers
+and a BA window of 16 (about 10 KB more internal RAM), and no limit on
+out-of-order TCP packets. The board's `sdkconfig.defaults` pins the values
+that were measured (10, 6 and 4), so a clean build gets the same. ESP-IDF
+recommends a window of 16 for throughput with this option; measure again
+before changing it. Boards without PSRAM don't use any of this.
+
+Don't build a large response with cJSON: it costs about 40 bytes of internal
+RAM per number, PSRAM or not. 512 levels took 22 KB, so a levels poll during
+a flood could use all of it. The levels, tester channel and log responses use
+`web_stream.h`, which needs one 1 KB buffer.
+
+## Task watchdog
+
+The task watchdog (10 s, panic) watches the DMX tasks, the network
+supervisor, the Art-Net and sACN receive tasks, the RDM bridge and the main
+loop. Each wakes at least every second; a task stuck for 10 s restarts the
+node and leaves a crash report. The web server is not watched: a stuck web
+page is better than a restart that blacks out the DMX outputs.
+
+## DMX input frames
+
+The next DMX frame starts overwriting esp_dmx's receive buffer one break
+after the last one ended, which can be well under a millisecond, and a
+stray break right after a frame empties it before the input task wakes
+(`dmx_receive()` then reports nothing). The receive interrupt therefore
+copies each finished level frame (`rx_frame` in `service.h`, marked
+WIFIDMX), and the input task forwards any new copy (`dmx_read_received()`)
+whatever `dmx_receive()` reported, so a frame is never a mix of two and
+never lost that way. An input task more than a frame late uses the newest
+frame and counts the ones it never saw as `dropped_late` ("Frames skipped
+for a newer one" in the tester).
+
+Two more changes to esp_dmx's receive side, both marked WIFIDMX in
+`hal/uart.c`: upstream took every short packet's length as the size to
+expect from then on, so a single packet cut short (a cable pulled
+mid-frame) made every later frame end early until the port restarted. A
+shorter size is now only taken when the same length comes twice in a row
+(level frames only: text and SIP packets are short anyway), and the size
+grows back when a longer frame arrives, which is then handed over whole.
+A short frame ends at the next one's break, so `dmx_receive()` no longer
+marks that next frame stale (the interrupt ignored it, losing the frame
+after every short one), and a break whose framing error is flagged before
+the break itself still ends a short frame (`rx_err_head`). `test_dmx_rx.c`
+covers all of it on the host; none of it has seen a real short-frame source
+yet. Slots a short frame
+leaves out keep their last level (as fixtures do) instead of dropping to
+zero; after a signal loss they start from zero again.
+
+## Captive portal
+
+When the node's own access point starts, `network_manager` starts a small
+DNS server (`captive_dns.c`, UDP 53). The AP's DHCP already hands out the
+node as the DNS server. For clients in the AP's subnet it answers every A
+query with the node's address (TTL 10 s) and other types with an empty
+answer; the web server's 404 handler then redirects a request for any other
+host (`captive.apple.com/hotspot-detect.html`,
+`connectivitycheck.gstatic.com/generate_204`, ...) to `http://<AP IP>/`, so
+phones open the setup page by themselves. `network.ap_captive` (default on,
+"Open this page when a phone or laptop joins" in the UI) turns it off: names
+then get NXDOMAIN and unknown pages a plain 404. Clients on Ethernet or the
+venue Wi-Fi are never answered or redirected.
 
 ## USB setup
 
@@ -217,7 +492,9 @@ it allocates its buffers only in tester mode. The API is in `web_tester.c`.
 1. Copy a pin header in `components/board/include/boards/` (for example
    `esp32_devkitc.h`) to `components/board/include/boards/<your_board>.h`.
    Fill in the required
-   `BOARD_*` names listed at the top of `components/board/include/board.h`.
+   `BOARD_*` names listed at the top of `components/board/include/board.h`,
+   including `BOARD_ID`, which must be the `boards/<your-board>` folder name
+   (web firmware uploads are checked against it).
    Anything optional you leave out defaults to "not fitted" (-1).
 2. Add a `config BOARD_<YOUR_BOARD>` entry to the `NODE_BOARD` choice in
    `main/Kconfig.projbuild`. Give it a `depends on IDF_TARGET_<CHIP>`, and add
@@ -260,10 +537,16 @@ and the core logic:
 
 | Suite | Covers |
 |---|---|
-| `test_artnet.c` | Art-Net parsing: ArtDmx, ArtPoll/ArtPollReply, ArtAddress, ArtSync, ArtTod*, ArtRdm, ArtIpProg, bad lengths and IDs |
-| `test_sacn.c` | E1.31 parsing: data, per-address priority, sync, priorities, preview / stream-terminated, bad headers |
-| `test_merge.c` | merge engine: HTP, LTP, last source, backup, disable, priorities, timeouts, failsafe, sync |
-| `test_config.c` | `config_to_json` / `config_from_json` round trip, loading the file, `config_sanitize` |
+| `test_artnet.c` | Art-Net parsing: ArtDmx, ArtPoll/ArtPollReply, ArtAddress, ArtSync, ArtTod*, ArtRdm, ArtIpProg, other nodes' replies and IP clashes, sending ArtPoll, bad lengths and IDs |
+| `test_sacn.c` | E1.31 parsing: data, per-address priority, sync, universe discovery, priorities, preview / stream-terminated, bad headers |
+| `test_merge.c` | merge engine: HTP, LTP, last source, backup, disable, priorities, timeouts, failsafe, sync, another port's DMX input |
+| `test_config.c` | `config_to_json` / `config_from_json` round trip, loading the file, `config_sanitize`, channel rules, DMX from another port, "Send to" lists, the largest settings file, the previous copy (`config.bak`): damaged files, a power cut between the two renames, the start-up notice |
+| `test_rules.c` | channel rules: patch, limit and park, their order, bad rules, per-port copies |
+| `test_srcmon.c` | the signal check's sender table: sequence loss and wrap-around, rate, gaps, ageing, discovery lists, the other-node table and the nodes that output a universe |
+| `test_dns.c` | captive portal DNS answers: A / other types / off, EDNS, malformed queries |
+| `test_webstream.c` | the chunked JSON writer for large responses: the same text as cJSON, chunk edges, a failed send |
+| `test_dmx_rx.c` | esp_dmx's receive interrupt and `dmx_receive()`: short, cut, growing and mixed-length frames, stray breaks, other start codes, RDM between frames; each with both orders of break and framing error, and a task that wakes late |
+| `test_fwtag.c` | finding the board marker in a firmware upload: in one piece, split across every chunk boundary, false starts, bad IDs |
 
 You need `make` and a C compiler (clang or gcc):
 
@@ -297,6 +580,9 @@ How it works:
   can call its static `process_packet()` the way the receive task does.
   Packets go into a buffer the size of the firmware's receive buffer. The
   bytes after the packet are poisoned, so ASan reports any read past it.
+- `test_dmx_rx.c` has its own stubs (`stubs_dmx/`): a UART that is only a
+  FIFO and interrupt flags. It proves the driver's logic, not its timing on
+  a chip.
 - `test.h` is the assert framework (`CHECK`, `CHECK_EQ`, `RUN`). `packets.h`
   builds valid packets for the tests and for the seed corpus.
 - Seeds: `fuzz/seeds/artnet` and `fuzz/seeds/sacn` are made by

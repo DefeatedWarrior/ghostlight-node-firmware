@@ -112,7 +112,10 @@ bool dmx_driver_install(dmx_port_t dmx_num, const dmx_config_t *config,
   // Allocate the DMX driver
   const size_t driver_size =
       sizeof(dmx_driver_t) + (sizeof(dmx_parameter_t) * root_param_count);
-  dmx_driver_t *driver = heap_caps_malloc(driver_size, MALLOC_CAP_8BIT);
+  /* WIFIDMX: internal RAM. The ISR runs from IRAM and must reach the driver
+  while the flash cache is off; plain 8-bit memory can be PSRAM. */
+  dmx_driver_t *driver =
+      heap_caps_malloc(driver_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   DMX_CHECK(driver != NULL, false, "DMX driver malloc error");
   dmx_driver[dmx_num] = driver;
   driver->mux = NULL;
@@ -171,6 +174,10 @@ bool dmx_driver_install(dmx_port_t dmx_num, const dmx_config_t *config,
   driver->dmx.controller_eop_timestamp = 0;
   driver->dmx.last_responder_pid = 0;
   driver->dmx.responder_sent_last = false;
+  driver->dmx.rx_frame_seq = 0;  // WIFIDMX: see dmx_read_received()
+  driver->dmx.rx_frame_size = 0;
+  driver->dmx.rx_short_len = 0;
+  driver->dmx.rx_err_head = 0;
   driver->dmx.last_request_pid = 0;
   driver->dmx.last_request_pid_repeats = 0;
 

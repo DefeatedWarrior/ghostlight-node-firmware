@@ -93,32 +93,37 @@ void app_artnet_status(artnet_node_status_t *st, void *user_data)
 
 void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
 {
-    config_t *c = config_get();
     int p = (cmd->port >= 1 && cmd->port <= NPORTS) ? cmd->port : 1;
-    port_config_t *pc = config_port(c, p);
-    bool changed = false;
+    bool changed = false, short_named = false, long_named = false;
     struct in_addr from = {.s_addr = cmd->source_ip};
 
     ESP_LOGI(TAG, "ArtAddress from %s for port %d (command 0x%02x)", inet_ntoa(from), p, cmd->command);
 
+    uint8_t op = cmd->command;
+    uint8_t hi = op & 0xF0, idx = op & 0x0F;
+
+    /* The settings part, under the settings lock (the web UI may be saving
+     * at the same moment); what it sets off happens after */
+    config_lock();
+    config_t *c = config_get();
+    port_config_t *pc = config_port(c, p);
+
     if (cmd->short_name && strcmp(cmd->short_name, c->node_info.short_name) != 0) {
         snprintf(c->node_info.short_name, sizeof(c->node_info.short_name), "%s", cmd->short_name);
-        artnet_receiver_set_node_report(ARTNET_RC_SH_NAME_OK, "Short name programmed");
-        changed = true;
+        short_named = changed = true;
     }
     if (cmd->long_name && strcmp(cmd->long_name, c->node_info.long_name) != 0) {
         snprintf(c->node_info.long_name, sizeof(c->node_info.long_name), "%s", cmd->long_name);
-        artnet_receiver_set_node_report(ARTNET_RC_LO_NAME_OK, "Long name programmed");
-        changed = true;
+        long_named = changed = true;
     }
 
     uint16_t addr = pc->universe_primary;
+    uint16_t old_addr = addr;
     if (cmd->reset_address) addr = (uint16_t)(p - 1);   /* default: port N on universe N-1 */
     if (cmd->net >= 0)      addr = (addr & 0x00FF) | ((uint16_t)(cmd->net & 0x7F) << 8);
     if (cmd->sub >= 0)      addr = (addr & 0x7F0F) | ((uint16_t)(cmd->sub & 0x0F) << 4);
     if (cmd->universe >= 0) addr = (addr & 0x7FF0) | (uint16_t)(cmd->universe & 0x0F);
     if (addr != pc->universe_primary) {
-        ESP_LOGI(TAG, "Port %d Port-Address %u -> %u", p, pc->universe_primary, addr);
         pc->universe_primary = addr;
         changed = true;
     }
@@ -127,13 +132,49 @@ void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
         changed = true;
     }
 
-    uint8_t op = cmd->command;
-    uint8_t hi = op & 0xF0, idx = op & 0x0F;
+    uint8_t loss = c->merge.loss_behavior;
     switch (op) {
-        case ARTNET_AC_NONE:
-            break;
-        case ARTNET_AC_CANCEL_MERGE:
-            break;   /* sources are merged per protocol rules, nothing latched */
+        case ARTNET_AC_FAIL_HOLD:  loss = LOSS_HOLD_LAST_LOOK; break;
+        case ARTNET_AC_FAIL_ZERO:  loss = LOSS_BLACKOUT; break;
+        case ARTNET_AC_FAIL_FULL:  loss = LOSS_FULL; break;
+        case ARTNET_AC_FAIL_SCENE: loss = LOSS_SCENE; break;
+        default: break;
+    }
+    if (loss != c->merge.loss_behavior) {
+        c->merge.loss_behavior = loss;
+        changed = true;
+    }
+
+    /* Per-port commands: one port per BindIndex, only port 0 of the page exists */
+    if (idx == 0) {
+        if (hi == ARTNET_AC_MERGE_LTP0 && pc->merge_mode != MERGE_MODE_LTP) {
+            pc->merge_mode = MERGE_MODE_LTP; changed = true;
+        } else if (hi == ARTNET_AC_MERGE_HTP0 && pc->merge_mode != MERGE_MODE_HTP) {
+            pc->merge_mode = MERGE_MODE_HTP; changed = true;
+        } else if (hi == 0x20 && pc->mode != DMX_MODE_OUTPUT && pc->mode != DMX_MODE_RDM_MASTER) {
+            pc->mode = DMX_MODE_OUTPUT; changed = true;        /* DirectionTx */
+        } else if (hi == 0x30 && pc->mode != DMX_MODE_INPUT && pc->mode != DMX_MODE_RDM_RESPONDER) {
+            pc->mode = DMX_MODE_INPUT; changed = true;         /* DirectionRx */
+        } else if (hi == ARTNET_AC_ARTNET_SEL0 && pc->protocol_mode != PROTOCOL_ARTNET_ONLY) {
+            pc->protocol_mode = PROTOCOL_ARTNET_ONLY; changed = true;
+        } else if (hi == ARTNET_AC_ACN_SEL0 && pc->protocol_mode != PROTOCOL_SACN_ONLY) {
+            pc->protocol_mode = PROTOCOL_SACN_ONLY; changed = true;
+        } else if (hi == ARTNET_AC_RDM_ENABLE0 && !pc->rdm_enabled) {
+            pc->rdm_enabled = true; changed = true;
+        } else if (hi == ARTNET_AC_RDM_DISABLE0 && pc->rdm_enabled) {
+            pc->rdm_enabled = false; changed = true;
+        }
+    }
+    if (changed) {
+        config_sanitize(c);
+    }
+    config_unlock();
+
+    if (short_named) artnet_receiver_set_node_report(ARTNET_RC_SH_NAME_OK, "Short name programmed");
+    if (long_named) artnet_receiver_set_node_report(ARTNET_RC_LO_NAME_OK, "Long name programmed");
+    if (addr != old_addr) ESP_LOGI(TAG, "Port %d Port-Address %u -> %u", p, old_addr, addr);
+
+    switch (op) {
         case ARTNET_AC_LED_NORMAL: g_app.indicator = 0; app_update_indicator(); break;
         case ARTNET_AC_LED_MUTE:   g_app.indicator = 2; app_update_indicator(); break;
         case ARTNET_AC_LED_LOCATE: g_app.indicator = 1; app_update_indicator(); break;
@@ -145,30 +186,6 @@ void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
                 }
             }
             break;
-        case ARTNET_AC_FAIL_HOLD:
-            if (c->merge.loss_behavior != LOSS_HOLD_LAST_LOOK) {
-                c->merge.loss_behavior = LOSS_HOLD_LAST_LOOK;
-                changed = true;
-            }
-            break;
-        case ARTNET_AC_FAIL_ZERO:
-            if (c->merge.loss_behavior != LOSS_BLACKOUT) {
-                c->merge.loss_behavior = LOSS_BLACKOUT;
-                changed = true;
-            }
-            break;
-        case ARTNET_AC_FAIL_FULL:
-            if (c->merge.loss_behavior != LOSS_FULL) {
-                c->merge.loss_behavior = LOSS_FULL;
-                changed = true;
-            }
-            break;
-        case ARTNET_AC_FAIL_SCENE:
-            if (c->merge.loss_behavior != LOSS_SCENE) {
-                c->merge.loss_behavior = LOSS_SCENE;
-                changed = true;
-            }
-            break;
         case ARTNET_AC_FAIL_RECORD:
 #if CONFIG_NODE_SCENES
             /* File writes: done on the main task */
@@ -178,36 +195,16 @@ void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
 #endif
             break;
         default:
-            if (idx != 0) {
-                break;   /* one port per BindIndex: only port 0 of the page exists */
-            }
-            if (hi == ARTNET_AC_MERGE_LTP0 && pc->merge_mode != MERGE_MODE_LTP) {
-                pc->merge_mode = MERGE_MODE_LTP; changed = true;
-            } else if (hi == ARTNET_AC_MERGE_HTP0 && pc->merge_mode != MERGE_MODE_HTP) {
-                pc->merge_mode = MERGE_MODE_HTP; changed = true;
-            } else if (hi == 0x20 && pc->mode != DMX_MODE_OUTPUT && pc->mode != DMX_MODE_RDM_MASTER) {
-                pc->mode = DMX_MODE_OUTPUT; changed = true;        /* DirectionTx */
-            } else if (hi == 0x30 && pc->mode != DMX_MODE_INPUT && pc->mode != DMX_MODE_RDM_RESPONDER) {
-                pc->mode = DMX_MODE_INPUT; changed = true;         /* DirectionRx */
-            } else if (hi == ARTNET_AC_ARTNET_SEL0 && pc->protocol_mode != PROTOCOL_ARTNET_ONLY) {
-                pc->protocol_mode = PROTOCOL_ARTNET_ONLY; changed = true;
-            } else if (hi == ARTNET_AC_ACN_SEL0 && pc->protocol_mode != PROTOCOL_SACN_ONLY) {
-                pc->protocol_mode = PROTOCOL_SACN_ONLY; changed = true;
-            } else if (hi == ARTNET_AC_CLEAR_OP0) {
+            if (idx == 0 && hi == ARTNET_AC_CLEAR_OP0) {
 #if CONFIG_NODE_SCENES
                 scene_release(p, 0);
 #endif
                 merge_engine_blackout(p);
-            } else if (hi == ARTNET_AC_RDM_ENABLE0 && !pc->rdm_enabled) {
-                pc->rdm_enabled = true; changed = true;
-            } else if (hi == ARTNET_AC_RDM_DISABLE0 && pc->rdm_enabled) {
-                pc->rdm_enabled = false; changed = true;
             }
             break;
     }
 
     if (changed) {
-        config_sanitize(c);
         xEventGroupSetBits(g_app.events, EV_SAVE | EV_APPLY);
     }
 }
@@ -233,10 +230,13 @@ static bool ip_nonzero(const uint8_t b[4])
     return b[0] | b[1] | b[2] | b[3];
 }
 
+static void program_ip(const artnet_ipprog_cmd_t *cmd, artnet_ipprog_reply_t *reply,
+                       const network_ip_info_t *nip, const network_sta_info_t *sta_in,
+                       struct in_addr from);
+
 void app_on_artnet_ipprog(const artnet_ipprog_cmd_t *cmd, artnet_ipprog_reply_t *reply,
                           void *user_data)
 {
-    config_t *c = config_get();
     network_ip_info_t ni;
     memset(&ni, 0, sizeof(ni));
     network_get_ip_info(&ni);
@@ -247,6 +247,24 @@ void app_on_artnet_ipprog(const artnet_ipprog_cmd_t *cmd, artnet_ipprog_reply_t 
 
     if (!cmd->program) return;   /* query */
     struct in_addr from = {.s_addr = cmd->source_ip};
+    network_sta_info_t sta;
+    memset(&sta, 0, sizeof(sta));
+    if (ni.state == NETWORK_WIFI_STA_CONNECTED) {
+        network_get_sta_info(&sta);
+    }
+
+    /* Under the settings lock from here (the web UI may be saving) */
+    config_lock();
+    program_ip(cmd, reply, &ni, &sta, from);
+    config_unlock();
+}
+
+static void program_ip(const artnet_ipprog_cmd_t *cmd, artnet_ipprog_reply_t *reply,
+                       const network_ip_info_t *nip, const network_sta_info_t *sta_in,
+                       struct in_addr from)
+{
+    config_t *c = config_get();
+    network_ip_info_t ni = *nip;
     if (!c->node_info.allow_ip_prog) {
         ESP_LOGW(TAG, "ArtIpProg from %s ignored (disabled in the settings)", inet_ntoa(from));
         return;
@@ -263,11 +281,9 @@ void app_on_artnet_ipprog(const artnet_ipprog_cmd_t *cmd, artnet_ipprog_reply_t 
         mask = c->network.eth_netmask;
         what = "Ethernet";
     } else if (ni.state == NETWORK_WIFI_STA_CONNECTED) {
-        network_sta_info_t sta;
-        network_get_sta_info(&sta);
         config_wifi_profile_t *wp = NULL;
         for (int i = 0; i < c->network.wifi_profile_count; i++) {
-            if (strcmp(c->network.wifi_profiles[i].ssid, sta.ssid) == 0) {
+            if (strcmp(c->network.wifi_profiles[i].ssid, sta_in->ssid) == 0) {
                 wp = &c->network.wifi_profiles[i];
                 break;
             }

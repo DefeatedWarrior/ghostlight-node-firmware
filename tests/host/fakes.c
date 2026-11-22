@@ -31,10 +31,15 @@ int host_log_enabled;
 int64_t host_now_us = 1000000;
 host_sent_t host_sent[HOST_SENT_MAX];
 int host_sent_count;
-char host_storage_name[64];
-char *host_storage_data;
-size_t host_storage_len;
 int host_storage_writes;
+bool host_storage_formatted;
+
+#define HOST_FILES 8
+static struct {
+    char name[64];
+    char *data;
+    size_t len;
+} s_files[HOST_FILES];
 
 __attribute__((constructor)) static void host_log_init(void)
 {
@@ -47,11 +52,12 @@ void host_fakes_reset(void)
     host_now_us = 1000000;
     host_sent_count = 0;
     memset(host_sent, 0, sizeof(host_sent));
-    free(host_storage_data);
-    host_storage_data = NULL;
-    host_storage_len = 0;
-    host_storage_name[0] = '\0';
+    for (int i = 0; i < HOST_FILES; i++) {
+        free(s_files[i].data);
+        memset(&s_files[i], 0, sizeof(s_files[i]));
+    }
     host_storage_writes = 0;
+    host_storage_formatted = false;
 }
 
 uint8_t *host_rx_buffer(const uint8_t *data, size_t len, size_t bufsize)
@@ -124,6 +130,9 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void) { return &s_sem_dummy; }
 void vSemaphoreDelete(SemaphoreHandle_t s) { (void)s; }
 BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t wait) { (void)s; (void)wait; return pdTRUE; }
 BaseType_t xSemaphoreGive(SemaphoreHandle_t s) { (void)s; return pdTRUE; }
+SemaphoreHandle_t xSemaphoreCreateRecursiveMutex(void) { return &s_sem_dummy; }
+BaseType_t xSemaphoreTakeRecursive(SemaphoreHandle_t s, TickType_t wait) { (void)s; (void)wait; return pdTRUE; }
+BaseType_t xSemaphoreGiveRecursive(SemaphoreHandle_t s) { (void)s; return pdTRUE; }
 
 /* ---- lwIP --------------------------------------------------------------- */
 
@@ -165,29 +174,61 @@ int mbedtls_pkcs5_pbkdf2_hmac_ext(mbedtls_md_type_t md_type,
 
 /* ---- storage_manager (same contract as storage_manager.c) --------------- */
 
+static int find_file(const char *name)
+{
+    for (int i = 0; i < HOST_FILES; i++) {
+        if (s_files[i].data && strcmp(s_files[i].name, name) == 0) return i;
+    }
+    return -1;
+}
+
+static void drop_file(int i)
+{
+    free(s_files[i].data);
+    memset(&s_files[i], 0, sizeof(s_files[i]));
+}
+
 void host_storage_put(const char *name, const char *data, size_t len)
 {
-    free(host_storage_data);
-    host_storage_data = malloc(len ? len : 1);
-    if (len) memcpy(host_storage_data, data, len);
-    host_storage_len = len;
-    snprintf(host_storage_name, sizeof(host_storage_name), "%s", name);
+    int i = find_file(name);
+    if (i < 0) {
+        for (i = 0; i < HOST_FILES && s_files[i].data; i++) {}
+        if (i == HOST_FILES) abort();   /* more files than a test needs */
+    } else {
+        free(s_files[i].data);
+    }
+    s_files[i].data = malloc(len ? len : 1);
+    if (len) memcpy(s_files[i].data, data, len);
+    s_files[i].len = len;
+    snprintf(s_files[i].name, sizeof(s_files[i].name), "%s", name);
+}
+
+const char *host_storage_get(const char *name, size_t *len)
+{
+    int i = find_file(name);
+    if (i < 0) return NULL;
+    if (len) *len = s_files[i].len;
+    return s_files[i].data;
 }
 
 esp_err_t storage_init(void) { return ESP_OK; }
 esp_err_t storage_deinit(void) { return ESP_OK; }
+bool storage_was_formatted(void) { return host_storage_formatted; }
+void storage_lock(void) {}
+void storage_unlock(void) {}
 
 bool storage_file_exists(const char *path)
 {
-    return host_storage_data && strcmp(path, host_storage_name) == 0;
+    return find_file(path) >= 0;
 }
 
 /* Like the real one: reads at most *size - 1 bytes and NUL-terminates */
 esp_err_t storage_read_file(const char *path, char *buffer, size_t *size)
 {
-    if (!storage_file_exists(path) || *size == 0) return ESP_FAIL;
-    size_t n = host_storage_len < *size - 1 ? host_storage_len : *size - 1;
-    memcpy(buffer, host_storage_data, n);
+    int i = find_file(path);
+    if (i < 0 || *size == 0) return ESP_FAIL;
+    size_t n = s_files[i].len < *size - 1 ? s_files[i].len : *size - 1;
+    memcpy(buffer, s_files[i].data, n);
     buffer[n] = '\0';
     *size = n;
     return ESP_OK;
@@ -200,11 +241,27 @@ esp_err_t storage_write_file(const char *path, const char *data, size_t size)
     return ESP_OK;
 }
 
+esp_err_t storage_rename_file(const char *from, const char *to)
+{
+    int i = find_file(from);
+    if (i < 0) return ESP_FAIL;
+    int j = find_file(to);
+    if (j >= 0) drop_file(j);
+    snprintf(s_files[i].name, sizeof(s_files[i].name), "%s", to);
+    return ESP_OK;
+}
+
+esp_err_t storage_replace_file(const char *path, const char *previous, const char *data,
+                               size_t size)
+{
+    if (find_file(path) >= 0) storage_rename_file(path, previous);
+    return storage_write_file(path, data, size);
+}
+
 esp_err_t storage_delete_file(const char *path)
 {
-    if (!storage_file_exists(path)) return ESP_FAIL;
-    free(host_storage_data);
-    host_storage_data = NULL;
-    host_storage_len = 0;
+    int i = find_file(path);
+    if (i < 0) return ESP_FAIL;
+    drop_file(i);
     return ESP_OK;
 }

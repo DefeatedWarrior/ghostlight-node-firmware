@@ -58,6 +58,30 @@ esp_err_t diag_crash_read(uint32_t offset, void *buf, size_t len);
 /** Delete the stored core dump */
 esp_err_t diag_crash_erase(void);
 
+/* ---- Memory and stack headroom ------------------------------------------- */
+
+#define DIAG_STACKS_MAX 40
+#define DIAG_STACK_LOW_BYTES     512      /**< a task this close to its stack end is at risk */
+#define DIAG_INTERNAL_LOW_BYTES  (16 * 1024)   /**< internal RAM low-water mark worth a warning */
+
+typedef struct {
+    char name[16];
+    uint32_t stack_free;     /**< least free stack since the task started, bytes */
+} diag_stack_t;
+
+typedef struct {
+    uint32_t internal_free;      /**< internal RAM (DMA-able, what drivers and Wi-Fi need) */
+    uint32_t internal_min_free;  /**< ... lowest since boot */
+    uint32_t internal_largest;   /**< ... largest free block */
+    uint32_t psram_free;         /**< 0 without PSRAM */
+    uint32_t psram_min_free;
+    int stacks;                  /**< entries in stack[], least free first */
+    diag_stack_t stack[DIAG_STACKS_MAX];
+} diag_health_t;
+
+/** Free memory and every known task's stack headroom (looked up by name) */
+void diag_health(diag_health_t *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,6 +5,8 @@
 #include "esp_random.h"
 #include "cJSON.h"
 #include "mbedtls/pkcs5.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -12,6 +14,8 @@
 
 static const char *TAG = "config";
 static const char *CONFIG_FILE = "config.json";
+static const char *CONFIG_BACKUP = "config.bak";     /* the file before the last save */
+static const char *CONFIG_DAMAGED = "config.bad";    /* a file that failed to load */
 
 #define CONFIG_FILE_MAX 8192
 
@@ -21,6 +25,20 @@ static const char *CONFIG_FILE = "config.json";
 
 // Global configuration
 static config_t g_config;
+
+/* g_config is changed from the web server, the USB setup and the Art-Net task:
+ * s_lock (recursive) guards every read-modify-write of it. Saves are ordered
+ * by s_save_lock: the document is made under s_lock and numbered, then written
+ * under s_save_lock alone, and an older document never overwrites a newer one.
+ * Whoever holds s_save_lock never takes s_lock, so holding s_lock across a
+ * config_save() is fine. */
+static SemaphoreHandle_t s_lock;
+static SemaphoreHandle_t s_save_lock;
+static uint32_t s_save_gen;       /* last document made (under s_lock) */
+static uint32_t s_written_gen;    /* last document written (under s_save_lock) */
+
+static config_load_result_t s_load_result = CONFIG_LOAD_NEW;
+static bool s_notice_cleared;
 
 static esp_err_t parse_json(const char *json_str, bool from_file);
 
@@ -66,6 +84,16 @@ static bool json_get_int(const cJSON *obj, const char *key, int min, int max, in
     return false;
 }
 
+/* A whole number 1..CONFIG_DMX_PORTS, else 0 (range checked before the
+ * conversion, so huge numbers are safe) */
+static int port_number(const cJSON *item)
+{
+    if (!cJSON_IsNumber(item)) return 0;
+    double v = item->valuedouble;
+    if (!(v >= 1 && v <= CONFIG_DMX_PORTS) || v != (int)v) return 0;
+    return (int)v;
+}
+
 static bool json_get_bool(const cJSON *obj, const char *key, bool *out)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
@@ -104,6 +132,13 @@ static void port_defaults(port_config_t *p, uint16_t artnet, uint16_t sacn)
     p->out_slots = CONFIG_DMX_SLOTS_MAX;
     p->startup_scene = 0;
     p->failsafe_scene = 0;
+    memset(p->rules, 0, sizeof(p->rules));
+    p->rule_count = 0;
+    p->local_inputs = 0;
+    p->local_only = false;
+    p->send_to = SEND_TO_ALL;
+    p->send_count = 0;
+    memset(p->send_list, 0, sizeof(p->send_list));
 }
 
 /* Port n defaults: Art-Net n-1 (0:0:n-1), sACN n */
@@ -134,6 +169,7 @@ static void config_set_defaults_into(config_t *c)
     c->network.wifi_profile_count = 0;
     copy_str(c->network.ap_password, sizeof(c->network.ap_password), CONFIG_DEFAULT_AP_PASSWORD);
     c->network.ap_channel = 1;
+    c->network.ap_captive = true;
 
     /* Common console convention: "Universe 1" = Art-Net 0:0:0 = sACN 1 */
     for (int i = 0; i < CONFIG_DMX_PORTS; i++) {
@@ -167,9 +203,130 @@ static void config_set_defaults_into(config_t *c)
         }                                                                 \
     } while (0)
 
-static bool sanitize_port(port_config_t *p, uint16_t def_artnet, uint16_t def_sacn)
+static const char *const RULE_NAMES[] = { [PORT_RULE_PATCH] = "patch",
+                                           [PORT_RULE_LIMIT] = "limit",
+                                           [PORT_RULE_PARK] = "park" };
+
+const char *config_port_rule_name(uint8_t type)
+{
+    return (type >= PORT_RULE_FIRST && type <= PORT_RULE_LAST) ? RULE_NAMES[type] : NULL;
+}
+
+const char *config_port_rule_problem(const port_rule_t *r)
+{
+    if (!r || !config_port_rule_name(r->type)) return "Port rule: unknown type (use patch, limit or park)";
+    if (r->channel < 1 || r->channel > 512) return "Port rule: the channel must be 1-512";
+    if (r->count < 1 || r->channel + r->count - 1 > 512) return "Port rule: the channels must stay within 1-512";
+    if (r->type == PORT_RULE_PATCH && (r->from < 1 || r->from + r->count - 1 > 512)) {
+        return "Port rule: the channels a patch reads must stay within 1-512";
+    }
+    return NULL;
+}
+
+/* Drops unusable rules (keeping the order of the rest) and clears unused
+ * slots, so equal rule lists compare equal byte for byte */
+static bool sanitize_rules(port_config_t *p)
 {
     bool changed = false;
+    if (p->rule_count > CONFIG_PORT_RULES_MAX) {
+        p->rule_count = CONFIG_PORT_RULES_MAX;
+        changed = true;
+    }
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < p->rule_count; i++) {
+        port_rule_t r = p->rules[i];
+        if (r.type == PORT_RULE_PATCH) r.level = 0;   /* the JSON keeps only what each type uses */
+        else r.from = 0;
+        if (config_port_rule_problem(&r)) {
+            changed = true;
+            continue;
+        }
+        if (memcmp(&r, &p->rules[i], sizeof(r)) != 0) changed = true;
+        p->rules[n++] = r;
+    }
+    if (n != p->rule_count) changed = true;
+    p->rule_count = n;
+    for (uint8_t i = n; i < CONFIG_PORT_RULES_MAX; i++) {
+        static const port_rule_t zero;
+        if (memcmp(&p->rules[i], &zero, sizeof(zero)) != 0) changed = true;
+        memset(&p->rules[i], 0, sizeof(p->rules[i]));
+    }
+    return changed;
+}
+
+static const char *const k_send_to_names[] = {"all", "nodes", "list"};
+
+const char *config_send_to_name(uint8_t send_to)
+{
+    return send_to <= SEND_TO_LAST ? k_send_to_names[send_to] : NULL;
+}
+
+static int send_to_from_name(const char *name)
+{
+    for (int i = 0; name && i <= SEND_TO_LAST; i++) {
+        if (strcmp(name, k_send_to_names[i]) == 0) return i;
+    }
+    return -1;
+}
+
+bool config_parse_ipv4(const char *s, uint32_t *out)
+{
+    if (!s) return false;
+    uint8_t b[4];
+    for (int i = 0; i < 4; i++) {
+        if (!isdigit((unsigned char)*s)) return false;
+        int v = 0, digits = 0;
+        while (isdigit((unsigned char)*s)) {
+            v = v * 10 + (*s++ - '0');
+            if (++digits > 3 || v > 255) return false;
+        }
+        b[i] = (uint8_t)v;
+        if (i < 3 && *s++ != '.') return false;
+    }
+    if (*s) return false;
+    memcpy(out, b, 4);   /* the bytes in wire order = network byte order */
+    return true;
+}
+
+/* A usable unicast destination: not 0.0.0.0, not multicast or 255.255.255.255 */
+static bool send_ip_ok(uint32_t ip)
+{
+    const uint8_t *b = (const uint8_t *)&ip;
+    return ip != 0 && b[0] < 224;
+}
+
+static bool sanitize_send(port_config_t *p)
+{
+    bool changed = false;
+    if (p->send_to > SEND_TO_LAST) {
+        p->send_to = SEND_TO_ALL;
+        changed = true;
+    }
+    if (p->send_count > CONFIG_SEND_LIST_MAX) {
+        p->send_count = CONFIG_SEND_LIST_MAX;
+        changed = true;
+    }
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < p->send_count; i++) {
+        if (send_ip_ok(p->send_list[i])) p->send_list[n++] = p->send_list[i];
+    }
+    if (n != p->send_count) changed = true;
+    p->send_count = n;
+    for (uint8_t i = n; i < CONFIG_SEND_LIST_MAX; i++) {
+        if (p->send_list[i]) changed = true;
+        p->send_list[i] = 0;
+    }
+    if (p->send_to == SEND_TO_LIST && n == 0) {
+        p->send_to = SEND_TO_ALL;   /* nowhere to send */
+        changed = true;
+    }
+    return changed;
+}
+
+static bool sanitize_port(port_config_t *p, uint16_t def_artnet, uint16_t def_sacn)
+{
+    bool changed = sanitize_rules(p);
+    changed |= sanitize_send(p);
     CLAMP_FIELD(p->mode, DMX_MODE_DISABLED, DMX_MODE_RDM_RESPONDER, DMX_MODE_OUTPUT);
     CLAMP_FIELD(p->universe_primary, 0, CONFIG_ARTNET_UNIVERSE_MAX, def_artnet);
     CLAMP_FIELD(p->universe_secondary, -1, CONFIG_ARTNET_UNIVERSE_MAX, -1);
@@ -249,6 +406,10 @@ void config_tester_port_settings(const config_t *c, int port, port_config_t *out
     out->out_slots = t->slots;
     out->startup_scene = 0;
     out->failsafe_scene = 0;
+    out->local_inputs = 0;
+    out->local_only = false;
+    out->send_to = SEND_TO_ALL;
+    out->send_count = 0;
 }
 
 static void terminate(char *s, size_t size)
@@ -321,8 +482,20 @@ bool config_sanitize(config_t *c)
     }
 
     for (int i = 0; i < CONFIG_DMX_PORTS; i++) {
-        changed |= sanitize_port(&c->ports[i], DEF_ARTNET(i), DEF_SACN(i));
+        port_config_t *p = &c->ports[i];
+        changed |= sanitize_port(p, DEF_ARTNET(i), DEF_SACN(i));
         changed |= sanitize_tester_port(&c->tester.ports[i]);
+        /* Routing: other ports on the board, never the port itself, and
+         * the network stays on while no input is routed */
+        uint8_t inputs = p->local_inputs & CONFIG_PORT_BITS & (uint8_t)~(1u << i);
+        if (inputs != p->local_inputs) {
+            p->local_inputs = inputs;
+            changed = true;
+        }
+        if (p->local_only && !p->local_inputs) {
+            p->local_only = false;
+            changed = true;
+        }
     }
 #if !CONFIG_NODE_TESTER
     if (c->tester.enabled) {
@@ -365,56 +538,125 @@ bool config_sanitize(config_t *c)
     return changed;
 }
 
+void config_lock(void)
+{
+    if (s_lock) xSemaphoreTakeRecursive(s_lock, portMAX_DELAY);
+}
+
+void config_unlock(void)
+{
+    if (s_lock) xSemaphoreGiveRecursive(s_lock);
+}
+
+config_t *config_snapshot(void)
+{
+    config_t *c = malloc(sizeof(config_t));
+    if (!c) return NULL;
+    config_lock();
+    config_sanitize(&g_config);
+    memcpy(c, &g_config, sizeof(config_t));
+    config_unlock();
+    return c;
+}
+
 esp_err_t config_init(void)
 {
+    if (!s_lock) s_lock = xSemaphoreCreateRecursiveMutex();
+    if (!s_save_lock) s_save_lock = xSemaphoreCreateMutex();
+    if (!s_lock || !s_save_lock) return ESP_ERR_NO_MEM;
+    config_lock();
     config_set_defaults_into(&g_config);
+    config_unlock();
     ESP_LOGI(TAG, "Configuration initialized with defaults");
     return ESP_OK;
 }
 
-esp_err_t config_load(void)
+/* Read and apply one settings file. ESP_ERR_NOT_FOUND if it isn't there. */
+static esp_err_t load_file(const char *name)
 {
-    if (!storage_file_exists(CONFIG_FILE)) {
-        ESP_LOGW(TAG, "Config file not found, using defaults");
-        return config_save();
-    }
+    if (!storage_file_exists(name)) return ESP_ERR_NOT_FOUND;
 
     char *buffer = malloc(CONFIG_FILE_MAX);
-    if (!buffer) {
-        return ESP_ERR_NO_MEM;
-    }
+    if (!buffer) return ESP_ERR_NO_MEM;
     size_t size = CONFIG_FILE_MAX;
-
-    esp_err_t ret = storage_read_file(CONFIG_FILE, buffer, &size);
-    if (ret != ESP_OK) {
-        free(buffer);
-        ESP_LOGE(TAG, "Failed to read config file, using defaults");
-        return ESP_OK;   /* keep booting on defaults */
+    esp_err_t ret = storage_read_file(name, buffer, &size);
+    if (ret == ESP_OK) {
+        ret = parse_json(buffer, true);
     }
-
-    ret = parse_json(buffer, true);
     free(buffer);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Config file is corrupt, using defaults");
-        config_set_defaults_into(&g_config);
-        config_save();
+    return ret;
+}
+
+/*
+ * config.json, or if that is damaged or missing the copy from before the last
+ * save (config.bak), or factory settings. A damaged config.json is kept as
+ * config.bad for a look later and never becomes the backup.
+ */
+esp_err_t config_load(void)
+{
+    config_lock();
+    esp_err_t ret = load_file(CONFIG_FILE);
+    if (ret == ESP_OK) {
+        s_load_result = CONFIG_LOAD_OK;
+        ESP_LOGI(TAG, "Config loaded from storage");
+        config_unlock();
         return ESP_OK;
     }
+    if (ret == ESP_ERR_NO_MEM) {
+        config_unlock();
+        return ret;    /* nothing wrong with the file: don't touch it */
+    }
 
-    ESP_LOGI(TAG, "Config loaded from storage");
-    return ESP_OK;
+    bool damaged = ret != ESP_ERR_NOT_FOUND;
+    if (damaged) {
+        ESP_LOGE(TAG, "Config file is damaged, keeping it as %s", CONFIG_DAMAGED);
+        config_set_defaults_into(&g_config);   /* parse_json() leaves it alone on failure */
+        if (storage_rename_file(CONFIG_FILE, CONFIG_DAMAGED) != ESP_OK) {
+            storage_delete_file(CONFIG_FILE);
+        }
+    }
+
+    ret = load_file(CONFIG_BACKUP);
+    if (ret == ESP_OK) {
+        ESP_LOGW(TAG, "Config restored from the copy before the last save");
+        s_load_result = CONFIG_LOAD_FROM_BACKUP;
+    } else {
+        config_set_defaults_into(&g_config);
+        if (damaged || ret != ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(TAG, "No readable settings, using factory settings");
+            s_load_result = CONFIG_LOAD_RESET;
+        } else {
+            ESP_LOGW(TAG, "Config file not found, using defaults");
+            s_load_result = CONFIG_LOAD_NEW;
+        }
+    }
+    /* config.json is gone now, so this save leaves config.bak as it is */
+    ret = config_save();
+    config_unlock();
+    return ret;
 }
 
 esp_err_t config_save(void)
 {
     char *json_str = NULL;
+    config_lock();
     esp_err_t ret = config_to_json(&json_str);
+    uint32_t gen = ++s_save_gen;
+    config_unlock();
     if (ret != ESP_OK || json_str == NULL) {
+        free(json_str);
         ESP_LOGE(TAG, "Failed to serialize config");
         return ESP_FAIL;
     }
 
-    ret = storage_write_file(CONFIG_FILE, json_str, strlen(json_str));
+    xSemaphoreTake(s_save_lock, portMAX_DELAY);
+    if ((int32_t)(gen - s_written_gen) <= 0) {
+        ret = ESP_OK;    /* a later save already wrote these settings */
+    } else {
+        ret = storage_replace_file(CONFIG_FILE, CONFIG_BACKUP, json_str, strlen(json_str));
+        if (ret == ESP_OK) s_written_gen = gen;
+    }
+    xSemaphoreGive(s_save_lock);
     free(json_str);
 
     if (ret == ESP_OK) {
@@ -430,8 +672,43 @@ config_t* config_get(void)
 
 esp_err_t config_reset_to_defaults(void)
 {
+    config_lock();
     config_set_defaults_into(&g_config);
-    return config_save();
+    esp_err_t err = config_save();
+    config_unlock();
+    /* The old settings (passwords included) go too */
+    if (storage_file_exists(CONFIG_BACKUP)) storage_delete_file(CONFIG_BACKUP);
+    if (storage_file_exists(CONFIG_DAMAGED)) storage_delete_file(CONFIG_DAMAGED);
+    return err;
+}
+
+config_load_result_t config_load_result(void)
+{
+    return s_load_result;
+}
+
+const char *config_boot_notice(void)
+{
+    if (s_notice_cleared) return NULL;
+    if (storage_was_formatted()) {
+        return "The settings storage could not be read at start-up and was erased: "
+               "the node is on factory settings and its scenes are gone.";
+    }
+    switch (s_load_result) {
+        case CONFIG_LOAD_FROM_BACKUP:
+            return "The settings file was damaged or missing at start-up, so the copy from "
+                   "before the last change was used. Check the last change you made.";
+        case CONFIG_LOAD_RESET:
+            return "The settings file was damaged at start-up and there was no good copy: "
+                   "the node is on factory settings.";
+        default:
+            return NULL;
+    }
+}
+
+void config_boot_notice_clear(void)
+{
+    s_notice_cleared = true;
 }
 
 // ============================================================================
@@ -482,8 +759,10 @@ bool config_login_required(void)
 
 esp_err_t config_set_no_login(void)
 {
+    config_lock();
     memset(&g_config.security, 0, sizeof(g_config.security));
     g_config.security.no_login = true;
+    config_unlock();
     return config_save();
 }
 
@@ -502,24 +781,36 @@ esp_err_t config_set_admin_password(const char *password)
     esp_err_t err = derive(password, salt_hex, ADMIN_PBKDF2_ITERATIONS, hash_hex);
     if (err != ESP_OK) return err;
 
+    config_lock();   /* after the slow part */
     copy_str(g_config.security.admin_salt, sizeof(g_config.security.admin_salt), salt_hex);
     copy_str(g_config.security.admin_hash, sizeof(g_config.security.admin_hash), hash_hex);
     g_config.security.admin_iterations = ADMIN_PBKDF2_ITERATIONS;
     g_config.security.no_login = false;
+    config_unlock();
     return config_save();
 }
 
 bool config_check_admin_password(const char *password)
 {
-    if (!password || !config_admin_password_set()) return false;
+    if (!password) return false;
+    /* A copy, so the slow derive runs without the lock */
+    char salt[sizeof(g_config.security.admin_salt)];
+    char stored[sizeof(g_config.security.admin_hash)];
+    config_lock();
+    bool set = config_admin_password_set();
+    memcpy(salt, g_config.security.admin_salt, sizeof(salt));
+    memcpy(stored, g_config.security.admin_hash, sizeof(stored));
+    uint32_t iterations = g_config.security.admin_iterations;
+    config_unlock();
+    if (!set) return false;
+
     char hash_hex[CONFIG_ADMIN_HASH_HEX + 1];
-    if (derive(password, g_config.security.admin_salt, g_config.security.admin_iterations,
-               hash_hex) != ESP_OK) {
+    if (derive(password, salt, iterations, hash_hex) != ESP_OK) {
         return false;
     }
     uint8_t diff = 0;
     for (size_t i = 0; i < CONFIG_ADMIN_HASH_HEX; i++) {
-        diff |= (uint8_t)(hash_hex[i] ^ g_config.security.admin_hash[i]);
+        diff |= (uint8_t)(hash_hex[i] ^ stored[i]);
     }
     return diff == 0;
 }
@@ -560,6 +851,35 @@ static cJSON *port_to_json(const port_config_t *p)
     cJSON_AddNumberToObject(o, "out_slots", p->out_slots);
     cJSON_AddNumberToObject(o, "startup_scene", p->startup_scene);
     cJSON_AddNumberToObject(o, "failsafe_scene", p->failsafe_scene);
+    cJSON *rules = cJSON_AddArrayToObject(o, "rules");
+    for (uint8_t i = 0; rules && i < p->rule_count && i < CONFIG_PORT_RULES_MAX; i++) {
+        const port_rule_t *r = &p->rules[i];
+        const char *name = config_port_rule_name(r->type);
+        cJSON *ro = name ? cJSON_CreateObject() : NULL;
+        if (!ro) continue;
+        cJSON_AddStringToObject(ro, "type", name);
+        cJSON_AddNumberToObject(ro, "channel", r->channel);
+        cJSON_AddNumberToObject(ro, "count", r->count);
+        if (r->type == PORT_RULE_PATCH) {
+            cJSON_AddNumberToObject(ro, "from", r->from);
+        } else {
+            cJSON_AddNumberToObject(ro, "level", r->level);
+        }
+        cJSON_AddItemToArray(rules, ro);
+    }
+    cJSON *inputs = cJSON_AddArrayToObject(o, "local_inputs");
+    for (int k = 1; inputs && k <= CONFIG_DMX_PORTS; k++) {
+        if (p->local_inputs & (1u << (k - 1))) cJSON_AddItemToArray(inputs, cJSON_CreateNumber(k));
+    }
+    cJSON_AddBoolToObject(o, "local_only", p->local_only);
+    cJSON_AddStringToObject(o, "send_to", config_send_to_name(p->send_to) ? config_send_to_name(p->send_to) : "all");
+    cJSON *list = cJSON_AddArrayToObject(o, "send_list");
+    for (uint8_t i = 0; list && i < p->send_count && i < CONFIG_SEND_LIST_MAX; i++) {
+        const uint8_t *b = (const uint8_t *)&p->send_list[i];
+        char ip[16];
+        snprintf(ip, sizeof(ip), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+        cJSON_AddItemToArray(list, cJSON_CreateString(ip));
+    }
     return o;
 }
 
@@ -568,7 +888,7 @@ cJSON *config_port_to_json(const port_config_t *p)
     return port_to_json(p);
 }
 
-esp_err_t config_to_json(char **json_str)
+static esp_err_t to_json(char **json_str)
 {
     *json_str = NULL;
     cJSON *root = cJSON_CreateObject();
@@ -590,6 +910,7 @@ esp_err_t config_to_json(char **json_str)
         cJSON_AddStringToObject(network, "ap_ssid", g_config.network.ap_ssid);
         cJSON_AddStringToObject(network, "ap_password", g_config.network.ap_password);
         cJSON_AddNumberToObject(network, "ap_channel", g_config.network.ap_channel);
+        cJSON_AddBoolToObject(network, "ap_captive", g_config.network.ap_captive);
 
         cJSON *profiles = cJSON_AddArrayToObject(network, "wifi_profiles");
         for (int i = 0; profiles && i < g_config.network.wifi_profile_count; i++) {
@@ -663,6 +984,42 @@ esp_err_t config_to_json(char **json_str)
     return (*json_str != NULL) ? ESP_OK : ESP_FAIL;
 }
 
+esp_err_t config_to_json(char **json_str)
+{
+    config_lock();
+    esp_err_t err = to_json(json_str);
+    config_unlock();
+    return err;
+}
+
+/* One rule from JSON. false if a field is missing or of the wrong type; the
+ * values themselves are checked by config_port_rule_problem() */
+static bool rule_from_json(const cJSON *o, port_rule_t *r)
+{
+    memset(r, 0, sizeof(*r));
+    if (!cJSON_IsObject(o)) return false;
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(o, "type");
+    if (!cJSON_IsString(type)) return false;
+    for (uint8_t t = PORT_RULE_FIRST; t <= PORT_RULE_LAST; t++) {
+        if (strcmp(type->valuestring, RULE_NAMES[t]) == 0) r->type = t;
+    }
+    if (!r->type) return false;
+    const char *keys[3] = { "channel", "count", r->type == PORT_RULE_PATCH ? "from" : "level" };
+    double v[3];
+    for (int k = 0; k < 3; k++) {
+        const cJSON *n = cJSON_GetObjectItemCaseSensitive(o, keys[k]);
+        if (!cJSON_IsNumber(n)) return false;
+        v[k] = n->valuedouble;
+        if (v[k] < 0 || v[k] > 65535 || v[k] != (double)(int)v[k]) return false;
+    }
+    if (r->type != PORT_RULE_PATCH && v[2] > 255) return false;
+    r->channel = (uint16_t)v[0];
+    r->count = (uint16_t)v[1];
+    if (r->type == PORT_RULE_PATCH) r->from = (uint16_t)v[2];
+    else r->level = (uint8_t)v[2];
+    return true;
+}
+
 static void port_from_json(const cJSON *obj, port_config_t *p, bool *had_sacn)
 {
     int v;
@@ -684,6 +1041,50 @@ static void port_from_json(const cJSON *obj, port_config_t *p, bool *had_sacn)
     if (json_get_int(obj, "out_slots", CONFIG_DMX_SLOTS_MIN, CONFIG_DMX_SLOTS_MAX, &v)) p->out_slots = v;
     if (json_get_int(obj, "startup_scene", 0, 255, &v)) p->startup_scene = v;
     if (json_get_int(obj, "failsafe_scene", 0, 255, &v)) p->failsafe_scene = v;
+    /* "rules" replaces the whole list; bad entries are dropped */
+    const cJSON *rules = cJSON_GetObjectItemCaseSensitive(obj, "rules");
+    if (cJSON_IsArray(rules)) {
+        memset(p->rules, 0, sizeof(p->rules));
+        p->rule_count = 0;
+        const cJSON *ro;
+        cJSON_ArrayForEach(ro, rules) {
+            port_rule_t r;
+            if (p->rule_count >= CONFIG_PORT_RULES_MAX) break;
+            if (rule_from_json(ro, &r) && !config_port_rule_problem(&r)) {
+                p->rules[p->rule_count++] = r;
+            }
+        }
+    }
+    /* "local_inputs" replaces the whole set; numbers that are no port are dropped */
+    const cJSON *inputs = cJSON_GetObjectItemCaseSensitive(obj, "local_inputs");
+    if (cJSON_IsArray(inputs)) {
+        p->local_inputs = 0;
+        const cJSON *in;
+        cJSON_ArrayForEach(in, inputs) {
+            int port = port_number(in);
+            if (port) p->local_inputs |= (uint8_t)(1u << (port - 1));
+        }
+    }
+    json_get_bool(obj, "local_only", &p->local_only);
+    const cJSON *st = cJSON_GetObjectItemCaseSensitive(obj, "send_to");
+    if (cJSON_IsString(st)) {
+        int k = send_to_from_name(st->valuestring);
+        if (k >= 0) p->send_to = (uint8_t)k;
+    }
+    /* "send_list" replaces the whole list; anything that isn't an address is dropped */
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(obj, "send_list");
+    if (cJSON_IsArray(list)) {
+        memset(p->send_list, 0, sizeof(p->send_list));
+        p->send_count = 0;
+        const cJSON *e;
+        cJSON_ArrayForEach(e, list) {
+            uint32_t ip;
+            if (p->send_count >= CONFIG_SEND_LIST_MAX) break;
+            if (cJSON_IsString(e) && config_parse_ipv4(e->valuestring, &ip) && send_ip_ok(ip)) {
+                p->send_list[p->send_count++] = ip;
+            }
+        }
+    }
 }
 
 /*
@@ -706,6 +1107,9 @@ static esp_err_t parse_json(const char *json_str, bool from_file)
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }
+    /* Held until the result is swapped in: a change made meanwhile by
+     * another task would otherwise be overwritten with the old value */
+    config_lock();
     memcpy(c, &g_config, sizeof(config_t));
     int v;
 
@@ -728,6 +1132,7 @@ static esp_err_t parse_json(const char *json_str, bool from_file)
         json_get_str(network, "ap_ssid", c->network.ap_ssid, sizeof(c->network.ap_ssid));
         json_get_str(network, "ap_password", c->network.ap_password, sizeof(c->network.ap_password));
         if (json_get_int(network, "ap_channel", 1, 13, &v)) c->network.ap_channel = v;
+        json_get_bool(network, "ap_captive", &c->network.ap_captive);
 
         const cJSON *profiles = cJSON_GetObjectItemCaseSensitive(network, "wifi_profiles");
         if (cJSON_IsArray(profiles)) {
@@ -851,6 +1256,7 @@ static esp_err_t parse_json(const char *json_str, bool from_file)
         ESP_LOGI(TAG, "Config upgraded/repaired, saving");
         config_save();
     }
+    config_unlock();
     return ESP_OK;
 }
 
@@ -894,12 +1300,60 @@ const char *config_update_problem(const cJSON *doc)
             }
         }
     }
+    /* Port rules: rejected as a whole rather than silently dropped */
+    for (int i = 1; i <= CONFIG_DMX_PORTS; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "port%d", i);
+        const cJSON *port = cJSON_GetObjectItemCaseSensitive(doc, key);
+        const cJSON *inputs = cJSON_GetObjectItemCaseSensitive(port, "local_inputs");
+        if (inputs) {
+            if (!cJSON_IsArray(inputs)) return "Routed inputs must be a list of port numbers";
+            const cJSON *in;
+            cJSON_ArrayForEach(in, inputs) {
+                int port = port_number(in);
+                if (!port) return "Routed inputs must be a list of port numbers";
+                if (port == i) return "A port cannot take its own DMX input";
+            }
+        }
+        const cJSON *st = cJSON_GetObjectItemCaseSensitive(port, "send_to");
+        if (st && (!cJSON_IsString(st) || send_to_from_name(st->valuestring) < 0)) {
+            return "Send to must be \"all\", \"nodes\" or \"list\"";
+        }
+        const cJSON *list = cJSON_GetObjectItemCaseSensitive(port, "send_list");
+        if (list) {
+            if (!cJSON_IsArray(list)) return "Send-to addresses must be a list";
+            if (cJSON_GetArraySize(list) > CONFIG_SEND_LIST_MAX) return "At most 4 send-to addresses per port";
+            const cJSON *e;
+            cJSON_ArrayForEach(e, list) {
+                uint32_t ip;
+                if (!cJSON_IsString(e) || !config_parse_ipv4(e->valuestring, &ip) || !send_ip_ok(ip)) {
+                    return "Send-to addresses must be IPv4 addresses like 10.0.0.20 (not multicast or broadcast)";
+                }
+            }
+        }
+        if (cJSON_IsString(st) && strcmp(st->valuestring, "list") == 0 &&
+            cJSON_IsArray(list) && cJSON_GetArraySize(list) == 0) {
+            return "Give at least one address to send to";
+        }
+        const cJSON *rules = cJSON_GetObjectItemCaseSensitive(port, "rules");
+        if (!rules) continue;
+        if (!cJSON_IsArray(rules)) return "Port rules must be a list";
+        if (cJSON_GetArraySize(rules) > CONFIG_PORT_RULES_MAX) return "At most 8 rules per port";
+        const cJSON *ro;
+        cJSON_ArrayForEach(ro, rules) {
+            port_rule_t r;
+            if (!rule_from_json(ro, &r)) {
+                return "Each port rule needs a type (patch, limit or park), channel, count and from (patch) or level (0-255)";
+            }
+            const char *why = config_port_rule_problem(&r);
+            if (why) return why;
+        }
+    }
     return NULL;
 }
 
-cJSON *config_to_public_json(const config_t *c)
+static cJSON *public_json(const config_t *c)
 {
-    if (!c) return NULL;
     cJSON *json = cJSON_CreateObject();
     if (!json) return NULL;
 
@@ -921,6 +1375,7 @@ cJSON *config_to_public_json(const config_t *c)
     cJSON_AddStringToObject(net, "ap_ssid", c->network.ap_ssid);
     cJSON_AddBoolToObject(net, "ap_open", c->network.ap_password[0] == '\0');
     cJSON_AddNumberToObject(net, "ap_channel", c->network.ap_channel);
+    cJSON_AddBoolToObject(net, "ap_captive", c->network.ap_captive);
     cJSON_AddNumberToObject(net, "wifi_profile_count", c->network.wifi_profile_count);
     cJSON *profiles = cJSON_AddArrayToObject(net, "wifi_profiles");
     for (int i = 0; profiles && i < c->network.wifi_profile_count && i < CONFIG_WIFI_PROFILES_MAX; i++) {
@@ -963,5 +1418,14 @@ cJSON *config_to_public_json(const config_t *c)
             cJSON_AddItemToArray(tports, o);
         }
     }
+    return json;
+}
+
+cJSON *config_to_public_json(const config_t *c)
+{
+    if (!c) return NULL;
+    config_lock();
+    cJSON *json = public_json(c);
+    config_unlock();
     return json;
 }

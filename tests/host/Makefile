@@ -23,7 +23,10 @@ INCLUDES := -Istubs -I. -Ithird_party/cJSON \
             -I$(COMP)/storage_manager/include \
             -I$(COMP)/merge_engine/include \
             -I$(COMP)/artnet_receiver/include \
-            -I$(COMP)/sacn_receiver/include
+            -I$(COMP)/sacn_receiver/include \
+            -I$(COMP)/port_rules/include \
+            -I$(COMP)/source_monitor/include \
+            -I$(COMP)/network_manager
 
 WARN     := -Wall -Wextra -Werror -Wno-unused-parameter -Wno-deprecated-declarations
 SAN      := -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
@@ -34,8 +37,18 @@ CJSON    := third_party/cJSON/cJSON.c
 FAKES    := fakes.c
 CONFIG_C := $(COMP)/config_manager/config_manager.c
 MERGE_C  := $(COMP)/merge_engine/merge_engine.c
+RULES_C  := $(COMP)/port_rules/port_rules.c
+SRCMON_C := $(COMP)/source_monitor/source_monitor.c
+DNS_C    := $(COMP)/network_manager/dns_reply.c
+FWTAG_C  := $(COMP)/web_server/fw_tag.c
+STREAM_C := $(COMP)/web_server/web_stream.c
+# esp_dmx's receive path gets its own stubs, and is vendored code, so no -Werror.
+# It reads RDM fields unaligned on purpose (Xtensa allows it): no alignment check
+DMX_SRC  := $(COMP)/esp_dmx/src
+DMX_INC  := -Istubs_dmx -I$(DMX_SRC) -I.
+CFLAGS_D := -std=gnu11 -g -O1 -Wall -Wno-unknown-pragmas $(SAN) -fno-sanitize=alignment $(DMX_INC) -include sdkconfig.h
 
-TESTS    := test_artnet test_sacn test_merge test_config
+TESTS    := test_artnet test_sacn test_merge test_config test_rules test_srcmon test_dns test_fwtag test_webstream test_dmx_rx
 FUZZERS  := fuzz_artnet fuzz_sacn fuzz_config
 HDRS     := $(wildcard stubs/*.h stubs/*/*.h) fakes.h test.h packets.h
 
@@ -55,6 +68,24 @@ $(BUILD)/test_merge: test_merge.c $(MERGE_C) $(FAKES) $(HDRS) | $(BUILD)
 
 $(BUILD)/test_config: test_config.c $(CONFIG_C) $(CJSON) $(FAKES) $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS_T) -o $@ test_config.c $(CONFIG_C) $(CJSON) $(FAKES)
+
+$(BUILD)/test_rules: test_rules.c $(RULES_C) $(CONFIG_C) $(CJSON) $(FAKES) $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS_T) -o $@ test_rules.c $(RULES_C) $(CONFIG_C) $(CJSON) $(FAKES)
+
+$(BUILD)/test_srcmon: test_srcmon.c $(SRCMON_C) $(FAKES) $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS_T) -o $@ test_srcmon.c $(SRCMON_C) $(FAKES)
+
+$(BUILD)/test_dns: test_dns.c $(DNS_C) $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS_T) -o $@ test_dns.c $(DNS_C)
+
+$(BUILD)/test_fwtag: test_fwtag.c $(FWTAG_C) $(COMP)/web_server/fw_tag.h test.h | $(BUILD)
+	$(CC) $(CFLAGS_T) -o $@ test_fwtag.c $(FWTAG_C)
+
+$(BUILD)/test_dmx_rx: test_dmx_rx.c $(DMX_SRC)/dmx/hal/uart.c $(DMX_SRC)/dmx/io.c $(DMX_SRC)/dmx/include/service.h $(wildcard stubs_dmx/*.h stubs_dmx/*/*.h) test.h | $(BUILD)
+	$(CC) $(CFLAGS_D) -o $@ test_dmx_rx.c $(DMX_SRC)/dmx/io.c
+
+$(BUILD)/test_webstream: test_webstream.c $(STREAM_C) $(COMP)/web_server/web_stream.h $(CJSON) $(HDRS) | $(BUILD)
+	$(CC) $(CFLAGS_T) -I$(COMP)/web_server -o $@ test_webstream.c $(STREAM_C) $(CJSON)
 
 # The fuzz harnesses with a plain main() that runs every file given to it:
 # replays the seed corpus under the unit-test compiler (no libFuzzer needed)

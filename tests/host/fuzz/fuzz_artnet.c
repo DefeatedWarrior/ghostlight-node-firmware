@@ -43,6 +43,15 @@ static void on_ipprog(const artnet_ipprog_cmd_t *cmd, artnet_ipprog_reply_t *rep
     memcpy(reply->ip, cmd->ip, 4);
 }
 
+static void on_peer(const artnet_poll_reply_t *r, bool conflict, void *ctx)
+{
+    if (r->num_ports > ARTNET_REPLY_PORTS || r->ports[0].in_address > 0x7FFF ||
+        strlen(r->short_name) >= sizeof(r->short_name) || strlen(r->long_name) >= sizeof(r->long_name)) {
+        __builtin_trap();
+    }
+    touch(r, sizeof(*r));
+}
+
 static void on_status(artnet_node_status_t *st, void *ctx)
 {
     snprintf(st->short_name, sizeof(st->short_name), "fuzz");
@@ -72,6 +81,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     artnet_receiver_set_rdm_callback(on_rdm, NULL);
     artnet_receiver_set_sync_callback(on_sync, NULL);
     artnet_receiver_set_ipprog_callback(on_ipprog, NULL);
+    artnet_receiver_set_poll_reply_callback(on_peer, NULL);
     s_an.sock = 42;
 
     size_t len = size < ARTNET_RX_BUF_SIZE ? size : ARTNET_RX_BUF_SIZE;   /* recvfrom() */

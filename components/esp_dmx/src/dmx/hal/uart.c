@@ -4,6 +4,7 @@
 #include "dmx/include/service.h"
 #include "driver/uart.h"
 #include "endian.h"
+#include <string.h>
 #include "rdm/include/driver.h"
 #include "rdm/include/uid.h"
 
@@ -42,6 +43,20 @@ enum {
   RDM_TYPE_IS_REQUEST,      // The packet is a standard RDM request.
   RDM_TYPE_IS_UNKNOWN,  // The packet is RDM, but it is unclear what type it is.
 };
+
+/* WIFIDMX: keep a copy of a finished level packet (see rx_frame in
+service.h). Called from the ISR with the port's spinlock held. */
+static void DMX_ISR_ATTR dmx_save_frame(dmx_driver_t *driver, int size) {
+  if (size < 2 || driver->dmx.data[0] != DMX_SC) {  // no slots, or not levels
+    return;
+  }
+  if (size > DMX_PACKET_SIZE_MAX) {
+    size = DMX_PACKET_SIZE_MAX;
+  }
+  memcpy(driver->dmx.rx_frame, driver->dmx.data, size);  // ROM memcpy: IRAM safe
+  driver->dmx.rx_frame_size = size;
+  driver->dmx.rx_frame_seq++;
+}
 
 static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
   const int64_t now = dmx_timer_get_micros_since_boot();
@@ -92,11 +107,43 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
       // Handle DMX break condition
       if (intr_flags & DMX_INTR_RX_BREAK) {
         // Handle possible condition where expected packet size is too large
-        if (driver->dmx.progress == DMX_PROGRESS_IN_DATA && dmx_head > 0) {
+        if (dmx_head > 0 &&
+            (driver->dmx.progress == DMX_PROGRESS_IN_DATA ||
+             dmx_head == driver->dmx.rx_err_head)) {  // WIFIDMX: rx_err_head
           taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
-          driver->dmx.size = dmx_head - 1;  // Attempt to fix packet size
+          /* WIFIDMX: upstream set the expected size to every short packet's
+          length, so one packet cut short (a cable pulled mid-packet, a
+          glitch before a break) made every later packet end early, until
+          the driver was installed again. Only a length seen twice in a row
+          (a source that sends fewer slots) becomes the expected size. */
+          const int len = dmx_head - 1;
+          // Only level packets count: text and SIP packets are short anyway
+          if (len > 1 && driver->dmx.data[0] == DMX_SC) {
+            if (len == driver->dmx.rx_short_len) {
+              driver->dmx.size = len;  // Attempt to fix packet size
+            }
+            driver->dmx.rx_short_len = len;
+          }
+          dmx_save_frame(driver, len);  // WIFIDMX: a short frame
           if (driver->task_waiting) {
             xTaskNotifyFromISR(driver->task_waiting, DMX_ERR_NOT_ENOUGH_SLOTS,
+                               eSetValueWithOverwrite, &task_awoken);
+          }
+          taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+        } else if (!driver->is_controller && dmx_head - 1 > driver->dmx.size &&
+                   driver->dmx.data[0] == DMX_SC) {
+          /* WIFIDMX: the last level packet went on past the expected size
+          (the source sends more slots again): expect that many from now on,
+          and hand that packet over again, whole. It was first saved when it
+          reached the old size. Upstream never grew it back. */
+          taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+          driver->dmx.size = dmx_head - 1 < DMX_PACKET_SIZE_MAX
+                                 ? dmx_head - 1
+                                 : DMX_PACKET_SIZE_MAX;
+          driver->dmx.rx_short_len = 0;
+          dmx_save_frame(driver, dmx_head - 1);
+          if (driver->task_waiting) {
+            xTaskNotifyFromISR(driver->task_waiting, DMX_OK,
                                eSetValueWithOverwrite, &task_awoken);
           }
           taskEXIT_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
@@ -104,6 +151,7 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
 
         // Reset the DMX buffer for the next packet
         taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
+        driver->dmx.rx_err_head = 0;  // WIFIDMX
         driver->dmx.status = DMX_STATUS_RECEIVING;
         driver->dmx.progress = DMX_PROGRESS_IN_BREAK;
         driver->dmx.head = 0;
@@ -263,6 +311,13 @@ static void DMX_ISR_ATTR dmx_uart_isr(void *arg) {
       taskENTER_CRITICAL_ISR(DMX_SPINLOCK(dmx_num));
       driver->dmx.progress = DMX_PROGRESS_COMPLETE;
       driver->dmx.status = DMX_STATUS_IDLE;  // Could still be receiving data
+      if (err == DMX_ERR_IMPROPER_SLOT && !driver->is_controller) {
+        driver->dmx.rx_err_head = dmx_head;  // WIFIDMX: see service.h
+      }
+      if (err == DMX_OK && rdm_type == RDM_TYPE_IS_NOT_RDM) {
+        dmx_save_frame(driver, dmx_head);  // WIFIDMX: see service.h
+        driver->dmx.rx_short_len = 0;      // WIFIDMX: a whole packet
+      }
       if (driver->task_waiting) {
         xTaskNotifyFromISR(driver->task_waiting, err, eSetValueWithOverwrite,
                            &task_awoken);
@@ -387,14 +442,28 @@ bool dmx_uart_init(dmx_port_t dmx_num, void *isr_context, int isr_flags) {
   dmx_uart_disable_interrupt(dmx_num, UART_LL_INTR_MASK);
   dmx_uart_clear_interrupt(dmx_num, UART_LL_INTR_MASK);
 
-  esp_intr_alloc(uart_periph_signal[dmx_num].irq, isr_flags, dmx_uart_isr,
-                 isr_context, &uart->isr_handle);
+  /* WIFIDMX: a failed allocation is an error (the port would have no
+  interrupt, or an old one pointing at a freed driver) */
+  uart->isr_handle = NULL;
+  if (esp_intr_alloc(uart_periph_signal[dmx_num].irq, isr_flags, dmx_uart_isr,
+                     isr_context, &uart->isr_handle) != ESP_OK) {
+    uart->isr_handle = NULL;
+    return false;
+  }
 
-  return uart;
+  return true;
 }
 
 void dmx_uart_deinit(dmx_port_t dmx_num) {
   struct dmx_uart_t *uart = &dmx_uart_context[dmx_num];
+  /* WIFIDMX: free the interrupt, or every driver reinstall leaks one and the
+  old handler keeps its pointer to the deleted driver */
+  if (uart->isr_handle) {
+    dmx_uart_disable_interrupt(dmx_num, UART_LL_INTR_MASK);
+    dmx_uart_clear_interrupt(dmx_num, UART_LL_INTR_MASK);
+    esp_intr_free(uart->isr_handle);
+    uart->isr_handle = NULL;
+  }
   if (uart->num != 0) {  // Default UART port for console
     periph_module_disable(DMX_UART_PERIPH_MODULE(uart->num));
   }

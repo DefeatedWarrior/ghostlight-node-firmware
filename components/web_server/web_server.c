@@ -63,7 +63,10 @@
 #include "scene_manager.h"
 #include "dmx_tools.h"
 #include "dmx_tester.h"
+#include "port_rules.h"
 #include "web_internal.h"
+#include "web_stream.h"
+#include "fw_tag.h"
 
 // Embedded web files
 #include "web_files.h"
@@ -153,6 +156,7 @@ static esp_err_t api_port_dmx_handler(httpd_req_t *req);
 static esp_err_t api_system_info_handler(httpd_req_t *req);
 static esp_err_t api_system_stats_handler(httpd_req_t *req);
 static esp_err_t api_system_restart_handler(httpd_req_t *req);
+static esp_err_t api_system_notice_clear_handler(httpd_req_t *req);
 static esp_err_t api_system_factory_reset_handler(httpd_req_t *req);
 static esp_err_t api_system_ota_handler(httpd_req_t *req);
 static esp_err_t api_system_firmware_rollback_handler(httpd_req_t *req);
@@ -289,7 +293,7 @@ esp_err_t web_server_start(void)
     // /api/network/wifi-scan + /api/ports/* x6 + /api/system/* x5 +
     // /api/rdm/discover + /api/rdm/identify + /api/scenes x3 (list/record/playback) +
     // /api/scenes/1..16 DELETE x16 + /ws = 43 routes → use 48 for headroom.
-    config.max_uri_handlers = 72 + 3 * CONFIG_DMX_PORTS + WEB_TESTER_ROUTES;
+    config.max_uri_handlers = 76 + 3 * CONFIG_DMX_PORTS + WEB_TESTER_ROUTES + WEB_SIGNAL_ROUTES;
 
     // Remove WebSocket clients whenever their socket closes (browser tab
     // closed, WiFi dropped, LRU purge) - not only on a CLOSE frame.
@@ -383,6 +387,7 @@ esp_err_t web_server_start(void)
     /* Diagnostics and DMX tools (web_tools.c), DMX tester (web_tester.c) */
     web_tools_register(server_state.server);
     web_tester_register(server_state.server);
+    web_signal_register(server_state.server);   /* signal check, captive portal */
 
     // System APIs
     httpd_uri_t system_info_uri = {
@@ -408,6 +413,14 @@ esp_err_t web_server_start(void)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(server_state.server, &system_restart_uri);
+
+    httpd_uri_t system_notice_clear_uri = {
+        .uri = "/api/system/notice/clear",
+        .method = HTTP_POST,
+        .handler = api_system_notice_clear_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server_state.server, &system_notice_clear_uri);
 
     httpd_uri_t system_factory_reset_uri = {
         .uri = "/api/system/factory-reset",
@@ -1145,7 +1158,9 @@ static esp_err_t api_ports_status_handler(httpd_req_t *req)
             cJSON_AddStringToObject(so, "protocol",
                                     src[i].protocol == SOURCE_PROTOCOL_SACN ? "sACN" :
                                     src[i].protocol == SOURCE_PROTOCOL_ARTNET ? "Art-Net" : "DMX");
-            cJSON_AddStringToObject(so, "ip", inet_ntoa(a));
+            /* a local DMX input has no address (source_ip is its port number) */
+            cJSON_AddStringToObject(so, "ip", src[i].protocol == SOURCE_PROTOCOL_DMX_IN ? "" : inet_ntoa(a));
+            cJSON_AddNumberToObject(so, "port", src[i].protocol == SOURCE_PROTOCOL_DMX_IN ? src[i].source_ip : 0);
             cJSON_AddStringToObject(so, "name", src[i].name);
             cJSON_AddNumberToObject(so, "priority", src[i].priority);
             cJSON_AddBoolToObject(so, "per_address_priority", src[i].uses_pap);
@@ -1243,6 +1258,7 @@ static esp_err_t api_system_info_handler(httpd_req_t *req)
     cJSON_AddStringToObject(json, "build_time", app->time);
     cJSON_AddStringToObject(json, "hardware", BOARD_NAME " (" WEB_CHIP_NAME ")");
     cJSON_AddStringToObject(json, "board", BOARD_NAME);
+    cJSON_AddStringToObject(json, "board_id", BOARD_ID);
     cJSON_AddStringToObject(json, "chip", WEB_CHIP_NAME);
     cJSON_AddNumberToObject(json, "ports", CONFIG_DMX_PORTS);
     /* What this firmware was built with (menuconfig: ESP-NODE > Features);
@@ -1270,7 +1286,10 @@ static esp_err_t api_system_info_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(json, "min_free_heap", esp_get_minimum_free_heap_size());
     cJSON_AddNumberToObject(json, "uptime_sec", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(json, "reset_reason", esp_reset_reason());
-    
+    /* Settings lost or restored at boot: the web UI shows it until dismissed */
+    const char *notice = config_boot_notice();
+    if (notice) cJSON_AddStringToObject(json, "settings_notice", notice);
+
     send_json_response(req, json, 200);
     cJSON_Delete(json);
     
@@ -1367,6 +1386,11 @@ static esp_err_t api_system_factory_reset_handler(httpd_req_t *req)
  * Accepts a raw binary body (the .bin firmware image). Writes it to the
  * next OTA partition and reboots on success.
  */
+/* The board this image is for, found by uploads of later images (fw_tag.h).
+ * The scanner is given this array as its pattern, so the marker exists once. */
+#define FW_TAG_PREFIX "\x01GLBOARD\x02"
+__attribute__((used)) static const char k_board_tag[] = FW_TAG_PREFIX BOARD_ID "\x03";
+
 static esp_err_t api_system_ota_handler(httpd_req_t *req)
 {
     server_state.total_requests++;
@@ -1408,6 +1432,9 @@ static esp_err_t api_system_ota_handler(httpd_req_t *req)
     int timeouts = 0;
     bool write_error = false;
     bool header_checked = false;
+    const char *refuse = NULL;   /* why the image is refused, for the user */
+    fw_tag_scan_t tag;
+    fw_tag_scan_init(&tag, k_board_tag, sizeof(FW_TAG_PREFIX) - 1);
 
     while (remaining > 0) {
         int to_read = (remaining < 4096) ? remaining : 4096;
@@ -1438,6 +1465,16 @@ static esp_err_t api_system_ota_handler(httpd_req_t *req)
             header_checked = true;
         }
 
+        /* Another board's firmware runs with the wrong pins: stop as soon
+         * as its marker shows up (fw_tag.h) */
+        if (!tag.found && fw_tag_scan(&tag, (const uint8_t *)buf, received) &&
+            strcmp(tag.id, BOARD_ID) != 0) {
+            ESP_LOGE(TAG, "OTA refused: image for board \"%s\", this is \"%s\"", tag.id, BOARD_ID);
+            refuse = "board";
+            write_error = true;
+            break;
+        }
+
         err = esp_ota_write(ota_handle, buf, received);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "OTA write error: %s", esp_err_to_name(err));
@@ -1449,9 +1486,25 @@ static esp_err_t api_system_ota_handler(httpd_req_t *req)
 
     free(buf);
 
+    if (!write_error && !tag.found) {
+        ESP_LOGE(TAG, "OTA refused: the image does not say which board it is for");
+        refuse = "untagged";
+        write_error = true;
+    }
     if (write_error) {
         esp_ota_abort(ota_handle);
-        send_error_response(req, 400, "OTA upload failed (not a valid firmware .bin or connection lost)");
+        if (refuse && strcmp(refuse, "board") == 0) {
+            char msg[160];
+            snprintf(msg, sizeof(msg), "This firmware is for the %s board, and this node is %s (%s). "
+                     "Nothing was changed.", tag.id, BOARD_ID, BOARD_NAME);
+            send_error_response(req, 400, msg);
+        } else if (refuse) {
+            send_error_response(req, 400, "This file does not say which board it is for (older firmware, "
+                                "or not Ghostlight Node firmware). Nothing was changed: install it over "
+                                "USB with the flasher instead.");
+        } else {
+            send_error_response(req, 400, "OTA upload failed (not a valid firmware .bin or connection lost)");
+        }
         return ESP_OK;
     }
 
@@ -1637,11 +1690,6 @@ static esp_err_t api_port_dmx_handler(httpd_req_t *req)
     bool input = false;
     bool active = port_levels(port, dmx_data, &input);
 
-    cJSON *json = cJSON_CreateObject();
-    cJSON_AddNumberToObject(json, "port", port);
-    cJSON_AddBoolToObject(json, "active", active);
-    cJSON_AddBoolToObject(json, "input", input);
-
     /* ?count=N (1-512) selects how many channels to return; default 8 */
     int count = 8;
     char query[32];
@@ -1653,21 +1701,35 @@ static esp_err_t api_port_dmx_handler(httpd_req_t *req)
             if (count > 512) count = 512;
         }
     }
-    cJSON *channels = cJSON_CreateArray();
-    for (int i = 0; i < count; i++) {
-        cJSON_AddItemToArray(channels, cJSON_CreateNumber(dmx_data[i]));
-    }
-    cJSON_AddItemToObject(json, "channels", channels);
-
-    send_json_response(req, json, 200);
-    cJSON_Delete(json);
-
-    return ESP_OK;
+    /* Not cJSON: 512 numbers took 22 KB of internal RAM (web_stream.h), and
+     * the web UI polls this when its WebSocket stalls */
+    web_stream_t *w = web_stream_begin(req);
+    if (!w) return ESP_OK;
+    web_stream_printf(w, "{\"port\":%d,\"active\":%s,\"input\":%s,\"channels\":", port,
+                      active ? "true" : "false", input ? "true" : "false");
+    web_stream_u8_array(w, dmx_data, (size_t)count);
+    web_stream_printf(w, "}");
+    return web_stream_end(w);
 }
 
 /**
  * @brief POST /api/system/restart - Restart device
  */
+/**
+ * @brief POST /api/system/notice/clear - The user has seen the settings notice
+ */
+static esp_err_t api_system_notice_clear_handler(httpd_req_t *req)
+{
+    server_state.total_requests++;
+    if (!require_auth(req)) return ESP_OK;
+    config_boot_notice_clear();
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "status", "ok");
+    send_json_response(req, json, 200);
+    cJSON_Delete(json);
+    return ESP_OK;
+}
+
 static esp_err_t api_system_restart_handler(httpd_req_t *req)
 {
     server_state.total_requests++;
@@ -2291,6 +2353,7 @@ static bool port_levels(int port, uint8_t data[512], bool *input)
         return ok && st.is_active;
     }
     merge_engine_get_output(port, data);
+    port_rules_apply(port, data);   /* what goes on the wire */
     return merge_engine_is_output_active(port);
 }
 
@@ -2562,6 +2625,12 @@ static bool ct_equal(const void *a, const void *b, size_t len)
 }
 
 /* IPv4 address of the client (0 if unknown); used as the lockout key */
+static uint32_t client_ip(httpd_req_t *req);
+uint32_t web_client_ip(httpd_req_t *req)
+{
+    return client_ip(req);
+}
+
 static uint32_t client_ip(httpd_req_t *req)
 {
     int fd = httpd_req_to_sockfd(req);
@@ -2864,9 +2933,11 @@ static esp_err_t api_setup_handler(httpd_req_t *req)
     }
 
     config_t *cfg = config_get();
+    config_lock();
     size_t n = strnlen(ap->valuestring, sizeof(cfg->network.ap_password) - 1);
     memcpy(cfg->network.ap_password, ap->valuestring, n);
     cfg->network.ap_password[n] = '\0';
+    config_unlock();
     esp_err_t err = no_login ? config_set_no_login()               /* both save */
                              : config_set_admin_password(pw->valuestring);
     cJSON_Delete(json);

@@ -135,6 +135,25 @@ static inline int pk_sacn_data(uint8_t *b, const pk_sacn_t *s, const uint8_t *da
     return total;
 }
 
+/* E1.31 universe discovery page listing @p count universes */
+static inline int pk_sacn_discovery(uint8_t *b, const uint8_t cid[16], const char *name,
+                                    uint8_t page, uint8_t last_page,
+                                    const uint16_t *universes, int count)
+{
+    int total = 120 + 2 * count;
+    memset(b, 0, (size_t)total);
+    pk_sacn_root(b, total, 0x00000008, cid);
+    pk_be16(&b[38], (uint16_t)(0x7000 | (total - 38)));
+    pk_be32(&b[40], 0x00000002);   /* VECTOR_E131_EXTENDED_DISCOVERY */
+    strncpy((char *)&b[44], name, 64);
+    pk_be16(&b[112], (uint16_t)(0x7000 | (total - 112)));
+    pk_be32(&b[114], 0x00000001);  /* VECTOR_UNIVERSE_DISCOVERY_UNIVERSE_LIST */
+    b[118] = page;
+    b[119] = last_page;
+    for (int i = 0; i < count; i++) pk_be16(&b[120 + 2 * i], universes[i]);
+    return total;
+}
+
 static inline int pk_sacn_sync(uint8_t *b, const uint8_t cid[16], uint8_t seq, uint16_t sync_universe)
 {
     memset(b, 0, 49);

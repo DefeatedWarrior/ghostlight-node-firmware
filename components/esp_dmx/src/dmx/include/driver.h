@@ -222,6 +222,23 @@ size_t dmx_read_offset(dmx_port_t dmx_num, size_t offset, void *destination,
 size_t dmx_read(dmx_port_t dmx_num, void *destination, size_t size);
 
 /**
+ * @brief WIFIDMX: copy the last level packet (NULL start code) the driver
+ * received, start code first. The receive interrupt saves each one as it
+ * ends, so the copy is always one whole packet, even when the next packet is
+ * already arriving. It can be newer than the packet dmx_receive() returned if
+ * the caller was more than a packet late.
+ *
+ * @param dmx_num The DMX port number.
+ * @param[out] destination A pointer to a buffer for the DMX data.
+ * @param size The size of the destination buffer.
+ * @param[out] seq The packet's number: one more for each level packet the
+ * driver received, 0 if there was none yet.
+ * @return The number of bytes copied (0 if there was no packet yet).
+ */
+size_t dmx_read_received(dmx_port_t dmx_num, void *destination, size_t size,
+                         uint32_t *seq);
+
+/**
  * @brief Reads a single slot of DMX data.
  *
  * @param dmx_num The DMX port number.

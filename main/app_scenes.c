@@ -60,17 +60,22 @@ void app_record_failsafe_scenes(void)
     dmx_scene_t *sc = malloc(sizeof(dmx_scene_t));
     bool changed = false;
     for (int p = 1; p <= NPORTS; p++) {
-        port_config_t *pc = config_port(c, p);
-        if (!app_mode_is_output(pc->mode)) continue;
+        /* The scene files are written without the settings lock held */
+        config_lock();
+        bool output = app_mode_is_output(config_port(c, p)->mode);
+        uint8_t old = config_port(c, p)->failsafe_scene;
+        config_unlock();
+        if (!output) continue;
         char name[SCENE_NAME_MAX_LEN];
         snprintf(name, sizeof(name), "Failsafe P%d", p);
-        if (pc->failsafe_scene && sc && scene_get(pc->failsafe_scene, sc) == ESP_OK &&
-            strcmp(sc->name, name) == 0) {
-            scene_delete(pc->failsafe_scene);
+        if (old && sc && scene_get(old, sc) == ESP_OK && strcmp(sc->name, name) == 0) {
+            scene_delete(old);
         }
         uint32_t id = 0;
         if (scene_record(p, name, &id) == ESP_OK) {
-            pc->failsafe_scene = (uint8_t)id;
+            config_lock();
+            config_port(c, p)->failsafe_scene = (uint8_t)id;
+            config_unlock();
             changed = true;
             ESP_LOGI(TAG, "Port %d: failsafe scene recorded as scene %" PRIu32, p, id);
         } else {

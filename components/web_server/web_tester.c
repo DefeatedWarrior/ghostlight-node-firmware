@@ -18,6 +18,7 @@
  * use their usual routes (under /api/rdm/ and /api/tools/).
  */
 #include "web_internal.h"
+#include "web_stream.h"
 #include "config_manager.h"
 #include "dmx_tester.h"
 #include "esp_log.h"
@@ -193,25 +194,31 @@ static esp_err_t channels_get(httpd_req_t *req)
     dmx_handler_get_levels((uint8_t)port, b->level);
     dmx_tester_get_channels((uint8_t)port, b->min, b->max, b->changes, b->changing);
 
-    cJSON *json = cJSON_CreateObject();
-    cJSON_AddNumberToObject(json, "port", port);
-    cJSON *jl = cJSON_AddArrayToObject(json, "level");
-    cJSON *jmin = cJSON_AddArrayToObject(json, "min");
-    cJSON *jmax = cJSON_AddArrayToObject(json, "max");
-    cJSON *jc = cJSON_AddArrayToObject(json, "changes");
-    cJSON *jr = cJSON_AddArrayToObject(json, "changing");   /* channel numbers */
-    for (int i = 0; jl && jmin && jmax && jc && jr && i < 512; i++) {
-        cJSON_AddItemToArray(jl, cJSON_CreateNumber(b->level[i]));
-        cJSON_AddItemToArray(jmin, cJSON_CreateNumber(b->min[i]));
-        cJSON_AddItemToArray(jmax, cJSON_CreateNumber(b->max[i]));
-        cJSON_AddItemToArray(jc, cJSON_CreateNumber(b->changes[i]));
+    /* Not cJSON: over 2,000 numbers, about 80 KB of internal RAM */
+    web_stream_t *w = web_stream_begin(req);
+    if (!w) {
+        free(b);
+        return ESP_OK;
+    }
+    web_stream_printf(w, "{\"port\":%d,\"level\":", port);
+    web_stream_u8_array(w, b->level, 512);
+    web_stream_printf(w, ",\"min\":");
+    web_stream_u8_array(w, b->min, 512);
+    web_stream_printf(w, ",\"max\":");
+    web_stream_u8_array(w, b->max, 512);
+    web_stream_printf(w, ",\"changes\":");
+    web_stream_u32_array(w, b->changes, 512);
+    web_stream_printf(w, ",\"changing\":[");   /* channel numbers */
+    const char *sep = "";
+    for (int i = 0; i < 512; i++) {
         if (b->changing[i >> 3] & (1u << (i & 7))) {
-            cJSON_AddItemToArray(jr, cJSON_CreateNumber(i + 1));
+            web_stream_printf(w, "%s%d", sep, i + 1);
+            sep = ",";
         }
     }
+    web_stream_printf(w, "]}");
     free(b);
-    send_ok(req, json);
-    return ESP_OK;
+    return web_stream_end(w);
 }
 
 // ============================================================================
@@ -238,7 +245,9 @@ static esp_err_t mode_post(httpd_req_t *req)
     }
 #endif
     config_t *c = config_get();
+    config_lock();
     c->tester.enabled = enable;
+    config_unlock();
     if (config_save() != ESP_OK) {
         web_send_error(req, 500, "Failed to save the setting");
         return ESP_OK;
@@ -271,10 +280,10 @@ static esp_err_t port_post(httpd_req_t *req)
         return ESP_OK;
     }
     config_t *c = config_get();
-    tester_port_config_t t = c->tester.ports[port - 1];
+    int role = -2;   /* not given */
     const cJSON *jr = cJSON_GetObjectItemCaseSensitive(body, "role");
     if (jr) {
-        int role = cJSON_IsString(jr) ? config_tester_role_from_name(jr->valuestring) : -1;
+        role = cJSON_IsString(jr) ? config_tester_role_from_name(jr->valuestring) : -1;
 #if !CONFIG_NODE_RDM
         if (role == TESTER_ROLE_RDM) role = -1;
 #endif
@@ -283,16 +292,22 @@ static esp_err_t port_post(httpd_req_t *req)
             web_send_error(req, 400, "role must be off, send, receive or rdm");
             return ESP_OK;
         }
-        t.role = (uint8_t)role;
     }
-    int v;
-    if (get_int(body, "rate_hz", CONFIG_DMX_RATE_MIN, CONFIG_DMX_RATE_MAX, &v)) t.rate_hz = v;
-    if (get_int(body, "break_us", CONFIG_DMX_BREAK_MIN, CONFIG_DMX_BREAK_MAX, &v)) t.break_us = v;
-    if (get_int(body, "mab_us", CONFIG_DMX_MAB_MIN, CONFIG_DMX_MAB_MAX, &v)) t.mab_us = v;
-    if (get_int(body, "slots", CONFIG_DMX_SLOTS_MIN, CONFIG_DMX_SLOTS_MAX, &v)) t.slots = v;
+    int rate = -1, brk = -1, mab = -1, slots = -1, v;
+    if (get_int(body, "rate_hz", CONFIG_DMX_RATE_MIN, CONFIG_DMX_RATE_MAX, &v)) rate = v;
+    if (get_int(body, "break_us", CONFIG_DMX_BREAK_MIN, CONFIG_DMX_BREAK_MAX, &v)) brk = v;
+    if (get_int(body, "mab_us", CONFIG_DMX_MAB_MIN, CONFIG_DMX_MAB_MAX, &v)) mab = v;
+    if (get_int(body, "slots", CONFIG_DMX_SLOTS_MIN, CONFIG_DMX_SLOTS_MAX, &v)) slots = v;
     cJSON_Delete(body);
 
-    c->tester.ports[port - 1] = t;
+    config_lock();   /* read-modify-write of the live settings */
+    tester_port_config_t *t = &c->tester.ports[port - 1];
+    if (role >= 0) t->role = (uint8_t)role;
+    if (rate >= 0) t->rate_hz = rate;
+    if (brk >= 0) t->break_us = brk;
+    if (mab >= 0) t->mab_us = mab;
+    if (slots >= 0) t->slots = slots;
+    config_unlock();
     if (config_save() != ESP_OK) {
         web_send_error(req, 500, "Failed to save the setting");
         return ESP_OK;

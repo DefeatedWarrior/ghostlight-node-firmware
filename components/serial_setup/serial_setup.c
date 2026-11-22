@@ -205,6 +205,8 @@ static cJSON *cmd_info(void)
     cJSON *t = cJSON_AddObjectToObject(r, "tester");
     cJSON_AddBoolToObject(t, "enabled", dmx_tester_enabled());
     cJSON_AddBoolToObject(t, "next_boot", c && c->tester.enabled);
+    const char *notice = config_boot_notice();
+    if (notice) cJSON_AddStringToObject(r, "settings_notice", notice);
 
     add_network(r);
     return r;

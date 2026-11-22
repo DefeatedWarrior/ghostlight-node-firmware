@@ -33,6 +33,44 @@ size_t dmx_read_offset(dmx_port_t dmx_num, size_t offset, void *destination,
   return size;
 }
 
+/* WIFIDMX: the last level packet, from the copy the receive ISR saved
+(rx_frame in service.h). See driver.h. */
+size_t dmx_read_received(dmx_port_t dmx_num, void *destination, size_t size,
+                         uint32_t *seq) {
+  DMX_CHECK(dmx_num < DMX_NUM_MAX, 0, "dmx_num error");
+  DMX_CHECK(destination, 0, "destination is null");
+  DMX_CHECK(seq, 0, "seq is null");
+  DMX_CHECK(dmx_driver_is_installed(dmx_num), 0, "driver is not installed");
+
+  dmx_driver_t *const driver = dmx_driver[dmx_num];
+
+  /* The ISR replaces rx_frame at most once a packet (the shortest legal one
+  lasts over 100 us, the copy about 2 us), and holds the spinlock while it
+  does, so the copy below only needs doing again if a whole new packet was
+  saved during it */
+  for (int attempt = 0; attempt < 4; attempt++) {
+    taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+    const uint32_t before = driver->dmx.rx_frame_seq;
+    size_t n = driver->dmx.rx_frame_size;
+    taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+    if (n > size) {
+      n = size;
+    }
+
+    memcpy(destination, driver->dmx.rx_frame, n);
+
+    taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
+    const uint32_t after = driver->dmx.rx_frame_seq;
+    taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
+    if (before == after) {
+      *seq = before;
+      return n;
+    }
+  }
+  *seq = 0;  // the frames keep changing under us: give up on this one
+  return 0;
+}
+
 size_t dmx_read(dmx_port_t dmx_num, void *destination, size_t size) {
   DMX_CHECK(dmx_num < DMX_NUM_MAX, 0, "dmx_num error");
   DMX_CHECK(destination, 0, "destination is null");
@@ -263,7 +301,14 @@ size_t dmx_receive_num(dmx_port_t dmx_num, dmx_packet_t *packet, size_t size,
 
   // Parse DMX packet data
   taskENTER_CRITICAL(DMX_SPINLOCK(dmx_num));
-  driver->dmx.progress = DMX_PROGRESS_STALE;  // Prevent parsing old data
+  /* WIFIDMX: when receiving, only a finished packet is old data. By the time
+  this task runs the ISR can already be in the next packet (always, after a
+  short one: that ends at the next one's break), and marking that stale made
+  the ISR ignore all of it. A controller's RDM response keeps upstream's
+  behaviour. */
+  if (driver->is_controller || driver->dmx.progress == DMX_PROGRESS_COMPLETE) {
+    driver->dmx.progress = DMX_PROGRESS_STALE;  // Prevent parsing old data
+  }
   taskEXIT_CRITICAL(DMX_SPINLOCK(dmx_num));
   if (packet != NULL) {
     if (packet_size > 0) {

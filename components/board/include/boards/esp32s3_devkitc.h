@@ -13,6 +13,7 @@
 #pragma once
 
 #define BOARD_NAME              "ESP32-S3 DevKitC-1"
+#define BOARD_ID                "esp32s3-devkitc"   /* tools/build.sh name; firmware uploads must match */
 #define BOARD_DMX_PORTS         2
 
 /*                               port 1  port 2 */

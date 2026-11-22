@@ -69,6 +69,15 @@ static void on_rdm(const artnet_rdm_event_t *ev, void *user_data)
     if (ev->rdm) memcpy(rdm.rdm, ev->rdm, ev->rdm_len);
 }
 
+static struct { int calls; artnet_poll_reply_t r; bool conflict; } peer;
+static void on_peer(const artnet_poll_reply_t *r, bool ip_conflict, void *user_data)
+{
+    (void)user_data;
+    peer.calls++;
+    peer.r = *r;
+    peer.conflict = ip_conflict;
+}
+
 static struct { int calls; artnet_ipprog_cmd_t cmd; } ipprog;
 static void on_ipprog(const artnet_ipprog_cmd_t *cmd, artnet_ipprog_reply_t *reply, void *user_data)
 {
@@ -98,6 +107,7 @@ static void reset(void)
     memset(&sync_rx, 0, sizeof(sync_rx));
     memset(&rdm, 0, sizeof(rdm));
     memset(&ipprog, 0, sizeof(ipprog));
+    memset(&peer, 0, sizeof(peer));
 
     memset(&node, 0, sizeof(node));
     snprintf(node.short_name, sizeof(node.short_name), "Test Node");
@@ -118,6 +128,7 @@ static void reset(void)
     artnet_receiver_set_status_callback(on_status, NULL);
     artnet_receiver_set_sync_callback(on_sync, NULL);
     artnet_receiver_set_rdm_callback(on_rdm, NULL);
+    artnet_receiver_set_poll_reply_callback(on_peer, NULL);
     s_an.sock = 42;    /* replies go to the fake sendto() */
 }
 
@@ -567,6 +578,140 @@ static void test_send_tod_data_blocks(void)
     CHECK_EQ(host_sent[0].data[22], ARTNET_TOD_NAK);
 }
 
+/* ---- other nodes (ArtPollReply in, ArtPoll out) --------------------------- */
+
+/* Another node's reply for port @p idx, built the way this node builds its own */
+static int peer_reply(uint8_t *b, const uint8_t ip[4], const uint8_t mac[6], int idx)
+{
+    artnet_node_status_t other = node;
+    memcpy(other.ip, ip, 4);
+    memcpy(other.mac, mac, 6);
+    snprintf(other.short_name, sizeof(other.short_name), "Stage left");
+    snprintf(other.long_name, sizeof(other.long_name), "Stage left rack, 2 ports");
+    other.ports[0].port_address = 0x0205;     /* output 0:2:5 */
+    other.ports[0].data_active = true;
+    other.ports[1].port_address = 0x0123;     /* input 1:2:3, same as this node's */
+    other.ports[1].data_active = true;
+    build_reply(b, &other, idx);
+    return ARTNET_REPLY_LEN;
+}
+
+static const uint8_t PEER_IP[4] = {2, 0, 0, 20};
+static const uint8_t PEER_MAC[6] = {0x00, 0x50, 0xC2, 9, 8, 7};
+
+static void test_peer_reply_parsed(void)
+{
+    uint8_t b[ARTNET_REPLY_LEN];
+    feed_from(b, peer_reply(b, PEER_IP, PEER_MAC, 0), IP(2, 0, 0, 20));
+    CHECK_EQ(peer.calls, 1);
+    CHECK(!peer.conflict);
+    CHECK_EQ(s_an.stats.peer_replies, 1);
+    CHECK_EQ(host_sent_count, 0);              /* a reply is never answered */
+    const artnet_poll_reply_t *r = &peer.r;
+    CHECK_EQ(r->ip, IP(2, 0, 0, 20));
+    CHECK_EQ(r->from_ip, IP(2, 0, 0, 20));
+    CHECK_MEM(r->mac, PEER_MAC, 6);
+    CHECK_STR(r->short_name, "Stage left");
+    CHECK_STR(r->long_name, "Stage left rack, 2 ports");
+    CHECK_EQ(r->firmware, 0x0102);
+    CHECK_EQ(r->esta, ARTNET_ESTA_MAN);
+    CHECK_EQ(r->bind_index, 1);
+    CHECK_EQ(r->num_ports, 1);
+    CHECK_EQ(r->ports[0].type, 0x80);
+    CHECK_EQ(r->ports[0].out_address, 0x0205);
+    CHECK(r->ports[0].good_output & 0x80);
+
+    feed_from(b, peer_reply(b, PEER_IP, PEER_MAC, 1), IP(2, 0, 0, 20));
+    CHECK_EQ(peer.calls, 2);
+    CHECK_EQ(r->bind_index, 2);
+    CHECK_EQ(r->ports[0].type, 0x40);
+    CHECK_EQ(r->ports[0].in_address, 0x0123);
+    CHECK(r->ports[0].good_input & 0x80);
+}
+
+static void test_peer_reply_names_terminated(void)
+{
+    uint8_t b[ARTNET_REPLY_LEN];
+    peer_reply(b, PEER_IP, PEER_MAC, 0);
+    memset(&b[26], 'S', 18);                   /* no NUL in either name */
+    memset(&b[44], 'L', 64);
+    b[173] = 9;                                /* more ports than a reply holds */
+    feed_from(b, ARTNET_REPLY_LEN, IP(2, 0, 0, 20));
+    CHECK_EQ(peer.calls, 1);
+    CHECK_EQ(strlen(peer.r.short_name), 17);
+    CHECK_EQ(strlen(peer.r.long_name), 63);
+    CHECK_EQ(peer.r.num_ports, ARTNET_REPLY_PORTS);
+}
+
+static void test_peer_reply_every_truncation(void)
+{
+    uint8_t b[ARTNET_REPLY_LEN];
+    peer_reply(b, PEER_IP, PEER_MAC, 0);
+    int parsed = 0;
+    for (int len = 0; len <= ARTNET_REPLY_LEN; len++) {
+        peer.calls = 0;
+        feed_from(b, len, IP(2, 0, 0, 20));    /* ASan: no read past len */
+        parsed += peer.calls;
+        if (len == 206) CHECK_EQ(peer.r.bind_index, 0);   /* not there yet */
+    }
+    CHECK_EQ(parsed, ARTNET_REPLY_LEN - 194 + 1);   /* from SwOut on */
+    CHECK_EQ(host_sent_count, 0);
+}
+
+static void test_peer_ip_conflict(void)
+{
+    uint8_t b[ARTNET_REPLY_LEN];
+    /* this node's own reply coming back: not a peer */
+    feed_from(b, peer_reply(b, node.ip, node.mac, 0), IP(2, 0, 0, 10));
+    CHECK_EQ(peer.calls, 0);
+    CHECK_EQ(s_an.stats.own_packets, 1);
+    /* a reply from this address without a MAC: can't tell, so it's ours */
+    static const uint8_t no_mac[6];
+    feed_from(b, peer_reply(b, node.ip, no_mac, 0), IP(2, 0, 0, 10));
+    CHECK_EQ(peer.calls, 0);
+
+    /* another device on this node's address */
+    feed_from(b, peer_reply(b, node.ip, PEER_MAC, 0), IP(2, 0, 0, 10));
+    CHECK_EQ(peer.calls, 1);
+    CHECK(peer.conflict);
+    /* ... or one that says it has it */
+    feed_from(b, peer_reply(b, node.ip, PEER_MAC, 0), IP(2, 0, 0, 20));
+    CHECK_EQ(peer.calls, 2);
+    CHECK(peer.conflict);
+    CHECK_EQ(peer.r.from_ip, IP(2, 0, 0, 20));
+    CHECK_EQ(peer.r.ip, IP(2, 0, 0, 10));
+}
+
+static void test_self_poll(void)
+{
+    CHECK(!artnet_receiver_poll_network());    /* not running */
+    s_an.running = true;
+    CHECK(artnet_receiver_poll_network());
+    CHECK(s_an.self_poll_pending);
+    host_advance_ms(ARTNET_SELF_POLL_MS - 1);
+    CHECK(!artnet_receiver_poll_network());    /* too soon */
+    host_advance_ms(1);
+    CHECK(artnet_receiver_poll_network());
+    s_an.running = false;
+
+    send_poll();
+    CHECK_EQ(host_sent_count, 1);
+    const host_sent_t *p = &host_sent[0];
+    CHECK_EQ(p->len, 22);
+    CHECK_EQ(p->dest_ip, IP(2, 255, 255, 255));
+    CHECK_EQ(p->dest_port, 6454);
+    CHECK_MEM(p->data, "Art-Net\0", 8);
+    CHECK_EQ(p->data[8] | (p->data[9] << 8), ARTNET_OP_POLL);
+    CHECK_EQ(p->data[11], ARTNET_PROTOCOL_VERSION);
+    CHECK_EQ(p->data[12], 0);                  /* not targeted, no diagnostics */
+
+    /* hearing its own poll: ignored, not answered */
+    host_sent_count = 0;
+    feed_from(host_sent[0].data, 22, IP(2, 0, 0, 10));
+    CHECK_EQ(s_an.stats.poll_packets, 0);
+    CHECK_EQ(host_sent_count, 0);
+}
+
 int main(void)
 {
     s_an_pristine = s_an;
@@ -595,5 +740,10 @@ int main(void)
     RUN(test_tod_control_and_rdm);
     RUN(test_ipprog);
     RUN(test_send_tod_data_blocks);
+    RUN(test_peer_reply_parsed);
+    RUN(test_peer_reply_names_terminated);
+    RUN(test_peer_reply_every_truncation);
+    RUN(test_peer_ip_conflict);
+    RUN(test_self_poll);
     return test_summary();
 }

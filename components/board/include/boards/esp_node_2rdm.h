@@ -6,6 +6,7 @@
 #pragma once
 
 #define BOARD_NAME              "ESP-NODE-2RDM"
+#define BOARD_ID                "esp-node-2rdm"   /* tools/build.sh name; firmware uploads must match */
 #define BOARD_DMX_PORTS         2
 
 /*                               port 1  port 2 */

@@ -12,6 +12,7 @@
 #include "artnet_receiver.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -315,7 +316,11 @@ static void bridge_task(void *arg)
         return;
     }
     int64_t last_supervise = 0;
+    /* Task watchdog: the queue wait is 500 ms and each RDM exchange has its
+     * own timeouts, so 10 s without a pass means the bridge is stuck */
+    esp_task_wdt_add(NULL);
     for (;;) {
+        esp_task_wdt_reset();
         if (xQueueReceive(s_br.queue, m, pdMS_TO_TICKS(500)) == pdTRUE) {
             if (m->type == MSG_DISCOVERY_DONE) {
                 on_discovery_done(m->port);

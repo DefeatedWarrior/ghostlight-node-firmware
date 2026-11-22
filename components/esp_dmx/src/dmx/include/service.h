@@ -136,6 +136,23 @@ typedef struct dmx_driver_t {
     int64_t controller_eop_timestamp;  // The timestamp (in microseconds since boot) of the end-of-packet of the last controller-generated packet.
     rdm_pid_t last_responder_pid;  // The PID of the last responder-generated packet.
     bool responder_sent_last;  // True if the last packet was a responder-generated packet.
+    /* WIFIDMX: the next packet overwrites data[] from slot 0 one break after
+    the last one ended, which can be well under a millisecond, so a task that
+    copies data[] after being notified can get a mix of two packets. The
+    receive ISR therefore copies each finished level packet (NULL start code)
+    to rx_frame before it handles the next break, and counts it in
+    rx_frame_seq. dmx_read_received() reads that copy. */
+    uint32_t rx_frame_seq;
+    uint16_t rx_frame_size;
+    uint8_t rx_frame[DMX_PACKET_SIZE_MAX];
+    /* WIFIDMX: length of the last level packet a break cut short (0: the
+    last one was whole). The expected size only shrinks to a length seen
+    twice in a row. */
+    int rx_short_len;
+    /* WIFIDMX: head when a framing error ended a packet (0: none). A break's
+    null byte is a framing error, which can be flagged before the break: if
+    nothing else arrives before the break, the packet was a short one. */
+    int rx_err_head;
     union {
       struct {
         rdm_pid_t last_request_pid;  // The PID of the last packet which targeted this device. Is only used when this device is a DMX responder.

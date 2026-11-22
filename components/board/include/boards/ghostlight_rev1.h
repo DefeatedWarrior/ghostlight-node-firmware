@@ -11,6 +11,7 @@
 #pragma once
 
 #define BOARD_NAME              "Ghostlight Node rev1"
+#define BOARD_ID                "ghostlight-rev1"   /* tools/build.sh name; firmware uploads must match */
 #define BOARD_DMX_PORTS         2
 
 /*                               port 1  port 2 */

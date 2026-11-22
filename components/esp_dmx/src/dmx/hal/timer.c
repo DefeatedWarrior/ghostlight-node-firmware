@@ -109,8 +109,17 @@ bool dmx_timer_init(dmx_port_t dmx_num, void *isr_context, int isr_flags) {
 void dmx_timer_deinit(dmx_port_t dmx_num) {
   struct dmx_timer_t *timer = &dmx_timer_context[dmx_num];
 #if ESP_IDF_VERSION_MAJOR >= 5
-  gptimer_disable(timer->gptimer_handle);
-  gptimer_del_timer(timer->gptimer_handle);
+  /* WIFIDMX: gptimer_disable() refuses a running timer, which would leak the
+  timer and its interrupt, so stop a pending alarm first; and forget the
+  handle so a second deinit (failed install) doesn't use a freed one */
+  if (timer->gptimer_handle) {
+    if (timer->is_running) {
+      gptimer_stop(timer->gptimer_handle);
+    }
+    gptimer_disable(timer->gptimer_handle);
+    gptimer_del_timer(timer->gptimer_handle);
+    timer->gptimer_handle = NULL;
+  }
 #else
   timer_isr_callback_remove(timer->group, timer->idx);
   timer_deinit(timer->group, timer->idx);

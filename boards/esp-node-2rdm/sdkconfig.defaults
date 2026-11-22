@@ -15,3 +15,17 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_BOOT_INIT=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+# Received packets and lwIP buffers in PSRAM. The option makes Wi-Fi transmit
+# buffers static in internal RAM (16 x 1.6 KB), so less is free when idle
+# (~40 KB, ~57 without), but a flood plus one web client left 23.7 KB at
+# worst, 5.3 without (several clients: 16.9 with it, see docs/DEVELOPING.md).
+# The values below are the ones that was measured with: the option would
+# otherwise raise RX buffers and the BA window to 16 (~10 KB more internal RAM)
+# and lift the limit on out-of-order TCP packets.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER=y
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_CACHE_TX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4

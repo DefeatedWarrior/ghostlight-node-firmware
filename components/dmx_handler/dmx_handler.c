@@ -23,6 +23,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/event_groups.h"
+#include <stdatomic.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,7 +43,13 @@ static const int8_t k_rx_pin[DMX_PORT_MAX]  = BOARD_DMX_RX_GPIO;
 static const int8_t k_dir_pin[DMX_PORT_MAX] = BOARD_DMX_DIR_GPIO;
 static const int8_t k_bias_pin[DMX_PORT_MAX] = BOARD_DMX_BIAS_GPIO;
 
-#define DMX_TASK_STACK_SIZE   4096
+/* Output tasks pull from the merge engine, which also logs there (all
+ * sources lost, sync): 4 KB left 496 bytes free on the S3 */
+#define DMX_OUT_STACK_SIZE    6144
+/* Input tasks run the forwarding path too (Art-Net and sACN sends, merging
+ * into local outputs, loss callbacks and their logging), next to two frame
+ * buffers: 4 KB left under 900 bytes free on the S3 */
+#define DMX_IN_STACK_SIZE     6144
 #define DMX_TASK_PRIORITY     12          /* above network rx (6) */
 #define DMX_TASK_CORE         BOARD_CORE_DMX   /* board.h: 1, or 0 on single-core chips */
 #define DMX_DISC_STACK_SIZE   6144
@@ -73,6 +80,7 @@ typedef struct {
     bool driver_installed;
 
     SemaphoreHandle_t bus;
+    atomic_int rdm_waiting;         /* RDM requests waiting for the bus */
     SemaphoreHandle_t data_mutex;
     SemaphoreHandle_t out_done;
     SemaphoreHandle_t in_done;
@@ -272,6 +280,13 @@ static void output_task(void *arg)
         dmx_write(p->dmx_num, frame, (size_t)tm.slots + 1);
         size_t sent = dmx_send_num(p->dmx_num, (size_t)tm.slots + 1);
         xSemaphoreGive(p->bus);
+        /* An RDM request is waiting: step aside so it gets the bus before
+         * the next frame. Otherwise, when this task is catching up after a
+         * late frame, it takes the bus straight back (higher priority) and
+         * RDM can wait seconds. */
+        if (atomic_load(&p->rdm_waiting) > 0) {
+            vTaskDelay(1);
+        }
 
         if (sent) {
             p->stats.frames_sent++;
@@ -408,7 +423,10 @@ static void input_task(void *arg)
 {
     port_t *p = (port_t *)arg;
     uint8_t frame[DMX_FRAME_SIZE];
-    uint8_t slots_buf[DMX_CHANNEL_COUNT];
+    uint8_t slots_buf[DMX_CHANNEL_COUNT];   /* the last frame forwarded */
+    uint32_t last_seq = 0;   /* the driver's number of the last frame used */
+    bool holding = false;    /* slots_buf holds a frame from the current signal */
+    memset(slots_buf, 0, sizeof(slots_buf));
 
     ESP_LOGI(TAG, "Port %u: input task running (%s)", p->port_num,
              p->mode == DMX_MODE_RDM_RESPONDER ? "RDM responder" : "DMX input");
@@ -419,15 +437,48 @@ static void input_task(void *arg)
         esp_task_wdt_reset();
         sniffer_service(p);
 
-        dmx_packet_t pkt;
+        dmx_packet_t pkt = { .err = DMX_ERR_TIMEOUT };
         size_t size = dmx_receive(p->dmx_num, &pkt, pdMS_TO_TICKS(DMX_RX_POLL_MS));
+        /* Level frames come from the copy the driver's interrupt saves as
+         * each frame ends, not from what dmx_receive() reports: the next
+         * frame, or a stray break, starts overwriting the driver's buffer
+         * well under a millisecond later, so by the time this task looks
+         * that buffer can hold a mix of two frames, or nothing (a break
+         * right after a frame made dmx_receive() report it as empty) */
+        uint32_t seq = 0;
+        size_t frame_len = dmx_read_received(p->dmx_num, frame, DMX_FRAME_SIZE, &seq);
+        bool fresh = seq != 0 && seq != last_seq && frame_len >= 2;
         uint32_t t = now_ms();
         analysis_window(p, t);
 
-        if (size == 0) {
+        /* size is 0 when the next break got in first, which is always so
+         * for a frame cut short: count those by the frame that was saved */
+        if (size > 0 || (fresh && pkt.err != DMX_ERR_TIMEOUT)) {
+            analysis_packet(p, &pkt);
+        }
+        if (size > 0) {
+            if (pkt.is_rdm) {
+                if (p->mode == DMX_MODE_RDM_RESPONDER && pkt.err == DMX_OK) {
+                    rdm_send_response(p->dmx_num);
+                    p->stats.rdm_responder_requests++;
+                    bool ident = false;
+                    if (rdm_get_identify_device(p->dmx_num, &ident) && ident != p->identify) {
+                        p->identify = ident;
+                        ESP_LOGI(TAG, "Port %u: RDM identify %s", p->port_num, ident ? "ON" : "OFF");
+                        dmx_identify_callback_t icb = p->ident_cb;
+                        if (icb) icb(p->port_num, ident, p->ident_ctx);
+                    }
+                }
+            } else if (pkt.err != DMX_OK && pkt.err != DMX_ERR_NOT_ENOUGH_SLOTS) {
+                p->stats.error_count++;
+            }
+        }
+
+        if (!fresh) {
             if (p->stats.signal_present &&
                 (t - p->stats.last_frame_time_ms) > DMX_INPUT_LOSS_MS) {
                 p->stats.signal_present = false;
+                holding = false;
                 ESP_LOGW(TAG, "Port %u: DMX input signal lost", p->port_num);
                 dmx_loss_callback_t lcb = p->loss_cb;
                 if (lcb) lcb(p->port_num, p->loss_ctx);
@@ -435,39 +486,22 @@ static void input_task(void *arg)
             continue;
         }
 
-        analysis_packet(p, &pkt);
-
-        if (pkt.is_rdm) {
-            if (p->mode == DMX_MODE_RDM_RESPONDER && pkt.err == DMX_OK) {
-                rdm_send_response(p->dmx_num);
-                p->stats.rdm_responder_requests++;
-                bool ident = false;
-                if (rdm_get_identify_device(p->dmx_num, &ident) && ident != p->identify) {
-                    p->identify = ident;
-                    ESP_LOGI(TAG, "Port %u: RDM identify %s", p->port_num, ident ? "ON" : "OFF");
-                    dmx_identify_callback_t icb = p->ident_cb;
-                    if (icb) icb(p->port_num, ident, p->ident_ctx);
-                }
-            }
-            continue;
+        if (last_seq != 0 && seq - last_seq > 1) {
+            /* more than a frame late: the newer frame replaced the others */
+            p->an.dropped_late += seq - last_seq - 1;
         }
-
-        if (pkt.err != DMX_OK && pkt.err != DMX_ERR_NOT_ENOUGH_SLOTS) {
-            p->stats.error_count++;
-            continue;
-        }
-        if (pkt.sc != 0x00 || pkt.size < 2) {
-            continue;   /* alternate start code or empty frame */
-        }
-
-        size_t frame_len = pkt.size > DMX_FRAME_SIZE ? DMX_FRAME_SIZE : pkt.size;
-        dmx_read(p->dmx_num, frame, frame_len);
+        last_seq = seq;
         uint16_t slots = (uint16_t)(frame_len - 1);
 
+        /* Slots a short frame leaves out keep their last level, as fixtures
+         * do, so a frame cut short (a glitch, a cable pulled mid-frame)
+         * doesn't flash the channels above it to zero. After a signal loss
+         * they start from zero, for whatever source comes next. */
         memcpy(slots_buf, &frame[1], slots);
-        if (slots < DMX_CHANNEL_COUNT) {
+        if (slots < DMX_CHANNEL_COUNT && !holding) {
             memset(slots_buf + slots, 0, DMX_CHANNEL_COUNT - slots);
         }
+        holding = true;
 
         xSemaphoreTake(p->data_mutex, portMAX_DELAY);
         memcpy(p->buffer, slots_buf, DMX_CHANNEL_COUNT);
@@ -513,11 +547,11 @@ static void stop_port_locked(port_t *p)
     }
     set_bias(p, false);
 
-    /* Abort discovery first: it uses the bus and the driver */
+    /* Discovery, the DMX tasks and RDM requests all use the driver. Ask
+     * discovery to stop, then stop the DMX task first: a busy output task
+     * can keep discovery off the bus. */
     if (p->discovering) {
         p->disc_abort = true;
-        xEventGroupWaitBits(p->disc_events, DISC_IDLE_BIT, pdFALSE, pdTRUE,
-                            pdMS_TO_TICKS(5000));
     }
 
     p->run = false;
@@ -534,8 +568,19 @@ static void stop_port_locked(port_t *p)
         p->in_task = NULL;
     }
 
+    /* Never remove the driver under a running discovery. With the DMX task
+     * gone it ends within one RDM transaction. */
+    while (!(xEventGroupWaitBits(p->disc_events, DISC_IDLE_BIT, pdFALSE, pdTRUE,
+                                 pdMS_TO_TICKS(2000)) & DISC_IDLE_BIT)) {
+        ESP_LOGW(TAG, "Port %u: waiting for RDM discovery to stop", p->port_num);
+    }
+
+    /* Holding the bus: no RDM request is half-way through (they check
+     * rdm_bus_ok() once they have it) */
+    xSemaphoreTake(p->bus, portMAX_DELAY);
     uninstall_driver(p);
     p->is_active = false;
+    xSemaphoreGive(p->bus);
     p->tod_valid = false;
     p->stats.signal_present = false;
     ESP_LOGI(TAG, "Port %u stopped", p->port_num);
@@ -683,11 +728,11 @@ esp_err_t dmx_handler_start_port(uint8_t port)
     BaseType_t ok;
     if (is_output_mode(p->mode)) {
         snprintf(name, sizeof(name), "dmx_out_%u", port);
-        ok = xTaskCreatePinnedToCore(output_task, name, DMX_TASK_STACK_SIZE, p,
+        ok = xTaskCreatePinnedToCore(output_task, name, DMX_OUT_STACK_SIZE, p,
                                      DMX_TASK_PRIORITY, &p->out_task, DMX_TASK_CORE);
     } else {
         snprintf(name, sizeof(name), "dmx_in_%u", port);
-        ok = xTaskCreatePinnedToCore(input_task, name, DMX_TASK_STACK_SIZE, p,
+        ok = xTaskCreatePinnedToCore(input_task, name, DMX_IN_STACK_SIZE, p,
                                      DMX_TASK_PRIORITY, &p->in_task, DMX_TASK_CORE);
     }
     if (ok != pdPASS) {
@@ -895,12 +940,32 @@ bool dmx_handler_rdm_available(uint8_t port)
  * keep discovery running forever */
 #define DISC_MAX_TRANSACTIONS 4000
 
-/* One locked RDM transaction */
+/* The port can send an RDM request now. Checked with the bus held:
+ * stop_port_locked() takes the bus before it removes the driver, and the
+ * port may have been reconfigured since the caller's first check. */
+static bool rdm_bus_ok(const port_t *p)
+{
+    return p->driver_installed && port_has_rdm(p);
+}
+
+/* Take the bus for an RDM request (the output task lets it in between frames) */
+static void rdm_bus_take(port_t *p)
+{
+    atomic_fetch_add(&p->rdm_waiting, 1);
+    xSemaphoreTake(p->bus, portMAX_DELAY);
+    atomic_fetch_sub(&p->rdm_waiting, 1);
+}
+
+/* One locked RDM transaction (0 / false, ack untouched, if the port can no
+ * longer send RDM) */
 #define RDM_LOCKED(p, expr) ({                          \
-        xSemaphoreTake((p)->bus, portMAX_DELAY);        \
-        __typeof__(expr) _r = (expr);                   \
+        rdm_bus_take(p);                                \
+        __typeof__(expr) _r = 0;                        \
+        if (rdm_bus_ok(p)) {                            \
+            _r = (expr);                                \
+            (p)->stats.rdm_requests_sent++;             \
+        }                                               \
         xSemaphoreGive((p)->bus);                       \
-        (p)->stats.rdm_requests_sent++;                 \
         _r; })
 
 static bool disc_mute(port_t *p, const rdm_uid_t *uid)
@@ -1201,9 +1266,11 @@ esp_err_t dmx_handler_rdm_discover_mode(uint8_t port, dmx_disc_mode_t mode)
     if (!dmx_handler_rdm_available(port)) return ESP_ERR_INVALID_STATE;
 
     xSemaphoreTake(s_dmx.state_mutex, portMAX_DELAY);
-    if (p->discovering) {
+    /* Already running (callers can just wait), or the port was stopped or
+     * changed mode while this call waited for the lock */
+    if (p->discovering || !dmx_handler_rdm_available(port)) {
         xSemaphoreGive(s_dmx.state_mutex);
-        return ESP_ERR_INVALID_STATE;   /* already running: callers can just wait */
+        return ESP_ERR_INVALID_STATE;
     }
     if (mode == DMX_DISC_FLUSH) {
         xSemaphoreTake(p->data_mutex, portMAX_DELAY);
@@ -1288,7 +1355,11 @@ esp_err_t dmx_handler_rdm_transaction(uint8_t port, const uint8_t *req, size_t r
 
     size_t got = 0;
     dmx_packet_t pkt = {0};
-    xSemaphoreTake(p->bus, portMAX_DELAY);
+    rdm_bus_take(p);
+    if (!rdm_bus_ok(p)) {
+        xSemaphoreGive(p->bus);
+        return ESP_ERR_INVALID_STATE;
+    }
     p->stats.rdm_requests_sent++;
     if (dmx_wait_sent(p->dmx_num, pdMS_TO_TICKS(50))) {
         dmx_write(p->dmx_num, req, len);

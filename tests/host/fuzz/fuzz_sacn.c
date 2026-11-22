@@ -1,7 +1,7 @@
 /* libFuzzer target: one UDP datagram into the sACN receiver's parser, in a
- * receive buffer like the firmware's (700 bytes, with the bytes past the
- * datagram poisoned for ASan). The data callback reads every slot it is
- * handed and checks the decoded fields are in range. */
+ * receive buffer like the firmware's (SACN_RX_BUF_SIZE bytes, with the bytes
+ * past the datagram poisoned for ASan). The callbacks read everything they
+ * are handed and check the decoded fields are in range. */
 #include "../../../components/sacn_receiver/sacn_receiver.c"
 #include "fakes.h"
 
@@ -30,6 +30,16 @@ static void on_sync(uint16_t universe, const uint8_t *cid, uint32_t ip, void *ct
     touch(cid, 16);
 }
 
+static void on_discovery(const uint8_t *cid, const char *name, uint32_t ip, uint8_t page,
+                         uint8_t last_page, const uint8_t *universes_be, uint16_t count,
+                         void *ctx)
+{
+    if (count > 512) __builtin_trap();
+    touch(cid, 16);
+    touch(name, strlen(name) + 1);
+    touch(universes_be, (size_t)count * 2);
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     static int once;
@@ -42,6 +52,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     sacn_receiver_init();
     sacn_receiver_set_callback(on_data, NULL);
     sacn_receiver_set_sync_callback(on_sync, NULL);
+    sacn_receiver_set_discovery_callback(on_discovery, NULL);
 
     size_t len = size < SACN_RX_BUF_SIZE ? size : SACN_RX_BUF_SIZE;   /* recvfrom() */
     uint8_t *buf = host_rx_buffer(data, len, SACN_RX_BUF_SIZE);

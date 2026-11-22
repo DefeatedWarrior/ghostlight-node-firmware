@@ -110,6 +110,11 @@ static const char *proto_name(source_protocol_t p)
 static void log_source(const char *what, uint8_t port, const source_t *s)
 {
     uint32_t ip = s->ip;
+    if (s->protocol == SOURCE_PROTOCOL_DMX_IN) {
+        /* source_ip is the input port number */
+        ESP_LOGI(TAG, "Port %u: %s DMX-in source port %u", port, what, (unsigned)ip);
+        return;
+    }
     ESP_LOGI(TAG, "Port %u: %s %s source %u.%u.%u.%u \"%s\" prio %u%s",
              port, what, proto_name(s->protocol),
              (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),

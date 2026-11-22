@@ -17,4 +17,11 @@ if(NOT DEFINED SDKCONFIG_DEFAULTS AND NOT DEFINED ENV{SDKCONFIG_DEFAULTS})
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# lwIP counts one multicast membership per group per network interface, 8 in
+# all by default. Ethernet, Wi-Fi and the node's own AP each hold the
+# all-systems and mDNS groups, and sACN joins every output universe, the sync
+# universes its sources use and the discovery universe on each of them.
+idf_build_set_property(COMPILE_DEFINITIONS "MEMP_NUM_IGMP_GROUP=24" APPEND)
+
 project(ESP-NODE-2RDM)

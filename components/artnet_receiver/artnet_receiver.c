@@ -13,6 +13,7 @@
 #include "artnet_receiver.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -55,6 +56,8 @@ static struct {
     void *sync_ctx;
     artnet_ipprog_callback_t ipprog_cb;
     void *ipprog_ctx;
+    artnet_poll_reply_callback_t peer_cb;
+    void *peer_ctx;
 
     bool poll_reply_enabled;
     volatile bool reply_pending;
@@ -68,6 +71,9 @@ static struct {
     uint32_t reply_counter;
 
     uint32_t own_ip;            /* network byte order, 0 = unknown */
+    uint8_t own_mac[6];         /* the MAC address in this node's replies */
+    volatile bool self_poll_pending;
+    int64_t last_self_poll_us;
     artnet_stats_t stats;
 } s_an = {
     .sock = -1,
@@ -180,7 +186,38 @@ static bool get_status(artnet_node_status_t *st)
     }
     s_an.status_cb(st, s_an.status_ctx);
     s_an.own_ip = ip_from_bytes(st->ip);
+    memcpy(s_an.own_mac, st->mac, 6);
     return s_an.own_ip != 0;
+}
+
+/* The directed broadcast address of the node's network */
+static struct sockaddr_in broadcast_to(const artnet_node_status_t *st)
+{
+    uint32_t ip = ip_from_bytes(st->ip);
+    uint32_t mask = ip_from_bytes(st->netmask);
+    struct sockaddr_in to = {
+        .sin_family = AF_INET,
+        .sin_port = htons(ARTNET_PORT),
+        .sin_addr.s_addr = mask ? ((ip & mask) | ~mask) : htonl(INADDR_BROADCAST),
+    };
+    return to;
+}
+
+/* ArtPoll so the other nodes announce themselves (artnet_receiver_poll_network) */
+static void send_poll(void)
+{
+    artnet_node_status_t st;
+    if (!get_status(&st) || s_an.sock < 0) {
+        return;
+    }
+    struct sockaddr_in to = broadcast_to(&st);
+    uint8_t poll[22] = {0};
+    memcpy(poll, ARTNET_HEADER, 8);
+    poll[8] = ARTNET_OP_POLL & 0xFF;
+    poll[9] = ARTNET_OP_POLL >> 8;
+    poll[11] = ARTNET_PROTOCOL_VERSION;
+    /* Flags 0: reply to this poll only, no diagnostics, not targeted */
+    sendto(s_an.sock, poll, sizeof(poll), 0, (struct sockaddr *)&to, sizeof(to));
 }
 
 /**
@@ -198,11 +235,7 @@ static void send_replies(const struct sockaddr_in *poller, bool targeted,
 
     uint32_t ip = ip_from_bytes(st.ip);
     uint32_t mask = ip_from_bytes(st.netmask);
-    struct sockaddr_in bcast = {
-        .sin_family = AF_INET,
-        .sin_port = htons(ARTNET_PORT),
-        .sin_addr.s_addr = mask ? ((ip & mask) | ~mask) : htonl(INADDR_BROADCAST),
-    };
+    struct sockaddr_in bcast = broadcast_to(&st);
     bool unicast_too = poller && mask &&
                        ((poller->sin_addr.s_addr & mask) != (ip & mask));
 
@@ -481,17 +514,88 @@ static void handle_ip_prog(const uint8_t *b, int len, const struct sockaddr_in *
     }
 }
 
+/* NUL-terminated copy of a fixed-size name field */
+static void copy_field(char *dst, const uint8_t *src, size_t size)
+{
+    size_t n = strnlen((const char *)src, size - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+bool artnet_parse_poll_reply(const uint8_t *b, int len, artnet_poll_reply_t *out)
+{
+    /* Everything up to SwOut (byte 193) is needed; older nodes stop there
+     * or a little later, so the rest is read only if it arrived */
+    if (!b || !out || len < 194 || memcmp(b, ARTNET_HEADER, 8) != 0 ||
+        (b[8] | ((uint16_t)b[9] << 8)) != ARTNET_OP_POLL_REPLY) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->ip = ip_from_bytes(&b[10]);
+    out->firmware = (uint16_t)((b[16] << 8) | b[17]);
+    uint16_t base = (uint16_t)(((b[18] & 0x7F) << 8) | ((b[19] & 0x0F) << 4));
+    out->oem = (uint16_t)((b[20] << 8) | b[21]);
+    out->esta = (uint16_t)(b[24] | (b[25] << 8));
+    copy_field(out->short_name, &b[26], sizeof(out->short_name));
+    copy_field(out->long_name, &b[44], sizeof(out->long_name));
+    out->num_ports = b[173] > ARTNET_REPLY_PORTS ? ARTNET_REPLY_PORTS : b[173];
+    for (int i = 0; i < out->num_ports; i++) {
+        out->ports[i].type = b[174 + i];
+        out->ports[i].good_input = b[178 + i];
+        out->ports[i].good_output = b[182 + i];
+        out->ports[i].in_address = base | (b[186 + i] & 0x0F);
+        out->ports[i].out_address = base | (b[190 + i] & 0x0F);
+    }
+    if (len > 200) out->style = b[200];
+    if (len >= 207) memcpy(out->mac, &b[201], 6);
+    if (len > 211) out->bind_index = b[211];
+    if (len > 212) out->status2 = b[212];
+    return true;
+}
+
+/*
+ * Another node announcing itself. Checked before the own-address filter: a
+ * reply from this node's IP address with another MAC address is a second
+ * device on the same address.
+ */
+static void handle_poll_reply(const uint8_t *b, int len, const struct sockaddr_in *from)
+{
+    artnet_poll_reply_t r;
+    if (!artnet_parse_poll_reply(b, len, &r)) {
+        return;   /* too short to say anything useful */
+    }
+    r.from_ip = from->sin_addr.s_addr;
+    if (!s_an.own_ip) {
+        artnet_node_status_t st;
+        get_status(&st);
+    }
+    static const uint8_t no_mac[6];
+    bool same_ip = s_an.own_ip && (r.from_ip == s_an.own_ip || r.ip == s_an.own_ip);
+    if (same_ip && (memcmp(r.mac, no_mac, 6) == 0 || memcmp(r.mac, s_an.own_mac, 6) == 0)) {
+        s_an.stats.own_packets++;   /* this node's own reply */
+        return;
+    }
+    s_an.stats.peer_replies++;
+    if (s_an.peer_cb) {
+        s_an.peer_cb(&r, same_ip, s_an.peer_ctx);
+    }
+}
+
 static void process_packet(const uint8_t *b, int len, const struct sockaddr_in *from)
 {
     if (len < 10 || memcmp(b, ARTNET_HEADER, 8) != 0) {
         s_an.stats.invalid_packets++;
         return;
     }
+    uint16_t opcode = b[8] | ((uint16_t)b[9] << 8);
+    if (opcode == ARTNET_OP_POLL_REPLY) {
+        handle_poll_reply(b, len, from);
+        return;
+    }
     if (s_an.own_ip && from->sin_addr.s_addr == s_an.own_ip) {
         s_an.stats.own_packets++;
         return;
     }
-    uint16_t opcode = b[8] | ((uint16_t)b[9] << 8);
     switch (opcode) {
         case ARTNET_OP_DMX:        handle_dmx(b, len, from);     break;
         case ARTNET_OP_POLL:       handle_poll(b, len, from);    break;
@@ -503,7 +607,6 @@ static void process_packet(const uint8_t *b, int len, const struct sockaddr_in *
         case ARTNET_OP_IP_PROG:     handle_ip_prog(b, len, from);     break;
         case ARTNET_OP_IP_PROG_REPLY: break;
         case ARTNET_OP_TOD_DATA:    break;   /* from other gateways */
-        case ARTNET_OP_POLL_REPLY: break;   /* other nodes announcing themselves */
         default:                   s_an.stats.unsupported_packets++; break;
     }
 }
@@ -517,7 +620,11 @@ static void artnet_receive_task(void *arg)
     }
     ESP_LOGI(TAG, "Art-Net receiver task started");
 
+    /* Task watchdog: the loop wakes at least every ARTNET_RX_TIMEOUT_MS, so a
+     * receiver stuck for 10 s restarts the node instead of leaving it deaf */
+    esp_task_wdt_add(NULL);
     while (s_an.running) {
+        esp_task_wdt_reset();
         struct sockaddr_in from;
         socklen_t from_len = sizeof(from);
         int len = recvfrom(s_an.sock, buf, ARTNET_RX_BUF_SIZE, 0,
@@ -528,6 +635,11 @@ static void artnet_receive_task(void *arg)
         } else if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK && s_an.running) {
             ESP_LOGW(TAG, "recvfrom error %d", errno);
             vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        if (s_an.self_poll_pending) {
+            s_an.self_poll_pending = false;
+            send_poll();
         }
 
         if (s_an.reply_pending) {
@@ -551,6 +663,7 @@ static void artnet_receive_task(void *arg)
         }
     }
 
+    esp_task_wdt_delete(NULL);
     free(buf);
     ESP_LOGI(TAG, "Art-Net receiver task stopped");
     xSemaphoreGive(s_an.task_done);
@@ -686,6 +799,28 @@ esp_err_t artnet_receiver_set_ipprog_callback(artnet_ipprog_callback_t callback,
     s_an.ipprog_ctx = user_data;
     s_an.ipprog_cb = callback;
     return ESP_OK;
+}
+
+esp_err_t artnet_receiver_set_poll_reply_callback(artnet_poll_reply_callback_t callback, void *user_data)
+{
+    s_an.peer_cb = NULL;
+    s_an.peer_ctx = user_data;
+    s_an.peer_cb = callback;
+    return ESP_OK;
+}
+
+bool artnet_receiver_poll_network(void)
+{
+    if (!s_an.running) {
+        return false;
+    }
+    int64_t now = esp_timer_get_time();
+    if (s_an.last_self_poll_us && now - s_an.last_self_poll_us < (int64_t)ARTNET_SELF_POLL_MS * 1000) {
+        return false;
+    }
+    s_an.last_self_poll_us = now;
+    s_an.self_poll_pending = true;   /* sent by the receive task */
+    return true;
 }
 
 esp_err_t artnet_receiver_set_rdm_callback(artnet_rdm_callback_t callback, void *user_data)

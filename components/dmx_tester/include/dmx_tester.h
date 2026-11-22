@@ -65,7 +65,7 @@ void dmx_tester_get_levels(uint8_t port, uint8_t data[512]);
 
 // ---- Receive ---------------------------------------------------------------
 
-/** A level frame arrived (512 slots, short frames zero-filled) */
+/** A level frame arrived (512 slots; dmx_handler fills in what a short frame leaves out) */
 void dmx_tester_on_frame(uint8_t port, const uint8_t data[512]);
 /** The input signal was lost */
 void dmx_tester_on_loss(uint8_t port);

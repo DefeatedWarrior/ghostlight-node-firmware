@@ -89,6 +89,9 @@ typedef struct {
     uint32_t err_framing;     /**< improperly framed slots (bad stop bits, noise) */
     uint32_t err_overflow;    /**< UART overflow */
     uint32_t err_short;       /**< frame cut short by a new break */
+    uint32_t dropped_late;    /**< frames never forwarded: the input task was
+                                   more than a frame late and a newer frame
+                                   had replaced them */
     uint32_t alt_start_codes; /**< packets with a start code other than 0 / RDM */
     uint8_t last_alt_start_code;
     uint32_t rdm_packets;     /**< RDM packets seen on the line */

@@ -64,6 +64,21 @@ int main(int argc, char **argv)
     memcpy(&b[16], (uint8_t[]){2, 0, 0, 20}, 4);
     memcpy(&b[20], (uint8_t[]){255, 0, 0, 0}, 4);
     put("artnet", "artipprog", b, 34);
+    memset(b, 0, sizeof(b));
+    pk_art_header(b, 0x2100);              /* another node's ArtPollReply */
+    memcpy(&b[10], (uint8_t[]){2, 0, 0, 20}, 4);
+    b[19] = 0x02;                          /* SubSwitch */
+    snprintf((char *)&b[26], 18, "Stage left");
+    snprintf((char *)&b[44], 64, "Stage left rack");
+    b[173] = 2;                            /* NumPorts */
+    b[174] = 0x80;                         /* output */
+    b[175] = 0x40;                         /* input */
+    b[179] = 0x80;                         /* GoodInput[1]: data */
+    b[186 + 1] = 0x03;                     /* SwIn[1] */
+    b[190] = 0x05;                         /* SwOut[0] */
+    memcpy(&b[201], (uint8_t[]){0x00, 0x50, 0xC2, 9, 8, 7}, 6);
+    b[211] = 1;                            /* BindIndex */
+    put("artnet", "artpollreply", b, 239);
 
     /* ---- E1.31 ---- */
     static const uint8_t cid[16] = {0x5A, 0x1C, 0xE0, 0x01, 0x02, 0x03, 0x04, 0x05,
@@ -78,8 +93,7 @@ int main(int argc, char **argv)
     s.start_code = 0x00; s.options = 0x40 | 0x80;
     put("sacn", "terminated-preview", b, pk_sacn_data(b, &s, lv, 0));
     put("sacn", "sync", b, pk_sacn_sync(b, cid, 3, 7));
-    pk_sacn_sync(b, cid, 3, 7);
-    pk_be32(&b[40], 0x00000002);           /* universe discovery */
-    put("sacn", "discovery", b, 49);
+    static const uint16_t list[] = {1, 2, 3, 100, 63999};
+    put("sacn", "discovery", b, pk_sacn_discovery(b, cid, "Fuzz Console", 0, 0, list, 5));
     return 0;
 }
