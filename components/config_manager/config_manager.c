@@ -132,6 +132,8 @@ static void port_defaults(port_config_t *p, uint16_t artnet, uint16_t sacn)
     p->out_slots = CONFIG_DMX_SLOTS_MAX;
     p->startup_scene = 0;
     p->failsafe_scene = 0;
+    p->loss_behavior = LOSS_AS_NODE;
+    p->delta_output = false;
     memset(p->rules, 0, sizeof(p->rules));
     p->rule_count = 0;
     p->local_inputs = 0;
@@ -337,6 +339,7 @@ static bool sanitize_port(port_config_t *p, uint16_t def_artnet, uint16_t def_sa
     CLAMP_FIELD(p->break_us, CONFIG_DMX_BREAK_MIN, CONFIG_DMX_BREAK_MAX, CONFIG_DMX_BREAK_DEFAULT);
     CLAMP_FIELD(p->mab_us, CONFIG_DMX_MAB_MIN, CONFIG_DMX_MAB_MAX, CONFIG_DMX_MAB_DEFAULT);
     CLAMP_FIELD(p->out_slots, CONFIG_DMX_SLOTS_MIN, CONFIG_DMX_SLOTS_MAX, CONFIG_DMX_SLOTS_MAX);
+    CLAMP_FIELD(p->loss_behavior, LOSS_AS_NODE, LOSS_LAST, LOSS_AS_NODE);
 
     /* Settings for features this firmware was built without (menuconfig:
      * ESP-NODE > Features) fall back to what the node can do */
@@ -348,6 +351,10 @@ static bool sanitize_port(port_config_t *p, uint16_t def_artnet, uint16_t def_sa
 #if !CONFIG_NODE_SCENES
     if (p->startup_scene || p->failsafe_scene) {
         p->startup_scene = p->failsafe_scene = 0;
+        changed = true;
+    }
+    if (p->loss_behavior == LOSS_SCENE) {
+        p->loss_behavior = LOSS_BLACKOUT;   /* no failsafe scene to show */
         changed = true;
     }
 #endif
@@ -406,6 +413,8 @@ void config_tester_port_settings(const config_t *c, int port, port_config_t *out
     out->out_slots = t->slots;
     out->startup_scene = 0;
     out->failsafe_scene = 0;
+    out->loss_behavior = LOSS_AS_NODE;
+    out->delta_output = false;
     out->local_inputs = 0;
     out->local_only = false;
     out->send_to = SEND_TO_ALL;
@@ -851,6 +860,8 @@ static cJSON *port_to_json(const port_config_t *p)
     cJSON_AddNumberToObject(o, "out_slots", p->out_slots);
     cJSON_AddNumberToObject(o, "startup_scene", p->startup_scene);
     cJSON_AddNumberToObject(o, "failsafe_scene", p->failsafe_scene);
+    cJSON_AddNumberToObject(o, "loss_behavior", p->loss_behavior);
+    cJSON_AddBoolToObject(o, "delta_output", p->delta_output);
     cJSON *rules = cJSON_AddArrayToObject(o, "rules");
     for (uint8_t i = 0; rules && i < p->rule_count && i < CONFIG_PORT_RULES_MAX; i++) {
         const port_rule_t *r = &p->rules[i];
@@ -1041,6 +1052,8 @@ static void port_from_json(const cJSON *obj, port_config_t *p, bool *had_sacn)
     if (json_get_int(obj, "out_slots", CONFIG_DMX_SLOTS_MIN, CONFIG_DMX_SLOTS_MAX, &v)) p->out_slots = v;
     if (json_get_int(obj, "startup_scene", 0, 255, &v)) p->startup_scene = v;
     if (json_get_int(obj, "failsafe_scene", 0, 255, &v)) p->failsafe_scene = v;
+    if (json_get_int(obj, "loss_behavior", LOSS_AS_NODE, LOSS_LAST, &v)) p->loss_behavior = (int8_t)v;
+    json_get_bool(obj, "delta_output", &p->delta_output);
     /* "rules" replaces the whole list; bad entries are dropped */
     const cJSON *rules = cJSON_GetObjectItemCaseSensitive(obj, "rules");
     if (cJSON_IsArray(rules)) {

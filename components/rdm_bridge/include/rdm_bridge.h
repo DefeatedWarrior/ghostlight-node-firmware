@@ -38,6 +38,9 @@ typedef struct {
     uint32_t rdm_responses;
     uint32_t rdm_timeouts;
     uint32_t rdm_rejected;
+    uint32_t rdm_retries;        /**< GETs asked again after a lost reply */
+    uint32_t rdm_expired;        /**< waited over 3 s in the queue: dropped */
+    uint32_t rdm_queue_full;     /**< arrived with the queue full: dropped */
 } rdm_bridge_stats_t;
 
 void rdm_bridge_get_stats(rdm_bridge_stats_t *stats);

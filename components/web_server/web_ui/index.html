@@ -468,6 +468,15 @@ td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
             <button type="button" class="btn" onclick="app.setTesterMode(false)">Back to node mode</button>
         </div>
 
+        <div class="banner warn" id="safeBanner" role="alert" hidden>
+            <div class="b-icon"><svg class="i" viewBox="0 0 24 24"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17.5v.01"/></svg></div>
+            <div class="b-text">
+                <strong>Safe mode: the DMX ports are off</strong>
+                <small id="safeNotice"></small>
+            </div>
+            <button type="button" class="btn" onclick="app.leaveSafeMode()">Start the DMX ports</button>
+        </div>
+
         <div class="banner warn" id="settingsBanner" role="alert" hidden>
             <div class="b-icon"><svg class="i" viewBox="0 0 24 24"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17.5v.01"/></svg></div>
             <div class="b-text">
@@ -548,8 +557,9 @@ td input[type=number] { width: 78px; min-height: 30px; padding: 4px 8px; }
                                 <option value="1">Blackout (zero)</option>
                                 <option value="2">Full (every channel at 255)</option>
                                 <option value="3" data-feature="scenes">Failsafe scene (set per port)</option>
+                                <option value="4">Stop output (send nothing)</option>
                             </select>
-                            <small class="help">The Art-Net failsafe. Not used at power-on, before any data arrived.</small>
+                            <small class="help">The Art-Net failsafe, for every port that doesn't set its own. "Stop output" leaves it to the fixtures: most hold, some fade out. Not used at power-on, before any data arrived.</small>
                         </div>
                         <div class="field" data-feature="sacn">
                             <label for="mfPrio">sACN send priority</label>

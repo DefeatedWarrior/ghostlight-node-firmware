@@ -129,6 +129,10 @@ esp_err_t merge_engine_set_loss_behavior(uint8_t port, loss_behavior_t loss, con
 /** true while the port shows its failsafe look (sources lost) */
 bool merge_engine_in_failsafe(uint8_t port);
 
+/** true while the port should send no DMX at all: every source is lost and
+ *  its loss behaviour is LOSS_STOP_OUTPUT (and no local levels are up) */
+bool merge_engine_output_stopped(uint8_t port);
+
 /** Feed one received packet to a port */
 esp_err_t merge_engine_push(uint8_t port, const merge_input_t *in);
 

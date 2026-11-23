@@ -110,6 +110,7 @@ typedef struct {
     volatile int64_t web_identify_until; /* web "Identify" button, 0 = off */
     volatile uint8_t startup_mask;       /* ports showing their power-on scene */
     bool tester;                         /* started in DMX tester mode (no Art-Net / sACN) */
+    volatile bool safe_mode;             /* boot-loop guard: DMX ports off (app_boot_guard.c) */
 } app_state_t;
 
 extern app_state_t g_app;
@@ -148,7 +149,7 @@ void app_on_sacn_discovery(const uint8_t *cid, const char *source_name, uint32_t
                            uint8_t page, uint8_t last_page, const uint8_t *universes_be,
                            uint16_t count, void *user_data);
 void app_update_sacn_groups(void);
-void app_dmx_frame_source(uint8_t port, uint8_t *data, void *user_data);
+bool app_dmx_frame_source(uint8_t port, uint8_t *data, void *user_data);
 void app_on_dmx_input(uint8_t port, const uint8_t *data, size_t size, void *user_data);
 void app_on_dmx_loss(uint8_t port, void *user_data);
 
@@ -176,3 +177,9 @@ void app_web_identify(uint32_t seconds);
 uint32_t app_web_identify_left(void);
 /* Starts the reset button and port LED tasks (if the board has them) */
 void app_indicator_start_tasks(void);
+
+/* app_boot_guard.c */
+void app_boot_guard_begin(void);         /* right after diag_init() */
+void app_boot_guard_tick(void);          /* from the main loop */
+const char *app_safe_mode_notice(void);  /* NULL unless in safe mode */
+void app_leave_safe_mode(void);

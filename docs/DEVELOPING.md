@@ -38,9 +38,15 @@ to always know which board you are building, use `tools/build.sh`.
 
 `tools/check_compile.sh` is a quick compile-only check that works without
 ESP-IDF installed. It uses the Arduino-ESP32 toolchain. It doesn't link, so it
-can't replace a real build. `BOARD=<board>` checks another board's pin
-header (for example `BOARD=esp32s3-devkitc tools/check_compile.sh` for the
-Wi-Fi-only board), and `FEATURES=none` checks with every feature switch off.
+can't replace a real build. `BOARD=<board>` checks another board with its
+own chip, PSRAM and pin header (for example `BOARD=esp32-devkitc` uses the
+ESP32 compiler and no PSRAM), and `FEATURES=none` checks with every feature
+switch off. Any warning fails the check.
+
+The web UI's build date is the time the app was linked:
+`tools/stamp_build_date.py` writes it into the app description after each
+link (ESP-IDF's own `__DATE__` only changes on a clean build).
+`SOURCE_DATE_EPOCH` sets it for reproducible builds.
 
 ## Boards
 
@@ -231,6 +237,39 @@ then the failsafe). The input port keeps sending to the network as before.
 An input the port no longer takes is dropped from the merge at once.
 Nothing is routed in tester mode or during the loopback self-test.
 
+## Loss behaviour and delta output
+
+Each output port can have its own behaviour for when every source is lost,
+or follow the node's (`merge.loss_behavior`, "Merging and failsafe"):
+
+```json
+"port1": {"loss_behavior": 4, "delta_output": true}
+```
+
+`loss_behavior` is -1 for the node's (the default), or 0 hold the last look,
+1 blackout, 2 full, 3 the port's failsafe scene (only with scenes built in),
+4 stop output. "Stop output" sends nothing at all until a source comes
+back, so the fixtures do what they do on a DMX loss (most hold, some fade
+out): the frame source (`app_dmx_frame_source()`) returns false while
+`merge_engine_output_stopped()` says so, and the output task skips the
+frame. A local layer (a scene, the web console) keeps the output going.
+The node's own setting can also be "stop output". ArtAddress AcFail*
+commands set the port's own value when it has one, otherwise the node's,
+and each port's ArtPollReply reports its own failsafe in Status3 (stop
+output reports hold, as Art-Net has no code for it).
+
+Delta output (`delta_output`, ArtAddress AcStyleDelta 0xA0 / AcStyleConst
+0xB0, GoodOutputB bit 6 clear) still looks at the levels at the port's
+refresh rate but sends a frame only when they changed, and the same frame
+again every 800 ms (`DMX_DELTA_KEEPALIVE_MS`, as sACN repeats unchanged
+data) so fixtures don't see a loss. It follows content, not packets:
+consoles often resend unchanged data at full rate. Scenes, fades and test
+patterns change the levels too, so they need nothing special. Tester mode
+always sends continuously and has no loss behaviour of its own.
+
+ArtPollReply's VersInfo is the major and minor number of `PROJECT_VER`
+(1.2.0 gives 0x0102); it used to be fixed at 1.0.
+
 ## Other Art-Net nodes
 
 `artnet_receiver` parses other nodes' ArtPollReply
@@ -402,6 +441,19 @@ loop. Each wakes at least every second; a task stuck for 10 s restarts the
 node and leaves a crash report. The web server is not watched: a stuck web
 page is better than a restart that blacks out the DMX outputs.
 
+## Boot-loop guard (safe mode)
+
+A crash within a minute of starting, three times in a row, makes the next
+start a safe one (`main/app_boot_guard.c`): the network, the web UI and
+Art-Net work as usual, but every DMX port stays off. The count lives in RTC
+memory (`RTC_NOINIT_ATTR`), which a crash, watchdog or brown-out reset keeps
+and power-on clears; it goes back to zero once the node has run for a
+minute. `GET /api/system/info` has the reason as `safe_mode`, the web UI
+shows it as a banner, and `POST /api/system/safe-mode/leave` ("Start the
+DMX ports") starts the ports. The Art-Net node report says so too. A
+restart without a crash starts normally. New firmware that crashes before
+it is marked valid (30 s) is rolled back by the bootloader first.
+
 ## DMX input frames
 
 The next DMX frame starts overwriting esp_dmx's receive buffer one break
@@ -467,6 +519,57 @@ In `dmx_handler`:
   160 bytes per possible fixture while it runs.
 - The Art-Net RDM relay only passes on requests, and only the answer from
   the fixture that was asked.
+- Discovery reads each fixture's details up to 3 times when a reply is
+  lost or garbled (`ask_again()`), as the bridge does for GETs.
+- Setting an address (`dmx_handler_rdm_set_address()`): a fixture that
+  answers ACK_TIMER has taken it, so the handler waits and reads the
+  address back. A broadcast gets no answer by design and counts as done
+  once it was sent.
+- `dmx_handler_stop_port()` waits for its tasks as long as they take (the
+  task watchdog catches one that is stuck), so a port is never restarted
+  under a task that is still running.
+- A responder refuses a start address whose footprint would run past slot
+  512 (`dmx_start_address_fits()` in esp_dmx's `device.c`), the same rule
+  the boot check uses to reset one.
+
+`rdm_bridge` (RDM over Art-Net) queues requests in a ring buffer of slim
+messages: 8 KiB in PSRAM where there is PSRAM, else 2 KiB of internal RAM,
+which holds about 30 typical requests. A request that waited more than 3 s
+is dropped (the console has given up), and a GET whose reply was lost or
+garbled is sent again, up to 3 tries, except QUEUED_MESSAGE and
+STATUS_MESSAGE (the fixture hands those over only once). SETs are never
+repeated. `rdm_retries`, `rdm_expired` and `rdm_queue_full` count them.
+`POST /api/rdm/discover` starts discovery on every RDM port and answers
+202 at once (`{"started":[1]}`); the web UI follows `rdm_discovering` in
+`/api/ports/status` and then reads the device list.
+
+`tools/artnet_rdm_test.py` tests RDM over Art-Net against a running node:
+it reads the device list with ArtTodRequest, then sends each device RDM
+requests in ArtRdm and checks the answers, including a burst sent all at
+once. `--ghostlight` adds the checks for a Ghostlight port in RDM
+responder mode, `--write` changes the label, address and identify and puts
+each back. Standard library only; it needs UDP port 6454 on your computer.
+
+## W5500 Ethernet
+
+- **Reset pulse:** where the board wires the W5500's RSTn
+  (`BOARD_ETH_RST_GPIO`: ghostlight-rev1, esp32-devkitc), the driver holds it
+  low for 1 ms and waits 3 ms before using the chip (`w5500_reset_hw()` in
+  `network_manager.c`, replacing ESP-IDF 5.2's 100 us). The datasheet asks
+  for at least 500 us low and up to 1 ms for the PLL to lock after release.
+  The prototype has no reset line.
+- **A chip gone deaf:** a W5500 can stop receiving while its link stays up
+  (a glitch resets it and its socket and MAC address are gone). The netif
+  input is wrapped to count frames (`eth_input()`), and the network
+  supervisor calls `network_ethernet_watch()` 4 times a second. With the MAC
+  filter off every frame on the segment counts, so after 60 s of nothing
+  with the link up the chip is reset and set up again
+  (`eth_restart_chip()`): driver, netif, sockets and mDNS stay, the address
+  comes back as after a cable replug. A try that brings nothing back doubles
+  the wait, up to 16 minutes, so a network that really is silent costs a
+  short break now and then. `restarts` in the `ethernet` object of
+  `GET /api/network/status` counts them. The logic is `eth_watch.c`
+  (host-tested); the re-setup itself has not been seen on hardware.
 
 ## Captive portal
 
@@ -584,7 +687,9 @@ and the core logic:
 | `test_webstream.c` | the chunked JSON writer for large responses: the same text as cJSON, chunk edges, a failed send |
 | `test_dmx_rx.c` | esp_dmx's receive interrupt and `dmx_receive()`: short, cut, growing and mixed-length frames, stray breaks, other start codes, RDM between frames; each with both orders of break and framing error, and a task that wakes late |
 | `test_dmx_rdm.c` | the whole esp_dmx driver: RDM responder against any request, controller matching, waits and gaps, break / MAB, lock release, install and delete |
-| `test_dmx_handler.c` | `dmx_handler.c` with a fake driver: RDM discovery with lost replies and pulled cables, the list limit, the raw relay, ACK_TIMER, saving, the install core |
+| `test_dmx_handler.c` | `dmx_handler.c` with a fake driver: RDM discovery with lost replies and pulled cables, the list limit, the raw relay, ACK_TIMER, setting addresses (ACK_TIMER, broadcast), stopping a slow task, saving, the install core, the output task's stop output and delta output |
+| `test_rdm_bridge.c` | the RDM over Art-Net queue: bursts, a full queue, old requests, GET retries and what is never retried |
+| `test_eth_watch.c` | when a deaf W5500 is set up again: traffic, no link, the back-off, recovery, clock wrap |
 | `test_fwtag.c` | finding the board marker in a firmware upload: in one piece, split across every chunk boundary, false starts, bad IDs |
 
 You need `make` and a C compiler (clang or gcc):

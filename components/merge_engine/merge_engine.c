@@ -334,6 +334,12 @@ esp_err_t merge_engine_set_loss_behavior(uint8_t port, loss_behavior_t loss, con
     return ESP_OK;
 }
 
+bool merge_engine_output_stopped(uint8_t port)
+{
+    port_ctx_t *ctx = ctx_for(port);
+    return ctx && ctx->failsafe && ctx->loss == LOSS_STOP_OUTPUT && !ctx->local_active;
+}
+
 bool merge_engine_in_failsafe(uint8_t port)
 {
     port_ctx_t *ctx = ctx_for(port);
@@ -722,6 +728,9 @@ esp_err_t merge_engine_get_output(uint8_t port, uint8_t *data)
             case LOSS_HOLD_LAST_LOOK: memcpy(out, ctx->last_net, 512); break;
             case LOSS_FULL:           memset(out, 255, 512); break;
             case LOSS_SCENE:          memcpy(out, ctx->loss_scene, 512); break;
+            /* nothing is sent (merge_engine_output_stopped); the last look
+             * stays readable for the web UI */
+            case LOSS_STOP_OUTPUT:    memcpy(out, ctx->last_net, 512); break;
             case LOSS_BLACKOUT:
             default:
                 memset(out, 0, 512);
@@ -734,7 +743,7 @@ esp_err_t merge_engine_get_output(uint8_t port, uint8_t *data)
     if (failsafe != ctx->failsafe) {
         ctx->failsafe = failsafe;
         if (failsafe) {
-            static const char *names[] = {"hold last look", "zero", "full", "scene"};
+            static const char *names[] = {"hold last look", "zero", "full", "scene", "stop output"};
             ESP_LOGW(TAG, "Port %u: all sources lost, failsafe: %s", port,
                      ctx->loss <= LOSS_LAST ? names[ctx->loss] : "?");
         }

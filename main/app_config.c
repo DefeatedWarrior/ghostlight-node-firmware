@@ -98,11 +98,13 @@ static void set_routing(int p, route_t *r, const port_config_t *pc)
     r->send_to = pc->send_to;
 }
 
-/* Failsafe look of a port: LOSS_SCENE plays the port's failsafe scene
- * (zero if it has none or it was deleted) */
+/* Failsafe look of a port: its own loss behaviour or the node's.
+ * LOSS_SCENE plays the port's failsafe scene (zero if it has none or it
+ * was deleted) */
 static void apply_loss_behavior(int p, const config_t *c, const port_config_t *pc)
 {
-    loss_behavior_t loss = c->merge.loss_behavior;
+    loss_behavior_t loss = pc->loss_behavior >= 0 ? (loss_behavior_t)pc->loss_behavior
+                                                  : c->merge.loss_behavior;
 #if CONFIG_NODE_SCENES
     if (loss != LOSS_SCENE) {
         merge_engine_set_loss_behavior(p, loss, NULL);
@@ -143,6 +145,13 @@ void app_apply_config(void)
             pc = &tester_pc;
         }
 #endif
+        port_config_t safe_pc;
+        if (g_app.safe_mode) {
+            /* boot-loop guard: the DMX hardware stays off (app_boot_guard.c) */
+            safe_pc = *pc;
+            safe_pc.mode = DMX_MODE_DISABLED;
+            pc = &safe_pc;
+        }
         route_t *r = &g_app.route[p - 1];
         const port_config_t *old = &g_app.applied[p - 1];
         bool hw_changed = !g_app.applied_valid || pc->mode != old->mode ||
@@ -213,6 +222,7 @@ void app_apply_config(void)
         r->artnet = pc->universe_primary;
         r->artnet_backup = pc->universe_secondary;
         r->sacn = pc->sacn_universe;
+        dmx_handler_set_output_delta(p, pc->delta_output);
         set_routing(p, r, pc);
         r->mode = pc->mode;
 #if CONFIG_NODE_RDM

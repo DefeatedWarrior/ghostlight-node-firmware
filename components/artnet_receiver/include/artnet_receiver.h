@@ -80,6 +80,8 @@ typedef enum {
 #define ARTNET_AC_ARTNET_SEL0    0x60
 #define ARTNET_AC_ACN_SEL0       0x70
 #define ARTNET_AC_CLEAR_OP0      0x90
+#define ARTNET_AC_STYLE_DELTA0   0xA0   /* output a frame as each ArtDmx arrives */
+#define ARTNET_AC_STYLE_CONST0   0xB0   /* continuous output */
 #define ARTNET_AC_RDM_ENABLE0    0xC0
 #define ARTNET_AC_RDM_DISABLE0   0xD0
 
@@ -112,6 +114,8 @@ typedef struct {
     bool rdm_background;    /**< incremental background discovery enabled */
     uint8_t responder_uid[6]; /**< RDM responder UID (zero if not a responder) */
     bool input_errors;      /**< input: receive errors detected */
+    bool delta;             /**< output: delta (frame per packet), not continuous */
+    uint8_t failsafe;       /**< artnet_failsafe_t of this port */
 } artnet_port_status_t;
 
 /** Node status, filled by the application on demand */

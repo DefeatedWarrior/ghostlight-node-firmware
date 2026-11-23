@@ -65,8 +65,10 @@ typedef enum {
     LOSS_BLACKOUT,             // go to zero
     LOSS_FULL,                 // every channel at full
     LOSS_SCENE,                // the port's failsafe scene (zero if it has none)
+    LOSS_STOP_OUTPUT,          // send no DMX: the fixtures do what they do on signal loss
 } loss_behavior_t;
-#define LOSS_LAST LOSS_SCENE
+#define LOSS_LAST LOSS_STOP_OUTPUT
+#define LOSS_AS_NODE (-1)          // port_config_t.loss_behavior: the node's (merge.loss_behavior)
 
 /* DMX output timing limits (E1.11: break >= 92 us, MAB >= 12 us; RDM
  * controllers need a break of 176-352 us) */
@@ -138,6 +140,13 @@ typedef struct {
     /* Scenes (scene ids, 0 = none) */
     uint8_t startup_scene;        // played at power-on until a console sends data
     uint8_t failsafe_scene;       // output when sources are lost and loss = LOSS_SCENE
+    /* Once every source is lost (output ports): a loss_behavior_t, or
+     * LOSS_AS_NODE for the node's merge.loss_behavior. JSON: "loss_behavior" */
+    int8_t loss_behavior;
+    /* Delta output (output ports): a frame when new data arrives, plus one
+     * every 800 ms to keep the fixtures listening, instead of a steady
+     * refresh. JSON: "delta_output". Art-Net: AcStyleDelta / AcStyleConst. */
+    bool delta_output;
 
     /* Output processing (output ports, see port_rule_t) */
     port_rule_t rules[CONFIG_PORT_RULES_MAX];

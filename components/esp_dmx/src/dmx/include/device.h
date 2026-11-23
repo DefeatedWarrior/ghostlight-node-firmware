@@ -33,6 +33,16 @@ uint16_t dmx_get_start_address(dmx_port_t dmx_num);
 bool dmx_set_start_address(dmx_port_t dmx_num, uint16_t dmx_start_address);
 
 /**
+ * @brief Whether the current personality's footprint fits at this start
+ * address, that is whether its last slot is 512 or below. (WIFIDMX)
+ *
+ * @param dmx_num The DMX port number.
+ * @param dmx_start_address The start address to check.
+ * @return true if the address can be used.
+ */
+bool dmx_start_address_fits(dmx_port_t dmx_num, uint32_t dmx_start_address);
+
+/**
  * @brief Gets the current personality of the DMX driver.
  *
  * @param dmx_num The DMX port number.

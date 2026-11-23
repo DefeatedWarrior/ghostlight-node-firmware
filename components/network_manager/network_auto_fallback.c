@@ -525,6 +525,8 @@ static void tick(int64_t now)
     } else if (!eth_wanted && eth.running) {
         network_ethernet_disconnect();
         network_get_eth_info(&eth);
+    } else if (eth_wanted) {
+        network_ethernet_watch();   /* a W5500 gone deaf is set up again */
     }
     if (eth.link) {
         if (!s.eth_link_ms) s.eth_link_ms = now;

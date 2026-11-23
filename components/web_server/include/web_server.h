@@ -72,6 +72,8 @@ esp_err_t web_server_init(const web_server_config_t *config);
 typedef struct {
     void (*identify)(uint32_t seconds);    /**< flash the status LED for @p seconds, 0 = stop */
     uint32_t (*identify_left)(void);       /**< seconds of identify left */
+    const char *(*safe_mode)(void);        /**< why the DMX ports are off, NULL = normal */
+    void (*leave_safe_mode)(void);         /**< start the DMX ports after all */
 } web_server_hooks_t;
 
 /** @p hooks must stay valid (static) */

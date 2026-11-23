@@ -270,19 +270,21 @@ void app_update_sacn_groups(void)
 /* DMX output task asks for every frame it sends. A running test pattern
  * (web DMX tools / self-test) replaces the output completely; otherwise the
  * port's patch / limit / park rules shape the merged levels. */
-void app_dmx_frame_source(uint8_t port, uint8_t *data, void *user_data)
+bool app_dmx_frame_source(uint8_t port, uint8_t *data, void *user_data)
 {
 #if CONFIG_NODE_DMX_TOOLS
-    if (dmx_test_fill(port, data)) return;
+    if (dmx_test_fill(port, data)) return true;
 #endif
 #if CONFIG_NODE_TESTER
     if (g_app.tester) {
         dmx_tester_get_levels(port, data);
-        return;
+        return true;
     }
 #endif
     merge_engine_get_output(port, data);
     port_rules_apply(port, data);
+    /* loss behaviour "stop output": nothing goes out until a source is back */
+    return !merge_engine_output_stopped(port);
 }
 
 // ============================================================================

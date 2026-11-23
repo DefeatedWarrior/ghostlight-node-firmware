@@ -136,8 +136,9 @@ typedef void (*dmx_loss_callback_t)(uint8_t port, void *user_data);
 /** Discovery finished (called from the discovery task, also when aborted) */
 typedef void (*rdm_discovery_callback_t)(uint8_t port, uint8_t device_count, bool aborted,
                                          void *user_data);
-/** Output frame source: fill @p data (512 slots) for the next frame */
-typedef void (*dmx_frame_source_t)(uint8_t port, uint8_t *data, void *user_data);
+/** Output frame source: fill @p data (512 slots) for the next frame.
+ *  @return false to send nothing this time (the output stays silent) */
+typedef bool (*dmx_frame_source_t)(uint8_t port, uint8_t *data, void *user_data);
 /** RDM responder identify state changed */
 typedef void (*dmx_identify_callback_t)(uint8_t port, bool identify, void *user_data);
 
@@ -174,6 +175,11 @@ esp_err_t dmx_handler_send_dmx(uint8_t port, const uint8_t *data);
 esp_err_t dmx_handler_set_frame_source(uint8_t port, dmx_frame_source_t source, void *user_data);
 /** Send the next output frame now instead of at the next frame slot (sync) */
 esp_err_t dmx_handler_trigger_output(uint8_t port);
+/** Delta output: the port still looks at its rate, but sends a frame only
+ *  when the levels changed, and the same frame again every
+ *  DMX_DELTA_KEEPALIVE_MS. Live. */
+esp_err_t dmx_handler_set_output_delta(uint8_t port, bool delta);
+#define DMX_DELTA_KEEPALIVE_MS 800   /* as sACN repeats unchanged data */
 
 esp_err_t dmx_handler_read_dmx(uint8_t port, uint8_t *data, uint32_t timeout_ms);
 esp_err_t dmx_handler_set_channel(uint8_t port, uint16_t channel, uint8_t value);
