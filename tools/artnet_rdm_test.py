@@ -71,7 +71,8 @@ class Answer:
             return 'NACK %s' % NACK_REASON.get(self.reason, self.reason)
         if self.kind == 'ACK_TIMER':
             return 'ACK_TIMER %s ms' % (self.reason * 100 if self.reason is not None else '?')
-        return '%s, %d bytes' % (self.kind, len(self.pd))
+        return '%s, %d bytes%s' % (self.kind, len(self.pd),
+                                   ', pid 0x%04x' % self.pid if self.pid in (0x0030,) else '')
 
 
 class Node:
@@ -160,7 +161,9 @@ class Node:
             return None
         rtype, cc_r, pid_r, pdl = r[15], r[19], struct.unpack('>H', r[20:22])[0], r[22]
         pd = r[23:23 + pdl]
-        if cc_r != cc + 1 or pid_r != pid:
+        # QUEUED_MESSAGE is answered with the queued message's own PID, or with
+        # STATUS_MESSAGES when nothing is queued (E1.20 10.3.1)
+        if cc_r != cc + 1 or (pid_r != pid and pid != 0x0020):
             return Answer('mismatch: cc 0x%02x pid 0x%04x' % (cc_r, pid_r))
         word = struct.unpack('>H', pd[:2])[0] if len(pd) >= 2 else None
         kind = RESPONSE.get(rtype, 'type %d' % rtype)
@@ -272,7 +275,7 @@ def test_device(node, uid, args, c):
 
     if args.ghostlight:
         print('  -- Ghostlight responder')
-        c.check('GET QUEUED_MESSAGE advisory', node.ask(uid, GET, 0x0020, b'\x02'), 'ACK')
+        c.check('GET QUEUED_MESSAGE advisory', node.ask(uid, GET, 0x0020, b'\x02'), 'ACK')   # any PID
         c.check('GET PID 0', node.ask(uid, GET, 0x0000), 'NACK UNKNOWN_PID')
         c.check('GET sub-device 5 (none exist)', node.ask(uid, GET, 0x0060, sub=5),
                 'NACK SUB_DEVICE_OUT_OF_RANGE')
@@ -307,9 +310,12 @@ def test_device(node, uid, args, c):
             c.check('SET DEVICE_LABEL back', node.ask(uid, SET, 0x0082, label.pd), 'ACK')
             c.check('GET DEVICE_LABEL (the original)', node.ask(uid, GET, 0x0082),
                     lambda a: a.kind == 'ACK' and a.pd == label.pd)
-        if address.kind == 'ACK' and footprint:
+        last = 513 - footprint     # the highest address the footprint fits at
+        if address.kind == 'ACK' and footprint and last <= 1:
+            print('  %-46s skipped: a %d-slot footprint only fits at 1' % ('SET DMX_START_ADDRESS', footprint))
+        elif address.kind == 'ACK' and footprint:
             old = struct.unpack('>H', address.pd)[0]
-            new = old + 1 if old + footprint <= 512 else old - 1
+            new = old + 1 if old + 1 <= last else old - 1
             c.check('SET DMX_START_ADDRESS %d' % new,
                     node.ask(uid, SET, 0x00F0, struct.pack('>H', new)), 'ACK')
             c.check('GET DMX_START_ADDRESS', node.ask(uid, GET, 0x00F0),
