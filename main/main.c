@@ -157,6 +157,7 @@ static void log_stats(void)
 void app_main(void)
 {
     diag_init();   /* first: keeps the log for the web UI, notes the reset reason */
+    app_boot_guard_begin();   /* after diag_init: needs the reset reason */
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "ESP-NODE-2RDM firmware %s (%s %s), ESP-IDF %s, board %s",
              app->version, app->date, app->time, esp_get_idf_version(), BOARD_NAME);
@@ -281,6 +282,8 @@ void app_main(void)
     static const web_server_hooks_t hooks = {
         .identify = app_web_identify,
         .identify_left = app_web_identify_left,
+        .safe_mode = app_safe_mode_notice,
+        .leave_safe_mode = app_leave_safe_mode,
     };
     web_server_set_hooks(&hooks);
     ESP_ERROR_CHECK(web_server_init(NULL));
@@ -291,7 +294,12 @@ void app_main(void)
 
     app_indicator_start_tasks();   /* reset button, port LEDs */
 
-    artnet_receiver_set_node_report(ARTNET_RC_POWER_OK, "Power On Tests successful");
+    if (g_app.safe_mode) {
+        artnet_receiver_set_node_report(ARTNET_RC_DMX_ERROR,
+                                        "Safe mode after repeated crashes: DMX ports off");
+    } else {
+        artnet_receiver_set_node_report(ARTNET_RC_POWER_OK, "Power On Tests successful");
+    }
     ESP_LOGI(TAG, "System initialized");
 
     bool ota_marked = false;
@@ -351,6 +359,7 @@ void app_main(void)
         }
 
         int64_t now = esp_timer_get_time();
+        app_boot_guard_tick();
         if (!ota_marked && now > OTA_VALID_AFTER_US) {
             /* Healthy for 30 s: keep this firmware (no-op unless it was
              * just installed by OTA with rollback enabled) */

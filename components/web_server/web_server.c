@@ -157,6 +157,7 @@ static esp_err_t api_system_info_handler(httpd_req_t *req);
 static esp_err_t api_system_stats_handler(httpd_req_t *req);
 static esp_err_t api_system_restart_handler(httpd_req_t *req);
 static esp_err_t api_system_notice_clear_handler(httpd_req_t *req);
+static esp_err_t api_system_safe_mode_leave_handler(httpd_req_t *req);
 static esp_err_t api_system_factory_reset_handler(httpd_req_t *req);
 static esp_err_t api_system_ota_handler(httpd_req_t *req);
 static esp_err_t api_system_firmware_rollback_handler(httpd_req_t *req);
@@ -293,7 +294,7 @@ esp_err_t web_server_start(void)
     // /api/network/wifi-scan + /api/ports/* x6 + /api/system/* x5 +
     // /api/rdm/discover + /api/rdm/identify + /api/scenes x3 (list/record/playback) +
     // /api/scenes/1..16 DELETE x16 + /ws = 43 routes → use 48 for headroom.
-    config.max_uri_handlers = 76 + 3 * CONFIG_DMX_PORTS + WEB_TESTER_ROUTES + WEB_SIGNAL_ROUTES;
+    config.max_uri_handlers = 77 + 3 * CONFIG_DMX_PORTS + WEB_TESTER_ROUTES + WEB_SIGNAL_ROUTES;
 
     // Remove WebSocket clients whenever their socket closes (browser tab
     // closed, WiFi dropped, LRU purge) - not only on a CLOSE frame.
@@ -421,6 +422,14 @@ esp_err_t web_server_start(void)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(server_state.server, &system_notice_clear_uri);
+
+    httpd_uri_t system_safe_mode_leave_uri = {
+        .uri = "/api/system/safe-mode/leave",
+        .method = HTTP_POST,
+        .handler = api_system_safe_mode_leave_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server_state.server, &system_safe_mode_leave_uri);
 
     httpd_uri_t system_factory_reset_uri = {
         .uri = "/api/system/factory-reset",
@@ -967,6 +976,7 @@ static esp_err_t api_network_status_handler(httpd_req_t *req)
         cJSON_AddStringToObject(eth, "gateway", sup.eth.ready ? sup.eth.gateway : "");
         snprintf(mac, sizeof(mac), MACSTR, MAC2STR(sup.eth.mac));
         cJSON_AddStringToObject(eth, "mac", mac);
+        cJSON_AddNumberToObject(eth, "restarts", sup.eth.restarts);
     }
 
     cJSON *wifi = cJSON_AddObjectToObject(json, "wifi");
@@ -1290,6 +1300,9 @@ static esp_err_t api_system_info_handler(httpd_req_t *req)
     /* Settings lost or restored at boot: the web UI shows it until dismissed */
     const char *notice = config_boot_notice();
     if (notice) cJSON_AddStringToObject(json, "settings_notice", notice);
+    /* Boot-loop guard: the DMX ports were left off */
+    const char *safe = s_hooks && s_hooks->safe_mode ? s_hooks->safe_mode() : NULL;
+    if (safe) cJSON_AddStringToObject(json, "safe_mode", safe);
 
     send_json_response(req, json, 200);
     cJSON_Delete(json);
@@ -1539,36 +1552,34 @@ static esp_err_t api_system_ota_handler(httpd_req_t *req)
 }
 
 /**
- * @brief POST /api/rdm/discover - Trigger RDM discovery and return results
+ * @brief POST /api/rdm/discover - Start a full RDM discovery on every RDM port
  *
- * Runs discovery synchronously on both ports (that are in RDM master mode)
- * and returns the combined device list. Discovery can take several seconds.
+ * Returns {"started":[ports]} at once. Every request shares one web server
+ * task, and a discovery of many fixtures takes far longer than a request
+ * should hold it, so the page follows rdm_discovering in /api/ports/status
+ * and then reads /api/rdm/devices.
  */
 static esp_err_t api_rdm_discover_handler(httpd_req_t *req)
 {
     server_state.total_requests++;
     if (!require_auth(req)) return ESP_OK;
 
-    /* Start discovery on every RDM-capable port at once (they run in
-     * parallel, interleaved with DMX output), then wait for them. */
-    bool started[CONFIG_DMX_PORTS + 1] = {false};
+    cJSON *json = cJSON_CreateObject();
+    cJSON *started = cJSON_AddArrayToObject(json, "started");
     for (int p = 1; p <= CONFIG_DMX_PORTS; p++) {
         if (!dmx_handler_rdm_available(p)) continue;
-        /* A background (incremental) pass may be running: let it finish,
-         * then do the full discovery that was asked for */
+        /* A background pass may be running: stop it (the list is kept; it
+         * ends within one RDM transaction) and do the full one asked for */
         if (dmx_handler_rdm_is_discovering(p)) {
-            dmx_handler_rdm_wait_discovery(p, 10000);
+            dmx_handler_rdm_abort_discovery(p);
+            dmx_handler_rdm_wait_discovery(p, 2000);
         }
         if (dmx_handler_rdm_discover(p) == ESP_OK) {
-            started[p] = true;
+            cJSON_AddItemToArray(started, cJSON_CreateNumber(p));
         }
     }
-    for (int p = 1; p <= CONFIG_DMX_PORTS; p++) {
-        if (started[p] && dmx_handler_rdm_wait_discovery(p, 20000) != ESP_OK) {
-            ESP_LOGW(TAG, "RDM discovery on port %d still running", p);
-        }
-    }
-    return api_rdm_devices_handler(req);
+    web_send_json(req, json, 202);
+    return ESP_OK;
 }
 
 /* A port's devices as JSON array items, one at a time: built as one document,
@@ -1744,6 +1755,21 @@ static esp_err_t api_system_notice_clear_handler(httpd_req_t *req)
     server_state.total_requests++;
     if (!require_auth(req)) return ESP_OK;
     config_boot_notice_clear();
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "status", "ok");
+    send_json_response(req, json, 200);
+    cJSON_Delete(json);
+    return ESP_OK;
+}
+
+/**
+ * @brief POST /api/system/safe-mode/leave - Start the DMX ports after a boot loop
+ */
+static esp_err_t api_system_safe_mode_leave_handler(httpd_req_t *req)
+{
+    server_state.total_requests++;
+    if (!require_auth(req)) return ESP_OK;
+    if (s_hooks && s_hooks->leave_safe_mode) s_hooks->leave_safe_mode();
     cJSON *json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "status", "ok");
     send_json_response(req, json, 200);

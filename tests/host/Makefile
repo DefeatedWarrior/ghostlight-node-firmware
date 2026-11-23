@@ -40,6 +40,7 @@ MERGE_C  := $(COMP)/merge_engine/merge_engine.c
 RULES_C  := $(COMP)/port_rules/port_rules.c
 SRCMON_C := $(COMP)/source_monitor/source_monitor.c
 DNS_C    := $(COMP)/network_manager/dns_reply.c
+ETHW_C   := $(COMP)/network_manager/eth_watch.c
 FWTAG_C  := $(COMP)/web_server/fw_tag.c
 STREAM_C := $(COMP)/web_server/web_stream.c
 # esp_dmx's receive path gets its own stubs, and is vendored code, so no -Werror.
@@ -64,7 +65,12 @@ CFLAGS_H := -std=gnu11 -g -O1 -Wall -Wno-unknown-pragmas -Wno-format $(SAN) -fno
             -I$(COMP)/dmx_handler -I$(COMP)/dmx_handler/include -I$(COMP)/board/include \
             -I$(COMP)/config_manager/include -include stubs/sdkconfig.h -include handler_host.h
 
-TESTS    := test_artnet test_sacn test_merge test_config test_rules test_srcmon test_dns test_fwtag test_webstream test_dmx_rx test_dmx_rdm test_dmx_handler
+# test_rdm_bridge: the real rdm_bridge.c, dmx_handler and Art-Net faked.
+BRIDGE_C := $(COMP)/rdm_bridge/rdm_bridge.c
+CFLAGS_B := $(CFLAGS_H) -Istubs_bridge -I$(COMP)/rdm_bridge -I$(COMP)/rdm_bridge/include \
+            -I$(COMP)/artnet_receiver/include
+
+TESTS    := test_artnet test_sacn test_merge test_config test_rules test_srcmon test_dns test_eth_watch test_fwtag test_webstream test_dmx_rx test_dmx_rdm test_dmx_handler test_rdm_bridge
 FUZZERS  := fuzz_artnet fuzz_sacn fuzz_config
 HDRS     := $(wildcard stubs/*.h stubs/*/*.h) fakes.h test.h packets.h
 
@@ -94,6 +100,9 @@ $(BUILD)/test_srcmon: test_srcmon.c $(SRCMON_C) $(FAKES) $(HDRS) | $(BUILD)
 $(BUILD)/test_dns: test_dns.c $(DNS_C) $(HDRS) | $(BUILD)
 	$(CC) $(CFLAGS_T) -o $@ test_dns.c $(DNS_C)
 
+$(BUILD)/test_eth_watch: test_eth_watch.c $(ETHW_C) $(COMP)/network_manager/eth_watch.h | $(BUILD)
+	$(CC) $(CFLAGS_T) -o $@ test_eth_watch.c $(ETHW_C)
+
 $(BUILD)/test_fwtag: test_fwtag.c $(FWTAG_C) $(COMP)/web_server/fw_tag.h test.h | $(BUILD)
 	$(CC) $(CFLAGS_T) -o $@ test_fwtag.c $(FWTAG_C)
 
@@ -108,6 +117,9 @@ $(BUILD)/test_dmx_rdm: test_dmx_rdm.c $(RDM_SRC) $(wildcard $(DMX_SRC)/dmx/hal/*
 
 $(BUILD)/test_dmx_handler: test_dmx_handler.c $(HANDLER_C) $(COMP)/dmx_handler/include/dmx_handler.h $(wildcard stubs_handler/*.h stubs_handler/*/*.h stubs_rdm/*/*.h) test.h | $(BUILD)
 	$(CC) $(CFLAGS_H) -o $@ test_dmx_handler.c
+
+$(BUILD)/test_rdm_bridge: test_rdm_bridge.c $(BRIDGE_C) $(COMP)/rdm_bridge/include/rdm_bridge.h $(wildcard stubs_bridge/*/*.h stubs_handler/*.h stubs_handler/*/*.h) test.h | $(BUILD)
+	$(CC) $(CFLAGS_B) -o $@ test_rdm_bridge.c
 
 # The fuzz harnesses with a plain main() that runs every file given to it:
 # replays the seed corpus under the unit-test compiler (no libFuzzer needed)

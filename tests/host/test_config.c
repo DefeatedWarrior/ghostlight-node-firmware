@@ -72,6 +72,8 @@ static void set_everything(config_t *c)
         p->rule_count = 3;
         p->local_inputs = (uint8_t)(CONFIG_PORT_BITS & ~(1u << i));   /* every other port */
         p->local_only = true;
+        p->loss_behavior = (int8_t)(i % 2 ? LOSS_STOP_OUTPUT : LOSS_SCENE);
+        p->delta_output = true;
         p->send_to = SEND_TO_LIST;
         p->send_count = 2;
         CHECK(config_parse_ipv4("10.2.70.20", &p->send_list[0]));
@@ -180,8 +182,9 @@ static void test_from_json_clamps_numbers(void)
         "\"port1\":{\"mode\":-3,\"universe_primary\":1e9,\"universe_secondary\":-50,"
         "\"sacn_universe\":0,\"protocol_mode\":7,\"merge_mode\":-1,\"out_rate_hz\":1000,"
         "\"break_us\":5,\"mab_us\":1e99,\"out_slots\":1,\"startup_scene\":300,"
-        "\"failsafe_scene\":-1e99,\"universe_offset\":99999},"
-        "\"merge\":{\"timeout_seconds\":0,\"loss_behavior\":4.5},"
+        "\"failsafe_scene\":-1e99,\"universe_offset\":99999,\"loss_behavior\":-7},"
+        "\"port2\":{\"loss_behavior\":40},"
+        "\"merge\":{\"timeout_seconds\":0,\"loss_behavior\":9.5},"
         "\"node_info\":{\"sacn_priority\":255}}"), ESP_OK);
     CHECK_EQ(cfg->network.mode, NET_MODE_LAST);
     CHECK_EQ(cfg->network.ap_channel, 1);
@@ -200,7 +203,9 @@ static void test_from_json_clamps_numbers(void)
     CHECK_EQ(p->failsafe_scene, 0);
     CHECK_EQ(p->universe_offset, 32767);
     CHECK_EQ(cfg->merge.timeout_seconds, 1);
-    CHECK_EQ(cfg->merge.loss_behavior, LOSS_SCENE);
+    CHECK_EQ(p->loss_behavior, LOSS_AS_NODE);
+    CHECK_EQ(cfg->ports[1].loss_behavior, LOSS_LAST);
+    CHECK_EQ(cfg->merge.loss_behavior, LOSS_LAST);
     CHECK_EQ(cfg->node_info.sacn_priority, 200);
     config_t c = *cfg;
     CHECK(!config_sanitize(&c));
@@ -584,6 +589,22 @@ static void test_local_dmx_sanitize(void)
     CHECK(!t.local_only);
 }
 
+static void test_port_loss_and_delta(void)
+{
+    CHECK_EQ(cfg->ports[0].loss_behavior, LOSS_AS_NODE);   /* defaults */
+    CHECK(!cfg->ports[0].delta_output);
+    CHECK_EQ(config_from_json("{\"port1\":{\"loss_behavior\":4,\"delta_output\":true}}"), ESP_OK);
+    CHECK_EQ(cfg->ports[0].loss_behavior, LOSS_STOP_OUTPUT);
+    CHECK(cfg->ports[0].delta_output);
+    CHECK_EQ(cfg->ports[1].loss_behavior, LOSS_AS_NODE);   /* other ports untouched */
+
+    /* the tester sends raw levels: no loss behaviour of its own, continuous */
+    port_config_t t;
+    config_tester_port_settings(cfg, 1, &t);
+    CHECK_EQ(t.loss_behavior, LOSS_AS_NODE);
+    CHECK(!t.delta_output);
+}
+
 static void test_local_dmx_update_problem(void)
 {
     struct { const char *json; bool ok; } cases[] = {
@@ -912,9 +933,10 @@ static void test_sanitize_clamps_every_field(void)
         p->break_us = 91;
         p->mab_us = 1001;
         p->out_slots = 23;
+        p->loss_behavior = LOSS_LAST + 1;
     }
     c.merge.timeout_seconds = 61;
-    c.merge.loss_behavior = (loss_behavior_t)4;
+    c.merge.loss_behavior = (loss_behavior_t)(LOSS_LAST + 1);
     c.node_info.sacn_priority = 201;
     CHECK(config_sanitize(&c));
     CHECK_MEM(&c, &d, sizeof(c));            /* every field back to its default */
@@ -929,6 +951,7 @@ static void test_sanitize_clamps_every_field(void)
         p->mab_us = 11;
         p->out_slots = 513;
         p->universe_secondary = -32768;
+        p->loss_behavior = LOSS_AS_NODE - 1;
     }
     c.merge.timeout_seconds = 0;
     CHECK(config_sanitize(&c));
@@ -951,6 +974,9 @@ static void test_sanitize_keeps_range_edges(void)
     p->break_us = CONFIG_DMX_BREAK_MAX;
     p->mab_us = CONFIG_DMX_MAB_MIN;
     p->out_slots = CONFIG_DMX_SLOTS_MIN;
+    p->loss_behavior = LOSS_LAST;
+    p->delta_output = true;
+    c.ports[1].loss_behavior = LOSS_HOLD_LAST_LOOK;
     c.merge.timeout_seconds = 1;
     c.merge.loss_behavior = LOSS_LAST;
     c.node_info.sacn_priority = 0;
@@ -1063,6 +1089,7 @@ int main(void)
     RUN(test_bad_json_leaves_config_alone);
     RUN(test_wrong_types_ignored);
     RUN(test_from_json_clamps_numbers);
+    RUN(test_port_loss_and_delta);
     RUN(test_bool_fields_accept_numbers);
     RUN(test_long_strings_truncated);
     RUN(test_web_api_cannot_set_credentials);

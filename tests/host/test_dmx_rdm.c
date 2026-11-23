@@ -711,9 +711,33 @@ static void test_resp_set_validation(void)
     v[0] = 2;
     want_nack(ask(SET, RDM_PID_IDENTIFY_DEVICE, ROOT, v, 1), RDM_NR_DATA_OUT_OF_RANGE);
     CHECK_EQ(start_address(), 1);
-    v[0] = 0; v[1] = 9;
+    v[0] = 0; v[1] = 9;                        /* 512 slots from 9 run past 512 */
+    want_nack(ask(SET, RDM_PID_DMX_START_ADDRESS, ROOT, v, 2), RDM_NR_DATA_OUT_OF_RANGE);
+    CHECK(!rdm_set_dmx_start_address(P, 9));
+    CHECK_EQ(start_address(), 1);
+    v[1] = 1;
     want_ack(ask(SET, RDM_PID_DMX_START_ADDRESS, ROOT, v, 2), RDM_PID_DMX_START_ADDRESS, 0);
-    CHECK_EQ(start_address(), 9);
+}
+
+/* A start address is taken only if the footprint fits, so it survives a restart */
+static void test_resp_address_fits_footprint(void)
+{
+    dmx_config_t c = DMX_CONFIG_DEFAULT;
+    dmx_personality_t ps[] = {{16, "16 slots"}};
+    CHECK(dmx_driver_install(P, &c, ps, 1));
+    T += 10000;
+    uint8_t v[2] = {0x01, 0xf1};               /* 497: slots 497-512 */
+    want_ack(ask(SET, RDM_PID_DMX_START_ADDRESS, ROOT, v, 2), RDM_PID_DMX_START_ADDRESS, 0);
+    CHECK_EQ(start_address(), 497);
+    v[1] = 0xf2;                               /* 498 would need slot 513 */
+    want_nack(ask(SET, RDM_PID_DMX_START_ADDRESS, ROOT, v, 2), RDM_NR_DATA_OUT_OF_RANGE);
+    CHECK_EQ(start_address(), 497);
+    while (dmx_parameter_commit(P)) {}
+    s_locks = 0;                               /* not what is tested here */
+    CHECK(dmx_driver_delete(P));
+    CHECK(dmx_driver_install(P, &c, ps, 1));
+    T += 10000;
+    CHECK_EQ(start_address(), 497);
 }
 
 static void test_resp_label(void)
@@ -1456,6 +1480,7 @@ int main(void)
     RUN(test_resp_length_mismatch);
     RUN(test_resp_personality_description);
     RUN(test_resp_set_validation);
+    RUN(test_resp_address_fits_footprint);
     RUN(test_resp_label);
     RUN(test_resp_label_survives_restart);
     RUN(test_resp_saved_on_delete);

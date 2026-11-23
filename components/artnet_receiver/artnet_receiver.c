@@ -149,7 +149,7 @@ static void build_reply(uint8_t *r, const artnet_node_status_t *st, int port_idx
             r[182] = go;
             r[190] = pa & 0x0F;               /* SwOut */
         }
-        uint8_t gob = 0x40;                   /* continuous output */
+        uint8_t gob = p->delta ? 0 : 0x40;   /* bit 6: continuous output */
         if (!p->rdm_enabled)     gob |= 0x80;
         if (!p->rdm_discovering) gob |= 0x20;
         if (!p->rdm_enabled || !p->rdm_background) gob |= 0x10;
@@ -164,7 +164,8 @@ static void build_reply(uint8_t *r, const artnet_node_status_t *st, int port_idx
     r[212] = 0x01 | (st->dhcp ? 0x02 : 0x00) | 0x04 | 0x08;   /* Status2 */
     /* Status3: failsafe state (7-6), programmable failsafe (5), port
      * direction switchable (3) */
-    r[217] = (uint8_t)(((st->failsafe & 0x03) << 6) | 0x20 | 0x08);
+    uint8_t failsafe = p ? p->failsafe : st->failsafe;
+    r[217] = (uint8_t)(((failsafe & 0x03) << 6) | 0x20 | 0x08);
     r[226] = 0;                                /* RefreshRateHi */
     r[227] = ARTNET_REFRESH_HZ;                /* RefreshRateLo */
 }

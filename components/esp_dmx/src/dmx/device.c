@@ -36,6 +36,18 @@ bool dmx_set_start_address(dmx_port_t dmx_num, uint16_t dmx_start_address) {
   return true;
 }
 
+/* WIFIDMX: the boot check resets an address whose footprint runs past slot
+   512, so the same rule refuses it when it is set */
+bool dmx_start_address_fits(dmx_port_t dmx_num, uint32_t dmx_start_address) {
+  if (dmx_start_address < 1 || dmx_start_address >= DMX_PACKET_SIZE_MAX) {
+    return false;
+  }
+  const uint8_t personality = dmx_get_current_personality(dmx_num);
+  const size_t footprint =
+      personality > 0 ? dmx_get_footprint(dmx_num, personality) : 0;
+  return dmx_start_address + footprint <= DMX_PACKET_SIZE_MAX;
+}
+
 uint8_t dmx_get_current_personality(dmx_port_t dmx_num) {
   DMX_CHECK(dmx_num < DMX_NUM_MAX, 0, "dmx_num error");
   DMX_CHECK(dmx_driver_is_installed(dmx_num), 0, "driver is not installed");

@@ -626,6 +626,28 @@ static void test_failsafe_scene(void)
     CHECK_EQ(out[5], 0);
 }
 
+static void test_failsafe_stop_output(void)
+{
+    merge_engine_set_loss_behavior(1, LOSS_STOP_OUTPUT, NULL);
+    push_artnet(1, IP_A, fill(77), 512);
+    get(1);
+    CHECK(!merge_engine_output_stopped(1));
+    lose_sources();
+    CHECK(merge_engine_output_stopped(1));      /* the frame source sends nothing */
+    CHECK_EQ(out[0], 77);                       /* the last look stays readable */
+    merge_engine_set_local_channel(1, 1, 9);    /* a scene or the web console */
+    get(1);
+    CHECK(!merge_engine_output_stopped(1));
+    merge_engine_clear_local(1);
+    get(1);
+    CHECK(merge_engine_output_stopped(1));
+    push_artnet(1, IP_A, fill(5), 512);         /* data returns: output again */
+    get(1);
+    CHECK(!merge_engine_output_stopped(1));
+    CHECK_EQ(out[0], 5);
+    CHECK(!merge_engine_output_stopped(0));     /* no such port */
+}
+
 static void test_failsafe_not_before_first_source(void)
 {
     merge_engine_set_loss_behavior(1, LOSS_FULL, NULL);
@@ -861,6 +883,7 @@ int main(void)
     RUN(test_failsafe_blackout);
     RUN(test_failsafe_full);
     RUN(test_failsafe_scene);
+    RUN(test_failsafe_stop_output);
     RUN(test_failsafe_not_before_first_source);
     RUN(test_local_layer_htp_on_top);
     RUN(test_artnet_sync_latches);

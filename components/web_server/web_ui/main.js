@@ -697,10 +697,13 @@ const app = {
     // ------------------------------------------------------------------------
 
     renderSystemInfo(d) {
+        if (!d) return;
         const notice = d.settings_notice || '';
         setText('settingsNotice', notice);
         $('settingsBanner').hidden = !notice;
-        if (!d) return;
+        const safe = d.safe_mode || '';
+        setText('safeNotice', safe);
+        $('safeBanner').hidden = !safe;
         setText('sysFw', d.firmware_version || '--');
         setText('sysBuilt', d.build_date ? `${d.build_date} ${d.build_time || ''}`.trim() : '--');
         setText('sysBoard', d.board || d.hardware || '--');
@@ -728,6 +731,16 @@ const app = {
             const html = Object.keys(names).map(k =>
                 `<span class="chip ${d.features[k] ? 'ok' : ''}" title="${d.features[k] ? 'built in' : 'not built in'}">${d.features[k] ? '' : '<s>'}${names[k]}${d.features[k] ? '' : '</s>'}</span>`).join('');
             this._setHtml(fe, html);
+        }
+    },
+
+    async leaveSafeMode() {
+        try {
+            await this.post('/api/system/safe-mode/leave');
+            $('safeBanner').hidden = true;
+            this.toast('Starting the DMX ports', 'success');
+        } catch (e) {
+            this.toast(`Could not start the ports: ${e.message}`, 'error');
         }
     },
 
@@ -1487,6 +1500,20 @@ const app = {
                             <small class="help" data-local-help></small></div>` : ''}
                         ${this.has('rdm') ? `<div data-rdm-opt><label class="check"><input type="checkbox" name="rdm_enabled">
                             <span><strong>RDM on this output</strong><small>Find and address fixtures, and answer RDM over Art-Net. RDM controller mode always has it.</small></span></label></div>` : ''}
+                        <div class="fields two section">
+                            <div class="field"><label>When every source is lost</label><select name="loss_behavior">
+                                <option value="-1">As the node (Merging and failsafe)</option>
+                                <option value="0">Hold the last look</option>
+                                <option value="1">Blackout (zero)</option>
+                                <option value="2">Full (every channel at 255)</option>
+                                ${this.has('scenes') ? '<option value="3">Failsafe scene</option>' : ''}
+                                <option value="4">Stop output (send nothing)</option></select>
+                                <small class="help">"Stop output" leaves it to the fixtures: most hold, some fade out.</small></div>
+                            <div class="field"><label>Output style</label><select name="delta_output">
+                                <option value="0">Continuous</option>
+                                <option value="1">Delta (only when the levels change)</option></select>
+                                <small class="help">Delta sends a frame only when the levels change, and repeats it every 0.8 s. For fixtures or recorders that want less traffic.</small></div>
+                        </div>
                         <div class="subcard">
                             <h3 style="margin-top:0">Output timing</h3>
                             <div class="fields">
@@ -1607,6 +1634,9 @@ const app = {
         set('break_us', pc.break_us ?? 176);
         set('mab_us', pc.mab_us ?? 12);
         set('out_slots', pc.out_slots ?? 512);
+        set('loss_behavior', String(pc.loss_behavior ?? -1));
+        if (f.elements.loss_behavior && f.elements.loss_behavior.selectedIndex < 0) f.elements.loss_behavior.value = '-1';
+        set('delta_output', pc.delta_output ? '1' : '0');
         for (const k of ['startup_scene', 'failsafe_scene']) {
             const sel = f.elements[k];
             if (sel) { sel.dataset.want = String(pc[k] || 0); sel.value = sel.dataset.want; }
@@ -1742,6 +1772,8 @@ const app = {
         if (g('rdm_enabled')) pc.rdm_enabled = g('rdm_enabled').checked;
         if (g('startup_scene')) pc.startup_scene = clampInt(g('startup_scene').value, 0, 255, 0);
         if (g('failsafe_scene')) pc.failsafe_scene = clampInt(g('failsafe_scene').value, 0, 255, 0);
+        if (g('loss_behavior')) pc.loss_behavior = clampInt(g('loss_behavior').value, -1, 4, -1);
+        if (g('delta_output')) pc.delta_output = g('delta_output').value === '1';
         const local = this.readLocal(f);
         if (local) Object.assign(pc, local);
         if (g('send_to')) {
@@ -1893,7 +1925,21 @@ const app = {
         if (main) main.disabled = true;
         this.rdmStatus('Discovering… this takes a few seconds.', 'info', port);
         try {
-            const devices = await this.post('/api/rdm/discover');
+            /* The node starts it and answers at once: a long list takes
+               longer than one request should keep the web server busy */
+            const res = await this.post('/api/rdm/discover');
+            const ports = (res && Array.isArray(res.started)) ? res.started.map(Number) : [];
+            const until = Date.now() + 180000;
+            while (ports.length && Date.now() < until) {
+                await sleep(1000);
+                const st = await this.api('/api/ports/status', { quiet: true }).catch(() => null);
+                if (!Array.isArray(st)) continue;
+                const mine = st.filter(p => p && ports.includes(parseInt(p.port)));
+                if (!mine.some(p => p.rdm_discovering)) break;
+                const found = mine.reduce((n, p) => n + (parseInt(p.rdm_devices) || 0), 0);
+                if (found) this.rdmStatus(`Discovering… ${plural(found, 'device')} so far.`, 'info', port);
+            }
+            const devices = await this.api('/api/rdm/devices');
             this.rdmDevices = Array.isArray(devices) ? devices : [];
             this.renderRdm();
             const mine = port ? this.rdmDevices.filter(d => parseInt(d.port) === port) : this.rdmDevices;

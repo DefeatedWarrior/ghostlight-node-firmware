@@ -5,6 +5,10 @@
  * Everything runs in one task. The Art-Net receive task and the discovery
  * tasks only post messages to it, so RDM transactions (which hold the DMX
  * bus for up to ~30 ms) never stall Art-Net reception.
+ *
+ * Messages are queued at their own size, so a console's burst of requests
+ * (most are about 26 bytes) fits: about 36 in the 2 KB queue, about 140 in
+ * 8 KB of PSRAM.
  */
 
 #include "rdm_bridge.h"
@@ -15,7 +19,9 @@
 #include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
+#include "freertos/ringbuf.h"
+#include "esp_heap_caps.h"
+#include "sdkconfig.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -23,7 +29,13 @@ static const char *TAG = "rdm_bridge";
 
 #define BRIDGE_TASK_STACK     4096
 #define BRIDGE_TASK_PRIORITY  5
-#define BRIDGE_QUEUE_LEN      8
+#if CONFIG_SPIRAM
+#define BRIDGE_QUEUE_BYTES    8192                  /* in PSRAM */
+#else
+#define BRIDGE_QUEUE_BYTES    2048
+#endif
+#define REQUEST_MAX_AGE_US    (3LL * 1000000)       /* the controller gave up on it by then */
+#define RDM_GET_ATTEMPTS      3                     /* a GET whose reply was lost, and two more */
 #define BRIDGE_PORTS          DMX_PORT_MAX
 #define SUBSCRIBERS_MAX       8
 #define SUBSCRIBER_TTL_US     (15LL * 60 * 1000000)  /* forget controllers after 15 min */
@@ -36,11 +48,19 @@ typedef enum {
     MSG_DISCOVERY_DONE,
 } msg_type_t;
 
+/* What artnet_rdm_event_t carries, without its fixed-size arrays */
 typedef struct {
-    msg_type_t type;
+    uint8_t type;                /* msg_type_t */
+    uint8_t ev_type;             /* artnet_rdm_event_type_t */
     uint8_t port;                /* DISCOVERY_DONE */
-    artnet_rdm_event_t ev;       /* ARTNET (ev.rdm points into rdm[]) */
-    uint8_t rdm[RDM_MAX_PACKET];
+    uint8_t net;
+    uint8_t command;
+    uint8_t address_count;
+    uint16_t port_address;
+    uint32_t source_ip;
+    uint16_t len;                /* of data: the addresses (TOD_REQUEST) or the RDM packet */
+    int64_t queued_us;
+    uint8_t data[];
 } bridge_msg_t;
 
 typedef struct {
@@ -55,7 +75,7 @@ typedef struct {
 } bridge_port_t;
 
 static struct {
-    QueueHandle_t queue;
+    RingbufHandle_t queue;
     TaskHandle_t task;
     bridge_port_t ports[BRIDGE_PORTS];
     /* refresh_tod() scratch, bridge task only: too big for its stack */
@@ -213,11 +233,21 @@ static void on_tod_control(const artnet_rdm_event_t *ev)
     send_tod(ev->source_ip, idx);
 }
 
-static void on_rdm(const artnet_rdm_event_t *ev)
+/* Lost (no reply) or garbled: worth asking again */
+static bool reply_lost(esp_err_t err)
+{
+    return err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_CRC;
+}
+
+static void on_rdm(const artnet_rdm_event_t *ev, int64_t queued_us)
 {
     uint8_t port = port_for_address(ev->port_address);
     if (!port || ev->command != 0x00) return;   /* only ArProcess */
     s_br.stats.rdm_requests++;
+    if (esp_timer_get_time() - queued_us > REQUEST_MAX_AGE_US) {
+        s_br.stats.rdm_expired++;   /* the controller has asked again or given up */
+        return;
+    }
 
     /* RdmPacket starts at the sub-start code; message length counts the
      * start code, so the packet must hold at least ML-1 bytes */
@@ -229,6 +259,7 @@ static void on_rdm(const artnet_rdm_event_t *ev)
     }
     uint8_t ml = r[1];
     uint8_t cc = r[19];
+    uint16_t pid = (uint16_t)(r[20] << 8 | r[21]);
     if (cc != RDM_CC_GET_COMMAND && cc != RDM_CC_SET_COMMAND) {
         s_br.stats.rdm_rejected++;   /* discovery is proxied by the node */
         return;
@@ -242,10 +273,21 @@ static void on_rdm(const artnet_rdm_event_t *ev)
     req[ml] = sum >> 8;
     req[ml + 1] = sum & 0xFF;
 
+    /* A GET whose reply was lost is asked again. Not a SET: it may have been
+     * done, and only its reply lost. Nor QUEUED_MESSAGE or STATUS_MESSAGES:
+     * each reply hands a message over once, so asking again would skip one. */
+    int attempts = (cc == RDM_CC_GET_COMMAND && pid != RDM_PID_QUEUED_MESSAGE &&
+                    pid != RDM_PID_STATUS_MESSAGE) ? RDM_GET_ATTEMPTS : 1;
     uint8_t resp[RDM_MAX_PACKET];
     size_t resp_len = 0;
-    esp_err_t err = dmx_handler_rdm_transaction(port, req, (size_t)ml + 2, resp, sizeof(resp),
-                                                &resp_len);
+    esp_err_t err = ESP_FAIL;
+    for (int a = 0; a < attempts; a++) {
+        if (a) s_br.stats.rdm_retries++;
+        resp_len = 0;
+        err = dmx_handler_rdm_transaction(port, req, (size_t)ml + 2, resp, sizeof(resp),
+                                          &resp_len);
+        if (!reply_lost(err)) break;
+    }
     if (err == ESP_OK && resp_len > 1) {
         s_br.stats.rdm_responses++;
         artnet_receiver_send_rdm(ev->source_ip, port, s_br.ports[port - 1].port_address,
@@ -253,8 +295,7 @@ static void on_rdm(const artnet_rdm_event_t *ev)
     } else if (err == ESP_ERR_TIMEOUT) {
         s_br.stats.rdm_timeouts++;
     } else if (err != ESP_OK) {
-        ESP_LOGD(TAG, "Port %u: ArtRdm PID 0x%02x%02x failed: %s", port, r[20], r[21],
-                 esp_err_to_name(err));
+        ESP_LOGD(TAG, "Port %u: ArtRdm PID 0x%04x failed: %s", port, pid, esp_err_to_name(err));
     }
 }
 
@@ -309,33 +350,51 @@ static void supervise(void)
     }
 }
 
+/* Handle one queued message, waiting up to @p wait for it */
+static void bridge_step(TickType_t wait)
+{
+    size_t size = 0;
+    bridge_msg_t *m = xRingbufferReceive(s_br.queue, &size, wait);
+    if (!m) return;
+    if (m->type == MSG_DISCOVERY_DONE) {
+        on_discovery_done(m->port);
+    } else {
+        artnet_rdm_event_t ev = {
+            .type = (artnet_rdm_event_type_t)m->ev_type,
+            .source_ip = m->source_ip,
+            .net = m->net,
+            .command = m->command,
+            .port_address = m->port_address,
+        };
+        switch (ev.type) {
+        case ARTNET_RDM_EV_TOD_REQUEST:
+            ev.address_count = m->address_count;
+            memcpy(ev.addresses, m->data, (size_t)m->address_count * sizeof(uint16_t));
+            on_tod_request(&ev);
+            break;
+        case ARTNET_RDM_EV_TOD_CONTROL:
+            on_tod_control(&ev);
+            break;
+        case ARTNET_RDM_EV_RDM:
+            ev.rdm = m->data;
+            ev.rdm_len = m->len;
+            on_rdm(&ev, m->queued_us);
+            break;
+        }
+    }
+    vRingbufferReturnItem(s_br.queue, m);
+}
+
 static void bridge_task(void *arg)
 {
     (void)arg;
-    bridge_msg_t *m = malloc(sizeof(bridge_msg_t));
-    if (!m) {
-        ESP_LOGE(TAG, "Out of memory");
-        vTaskDelete(NULL);
-        return;
-    }
     int64_t last_supervise = 0;
     /* Task watchdog: the queue wait is 500 ms and each RDM exchange has its
      * own timeouts, so 10 s without a pass means the bridge is stuck */
     esp_task_wdt_add(NULL);
     for (;;) {
         esp_task_wdt_reset();
-        if (xQueueReceive(s_br.queue, m, pdMS_TO_TICKS(500)) == pdTRUE) {
-            if (m->type == MSG_DISCOVERY_DONE) {
-                on_discovery_done(m->port);
-            } else {
-                m->ev.rdm = m->rdm;
-                switch (m->ev.type) {
-                case ARTNET_RDM_EV_TOD_REQUEST: on_tod_request(&m->ev); break;
-                case ARTNET_RDM_EV_TOD_CONTROL: on_tod_control(&m->ev); break;
-                case ARTNET_RDM_EV_RDM:         on_rdm(&m->ev);         break;
-                }
-            }
-        }
+        bridge_step(pdMS_TO_TICKS(500));
         int64_t now = esp_timer_get_time();
         if (now - last_supervise > 1000000) {
             last_supervise = now;
@@ -351,18 +410,31 @@ static void bridge_task(void *arg)
 static void artnet_rdm_cb(const artnet_rdm_event_t *ev, void *user_data)
 {
     (void)user_data;
-    static bridge_msg_t m;   /* only the Art-Net receive task calls this */
-    m.type = MSG_ARTNET;
-    m.ev = *ev;
-    m.ev.rdm = NULL;
-    m.ev.rdm_len = 0;
-    if (ev->type == ARTNET_RDM_EV_RDM && ev->rdm) {
-        uint16_t n = ev->rdm_len > sizeof(m.rdm) ? sizeof(m.rdm) : ev->rdm_len;
-        memcpy(m.rdm, ev->rdm, n);
-        m.ev.rdm_len = n;
+    /* only the Art-Net receive task calls this */
+    static union {
+        bridge_msg_t m;
+        uint8_t bytes[sizeof(bridge_msg_t) + RDM_MAX_PACKET];
+    } u;
+    bridge_msg_t *m = &u.m;
+    memset(m, 0, sizeof(*m));
+    m->type = MSG_ARTNET;
+    m->ev_type = (uint8_t)ev->type;
+    m->net = ev->net;
+    m->command = ev->command;
+    m->port_address = ev->port_address;
+    m->source_ip = ev->source_ip;
+    m->queued_us = esp_timer_get_time();
+    if (ev->type == ARTNET_RDM_EV_TOD_REQUEST) {
+        uint8_t n = ev->address_count < 32 ? ev->address_count : 32;
+        m->address_count = n;
+        m->len = (uint16_t)(n * sizeof(uint16_t));
+        memcpy(m->data, ev->addresses, m->len);
+    } else if (ev->type == ARTNET_RDM_EV_RDM && ev->rdm) {
+        m->len = ev->rdm_len > RDM_MAX_PACKET ? RDM_MAX_PACKET : ev->rdm_len;
+        memcpy(m->data, ev->rdm, m->len);
     }
-    if (xQueueSend(s_br.queue, &m, 0) != pdTRUE) {
-        s_br.stats.rdm_rejected++;   /* busy: the controller will retry */
+    if (xRingbufferSend(s_br.queue, m, sizeof(*m) + m->len, 0) != pdTRUE) {
+        s_br.stats.rdm_queue_full++;   /* the controller will ask again */
     }
 }
 
@@ -371,12 +443,8 @@ static void discovery_cb(uint8_t port, uint8_t count, bool aborted, void *user_d
     (void)count;
     (void)aborted;
     (void)user_data;
-    bridge_msg_t *m = malloc(sizeof(bridge_msg_t));
-    if (!m) return;
-    m->type = MSG_DISCOVERY_DONE;
-    m->port = port;
-    xQueueSend(s_br.queue, m, pdMS_TO_TICKS(100));
-    free(m);
+    bridge_msg_t m = {.type = MSG_DISCOVERY_DONE, .port = port};
+    xRingbufferSend(s_br.queue, &m, sizeof(m), pdMS_TO_TICKS(100));
 }
 
 // ============================================================================
@@ -389,11 +457,23 @@ esp_err_t rdm_bridge_start(void)
     for (int i = 0; i < BRIDGE_PORTS; i++) {
         s_br.ports[i].background = true;
     }
-    s_br.queue = xQueueCreate(BRIDGE_QUEUE_LEN, sizeof(bridge_msg_t));
+    bool in_psram = false;
+#if CONFIG_SPIRAM
+    s_br.queue = xRingbufferCreateWithCaps(BRIDGE_QUEUE_BYTES, RINGBUF_TYPE_NOSPLIT,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    in_psram = s_br.queue != NULL;
+#endif
+    if (!s_br.queue) {
+        s_br.queue = xRingbufferCreate(BRIDGE_QUEUE_BYTES, RINGBUF_TYPE_NOSPLIT);
+    }
     if (!s_br.queue) return ESP_ERR_NO_MEM;
     if (xTaskCreatePinnedToCore(bridge_task, "rdm_bridge", BRIDGE_TASK_STACK, NULL,
                                 BRIDGE_TASK_PRIORITY, &s_br.task, 0) != pdPASS) {
-        vQueueDelete(s_br.queue);
+        if (in_psram) {
+            vRingbufferDeleteWithCaps(s_br.queue);
+        } else {
+            vRingbufferDelete(s_br.queue);
+        }
         s_br.queue = NULL;
         return ESP_ERR_NO_MEM;
     }

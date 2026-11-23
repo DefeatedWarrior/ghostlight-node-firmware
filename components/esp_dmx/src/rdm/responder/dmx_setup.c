@@ -297,6 +297,8 @@ bool rdm_set_dmx_start_address(dmx_port_t dmx_num, uint16_t dmx_start_address) {
   DMX_CHECK(dmx_start_address > 0 && dmx_start_address < DMX_PACKET_SIZE_MAX, 0,
             "dmx_start_address error");
   DMX_CHECK(dmx_driver_is_installed(dmx_num), 0, "driver is not installed");
+  DMX_CHECK(dmx_start_address_fits(dmx_num, dmx_start_address), 0,
+            "the footprint runs past slot 512");  // WIFIDMX
 
   const rdm_pid_t pid = RDM_PID_DMX_START_ADDRESS;
   if (!dmx_parameter_set(dmx_num, RDM_SUB_DEVICE_ROOT, pid, &dmx_start_address,

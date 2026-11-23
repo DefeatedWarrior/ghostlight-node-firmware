@@ -312,6 +312,21 @@ static void test_artpoll_replies_per_port(void)
     CHECK_EQ(r->data[211], 2);
 }
 
+static void test_artpoll_output_style_and_failsafe(void)
+{
+    node.failsafe = ARTNET_FAILSAFE_ZERO;           /* the node's */
+    node.ports[0].delta = true;
+    node.ports[0].failsafe = ARTNET_FAILSAFE_SCENE; /* port 1 has its own */
+    node.ports[1].failsafe = ARTNET_FAILSAFE_ZERO;
+    uint8_t b[64];
+    feed(b, pk_artpoll(b, 0, 0, 0, 0));
+    CHECK_EQ(host_sent_count, 2);
+    CHECK_EQ(host_sent[0].data[213] & 0x40, 0);     /* GoodOutputB: delta */
+    CHECK_EQ(host_sent[1].data[213] & 0x40, 0x40);  /* continuous */
+    CHECK_EQ(host_sent[0].data[217] >> 6, ARTNET_FAILSAFE_SCENE);   /* Status3 */
+    CHECK_EQ(host_sent[1].data[217] >> 6, ARTNET_FAILSAFE_ZERO);
+}
+
 static void test_artpoll_targeted(void)
 {
     uint8_t b[64];
@@ -768,6 +783,7 @@ int main(void)
     RUN(test_unknown_and_ignored_opcodes);
     RUN(test_own_packets_ignored);
     RUN(test_artpoll_replies_per_port);
+    RUN(test_artpoll_output_style_and_failsafe);
     RUN(test_artpoll_targeted);
     RUN(test_artpoll_no_ports_still_announces);
     RUN(test_artpoll_other_subnet_unicast);

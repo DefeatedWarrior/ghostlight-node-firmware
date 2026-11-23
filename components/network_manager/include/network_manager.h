@@ -91,6 +91,7 @@ typedef struct {
     char netmask[16];
     char gateway[16];
     uint8_t mac[6];
+    uint32_t restarts;       /**< times the W5500 was set up again (eth_watch.h) */
 } network_eth_info_t;
 
 typedef struct {
@@ -152,6 +153,12 @@ esp_err_t network_ethernet_connect(const ip_config_t *config);
 esp_err_t network_ethernet_disconnect(void);
 /** Switch between DHCP and a static address while running */
 esp_err_t network_ethernet_set_ip(const ip_config_t *config);
+/**
+ * Call regularly (the supervisor does, 4 times a second): sets the W5500 up
+ * again when nothing has arrived for a long time with the link up
+ * (eth_watch.h). Blocks for a moment when it does.
+ */
+void network_ethernet_watch(void);
 /** Ethernet has a link and an address */
 bool network_ethernet_is_link_up(void);
 void network_get_eth_info(network_eth_info_t *info);

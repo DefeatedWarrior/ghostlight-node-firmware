@@ -44,6 +44,7 @@ ap.add_argument('--no-ethernet', action='store_true', help='firmware built witho
 ap.add_argument('--off', default='', help='comma-separated features to leave out: ' + ','.join(FEATURES))
 ap.add_argument('--setup', action='store_true', help='show the first-run setup')
 ap.add_argument('--notice', default='', help='settings notice to show (as after a damaged settings file)')
+ap.add_argument('--safe-mode', action='store_true', help='start in safe mode (boot-loop guard: DMX ports off)')
 ap.add_argument('--no-login', action='store_true', help='sign-in turned off (setup done without a password)')
 ap.add_argument('--signal', default='good', choices=['good', 'offbyone', 'nothing', 'filtered', 'lossy', 'multicast', 'clash'],
                 help='what the signal check hears (default: good)')
@@ -70,6 +71,7 @@ def default_port(n):
         'startup_scene': 0, 'failsafe_scene': 0,
         'rules': [{'type': 'park', 'channel': 512, 'count': 1, 'level': 255}] if n == 1 else [],
         'local_inputs': [], 'local_only': False,
+        'loss_behavior': -1, 'delta_output': False,
         'send_to': 'all', 'send_list': [],
     }
 
@@ -128,6 +130,9 @@ S = {
     'log': '',
     'crash': True,
     'notice': args.notice,
+    'safe': ('The node restarted after a crash 3 times in a row, each within a minute of starting '
+             '(last: crash (panic)), so it started with the DMX ports off. The network and the '
+             'settings work as usual. The crash report is under System.') if args.safe_mode else '',
     'wifi': {'state': 'connected', 'ssid': 'Theatre-Tech', 'connect_at': 0},
     'ap_linger_until': 0,
 }
@@ -402,6 +407,7 @@ def system_info():
         'tester': {'available': FEAT['tester'], 'enabled': S['tester'], 'next_boot': bool(S['config']['tester']['enabled'])},
         'board_id': 'ghostlight-rev1',
         **({'settings_notice': S['notice']} if S['notice'] else {}),
+        **({'safe_mode': S['safe']} if S['safe'] else {}),
     }
 
 
@@ -443,7 +449,7 @@ def ports_status():
             'protocol': ['artnet', 'sacn', 'both', 'both', 'both'][pc['protocol_mode']] if FEAT['sacn'] else 'artnet',
             'frames_sent': S['frames_sent'][i], 'frames_received': S['an'][i]['frames'], 'errors': S['an'][i]['err_framing'],
             'signal': S['signal'][i], 'slots': 512, 'rdm_available': FEAT['rdm'] and (mode == 3 or (mode == 1 and pc['rdm_enabled'])),
-            'rdm_discovering': False, 'rdm_devices': len([d for d in S['rdm'] if d['port'] == n]),
+            'rdm_discovering': time.time() < S.get('rdm_until', 0), 'rdm_devices': len([d for d in S['rdm'] if d['port'] == n]),
             'rdm_tod_valid': any(d['port'] == n for d in S['rdm']), 'output_active': mode in (1, 3),
             'sync': 'none', 'scene': 0, 'failsafe': False, 'timing': timing(n),
         }
@@ -584,7 +590,7 @@ def tester_json():
         mode = port_mode(n)
         o = dict(t, port=n, active=mode != 0, mode=mode, signal=S['signal'][i], frames_sent=S['frames_sent'][i],
                  frames_received=S['an'][i]['frames'], errors=S['an'][i]['err_framing'],
-                 rdm_devices=len([d for d in S['rdm'] if d['port'] == n]), rdm_discovering=False,
+                 rdm_devices=len([d for d in S['rdm'] if d['port'] == n]), rdm_discovering=time.time() < S.get('rdm_until', 0),
                  rdm_tod_valid=any(d['port'] == n for d in S['rdm']), timing=timing(n))
         if n in S['tests']:
             o['test'] = test_json(n)
@@ -840,12 +846,16 @@ class H(SimpleHTTPRequestHandler):
             return {'status': 'ok'}
 
         if p == '/api/rdm/discover':
-            time.sleep(1.5)
+            # As the node: starts it, answers at once, and the page follows
+            # rdm_discovering in /api/ports/status
             S['rdm'] = []
+            started = []
             for n in range(1, NP + 1):
                 if port_mode(n) == 3 or (not S['tester'] and port_mode(n) == 1 and cfg[f'port{n}']['rdm_enabled']):
                     S['rdm'] += rdm_devices_for(n)
-            return S['rdm']
+                    started.append(n)
+            S['rdm_until'] = time.time() + 2.5
+            return {'started': started}
         if p == '/api/rdm/devices':
             return S['rdm']
         if p == '/api/rdm/address':
@@ -960,6 +970,9 @@ class H(SimpleHTTPRequestHandler):
             return ('application/octet-stream', b'\0' * 64, 'esp-node-coredump.bin')
         if p == '/api/diag/crash/clear':
             S['crash'] = False
+            return {'status': 'ok'}
+        if p == '/api/system/safe-mode/leave':
+            S['safe'] = ''
             return {'status': 'ok'}
         if p == '/api/system/notice/clear':
             S['notice'] = ''

@@ -5,7 +5,9 @@
  * EV_NETCFG).
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "lwip/inet.h"
 #include "merge_engine.h"
@@ -15,12 +17,30 @@
 
 static const char *TAG = "main";
 
-/* Art-Net VersInfo (BCD-ish major.minor), keep in step with PROJECT_VER */
-#define FW_VERSION_ARTNET     0x0100
+/* Art-Net VersInfo: major.minor of PROJECT_VER ("1.2.0" -> 0x0102) */
+static uint16_t artnet_version(void)
+{
+    char *end;
+    unsigned long major = strtoul(esp_app_get_description()->version, &end, 10);
+    unsigned long minor = *end == '.' ? strtoul(end + 1, NULL, 10) : 0;
+    return (uint16_t)(((major & 0xFF) << 8) | (minor & 0xFF));
+}
 
 // ============================================================================
 // Art-Net node status / ArtAddress
 // ============================================================================
+
+/* The failsafe state ArtPollReply reports. "Stop output" has no code of
+ * its own: the fixtures then do what they do on a loss, mostly hold. */
+static uint8_t artnet_failsafe(loss_behavior_t loss)
+{
+    switch (loss) {
+        case LOSS_BLACKOUT: return ARTNET_FAILSAFE_ZERO;
+        case LOSS_FULL:     return ARTNET_FAILSAFE_FULL;
+        case LOSS_SCENE:    return ARTNET_FAILSAFE_SCENE;
+        default:            return ARTNET_FAILSAFE_HOLD;
+    }
+}
 
 void app_artnet_status(artnet_node_status_t *st, void *user_data)
 {
@@ -36,13 +56,8 @@ void app_artnet_status(artnet_node_status_t *st, void *user_data)
     memcpy(st->netmask, &ni.netmask, 4);
     memcpy(st->mac, ni.mac, 6);
     st->dhcp = ni.dhcp;
-    st->firmware_version = FW_VERSION_ARTNET;
-    switch (c->merge.loss_behavior) {
-        case LOSS_BLACKOUT: st->failsafe = ARTNET_FAILSAFE_ZERO; break;
-        case LOSS_FULL:     st->failsafe = ARTNET_FAILSAFE_FULL; break;
-        case LOSS_SCENE:    st->failsafe = ARTNET_FAILSAFE_SCENE; break;
-        default:            st->failsafe = ARTNET_FAILSAFE_HOLD; break;
-    }
+    st->firmware_version = artnet_version();
+    st->failsafe = artnet_failsafe(c->merge.loss_behavior);
     st->indicator = g_app.indicator;
     st->sacn_priority = c->node_info.sacn_priority;
 
@@ -71,6 +86,9 @@ void app_artnet_status(artnet_node_status_t *st, void *user_data)
         ap->rdm_background = false;
 #endif
         ap->input_errors = ds.stats.error_count > g_app.route[p].err_baseline;
+        ap->delta = pc->delta_output;
+        ap->failsafe = artnet_failsafe(pc->loss_behavior >= 0 ? (loss_behavior_t)pc->loss_behavior
+                                                              : c->merge.loss_behavior);
         memset(ap->responder_uid, 0, 6);
         if (pc->mode == DMX_MODE_RDM_RESPONDER) {
             dmx_handler_get_uid(p + 1, ap->responder_uid);
@@ -94,7 +112,10 @@ void app_artnet_status(artnet_node_status_t *st, void *user_data)
 
 void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
 {
-    int p = (cmd->port >= 1 && cmd->port <= NPORTS) ? cmd->port : 1;
+    if (cmd->port < 1 || cmd->port > NPORTS) {
+        return;     /* a port this node doesn't have: never program another one */
+    }
+    int p = cmd->port;
     bool changed = false, short_named = false, long_named = false;
     struct in_addr from = {.s_addr = cmd->source_ip};
 
@@ -133,7 +154,8 @@ void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
         changed = true;
     }
 
-    uint8_t loss = c->merge.loss_behavior;
+    /* AcFail*: the port's own loss behaviour if it has one, else the node's */
+    int loss = -1;
     switch (op) {
         case ARTNET_AC_FAIL_HOLD:  loss = LOSS_HOLD_LAST_LOOK; break;
         case ARTNET_AC_FAIL_ZERO:  loss = LOSS_BLACKOUT; break;
@@ -141,8 +163,10 @@ void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
         case ARTNET_AC_FAIL_SCENE: loss = LOSS_SCENE; break;
         default: break;
     }
-    if (loss != c->merge.loss_behavior) {
-        c->merge.loss_behavior = loss;
+    if (loss >= 0 && pc->loss_behavior >= 0) {
+        if (pc->loss_behavior != loss) { pc->loss_behavior = (int8_t)loss; changed = true; }
+    } else if (loss >= 0 && (int)c->merge.loss_behavior != loss) {
+        c->merge.loss_behavior = (loss_behavior_t)loss;
         changed = true;
     }
 
@@ -164,6 +188,10 @@ void app_artnet_address(const artnet_address_cmd_t *cmd, void *user_data)
             pc->rdm_enabled = true; changed = true;
         } else if (hi == ARTNET_AC_RDM_DISABLE0 && pc->rdm_enabled) {
             pc->rdm_enabled = false; changed = true;
+        } else if (hi == ARTNET_AC_STYLE_DELTA0 && !pc->delta_output) {
+            pc->delta_output = true; changed = true;
+        } else if (hi == ARTNET_AC_STYLE_CONST0 && pc->delta_output) {
+            pc->delta_output = false; changed = true;
         }
     }
     if (changed) {

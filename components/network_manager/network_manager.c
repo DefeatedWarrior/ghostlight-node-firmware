@@ -31,15 +31,18 @@
 #include "esp_event.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "board.h"
 #include "board_gpio.h"
 #include "captive_dns.h"
+#include "eth_watch.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/event_groups.h"
+#include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -49,6 +52,16 @@ static const char *TAG = "network_mgr";
 #define STA_READY_BIT   BIT1   /* station has an address */
 
 /* W5500 wiring: components/board/include/boards/<board>.h */
+
+/* W5500 reset where the board wires RSTn (datasheet, Reset Timing): low for
+ * at least 500 us, then up to 1 ms for its PLL to lock. IDF 5.2 holds it
+ * low for 100 us. */
+#define W5500_RESET_LOW_US   1000
+#define W5500_RESET_WAIT_MS  3
+
+#if CONFIG_ESP_NETIF_L2_TAP
+#error "eth_input() replaces the netif glue's input, which also feeds L2 TAP"
+#endif
 
 #define SCAN_CACHE_MAX      24
 
@@ -68,6 +81,13 @@ static esp_eth_handle_t s_eth_handle;
 static volatile bool s_eth_running;
 static volatile bool s_eth_link;
 static volatile bool s_eth_dhcp = true;
+#if CONFIG_NODE_ETHERNET
+static esp_eth_mac_t *s_eth_mac;
+static esp_eth_phy_t *s_eth_phy;
+static volatile uint32_t s_eth_rx_frames;   /* every frame the W5500 hands over */
+static eth_watch_t s_eth_watch;
+#endif
+static uint32_t s_eth_restarts;
 
 /* WiFi */
 static bool s_wifi_initialized;          /* esp_wifi_init() may only run once */
@@ -512,6 +532,91 @@ static void eth_apply_ip(const ip_config_t *config)
     refresh_state(false);
 }
 
+#if CONFIG_NODE_ETHERNET
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* phy->reset_hw: the reset pulse the W5500 asks for (see W5500_RESET_LOW_US) */
+static esp_err_t w5500_reset_hw(esp_eth_phy_t *phy)
+{
+    (void)phy;
+    if (BOARD_ETH_RST_GPIO < 0) {
+        return ESP_OK;   /* not wired: the driver's software reset only */
+    }
+    gpio_set_direction(BOARD_ETH_RST_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(BOARD_ETH_RST_GPIO, 0);
+    esp_rom_delay_us(W5500_RESET_LOW_US);
+    gpio_set_level(BOARD_ETH_RST_GPIO, 1);
+    vTaskDelay(pdMS_TO_TICKS(W5500_RESET_WAIT_MS));
+    return ESP_OK;
+}
+
+/* The netif glue's own input (esp_eth_netif_glue.c), counting the frames */
+static esp_err_t eth_input(esp_eth_handle_t handle, uint8_t *buffer, uint32_t length, void *priv)
+{
+    (void)handle;
+    s_eth_rx_frames++;   /* one writer (the W5500 task), read by the supervisor */
+    return esp_netif_receive((esp_netif_t *)priv, buffer, length, NULL);
+}
+
+/* MAC address and filter: lost whenever the chip resets */
+static void eth_setup_mac(esp_eth_handle_t handle)
+{
+    /* W5500 has no factory MAC; use the ESP32's Ethernet MAC */
+    uint8_t mac_addr[6];
+    esp_read_mac(mac_addr, ESP_MAC_ETH);
+    esp_eth_ioctl(handle, ETH_CMD_S_MAC_ADDR, mac_addr);
+    ESP_LOGI(TAG, "W5500 MAC " MACSTR, MAC2STR(mac_addr));
+
+    /* Let multicast through (sACN), see file header */
+    bool promiscuous = true;
+    esp_err_t ret = esp_eth_ioctl(handle, ETH_CMD_S_PROMISCUOUS, &promiscuous);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "W5500 MAC filter could not be disabled (%s): sACN multicast "
+                 "over Ethernet will not work", esp_err_to_name(ret));
+    }
+}
+
+/* Reset the W5500 and set it up from scratch, keeping the driver and the
+ * netif (mDNS and the sockets keep theirs); the addresses come back as on
+ * a cable plugged in again */
+static void eth_restart_chip(void)
+{
+    s_eth_restarts++;
+    esp_eth_stop(s_eth_handle);
+    s_eth_mac->deinit(s_eth_mac);
+    s_eth_phy->reset_hw(s_eth_phy);
+    esp_err_t ret = s_eth_mac->init(s_eth_mac);
+    if (ret == ESP_OK) ret = s_eth_phy->init(s_eth_phy);
+    if (ret == ESP_OK) {
+        eth_setup_mac(s_eth_handle);
+        ret = esp_eth_start(s_eth_handle);
+    }
+    if (ret != ESP_OK) {
+        /* the supervisor starts it again on its next look */
+        ESP_LOGE(TAG, "W5500 set-up failed: %s", esp_err_to_name(ret));
+        s_eth_running = false;
+        refresh_state(false);
+    }
+}
+#endif /* CONFIG_NODE_ETHERNET */
+
+void network_ethernet_watch(void)
+{
+#if CONFIG_NODE_ETHERNET
+    if (!s_eth_handle) return;
+    if (!eth_watch_step(&s_eth_watch, s_eth_running && s_eth_link, s_eth_rx_frames, now_ms())) {
+        return;
+    }
+    ESP_LOGW(TAG, "Ethernet: the link is up but nothing has arrived for a while; "
+             "setting the W5500 up again (try %" PRIu32 ", the next after %" PRIu32 " s "
+             "more of silence)", s_eth_watch.tries, s_eth_watch.limit_s);
+    eth_restart_chip();
+#endif
+}
+
 esp_err_t network_ethernet_connect(const ip_config_t *config)
 {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
@@ -583,6 +688,7 @@ esp_err_t network_ethernet_connect(const ip_config_t *config)
         mac->del(mac);
         return ESP_FAIL;
     }
+    phy->reset_hw = w5500_reset_hw;   /* the driver install pulses it: long enough */
 
     esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(mac, phy);
     esp_eth_handle_t handle = NULL;
@@ -595,19 +701,9 @@ esp_err_t network_ethernet_connect(const ip_config_t *config)
         return ret;
     }
 
-    /* W5500 has no factory MAC; use the ESP32's Ethernet MAC */
-    uint8_t mac_addr[6];
-    esp_read_mac(mac_addr, ESP_MAC_ETH);
-    esp_eth_ioctl(handle, ETH_CMD_S_MAC_ADDR, mac_addr);
-    ESP_LOGI(TAG, "W5500 MAC " MACSTR, MAC2STR(mac_addr));
-
-    /* Let multicast through (sACN), see file header */
-    bool promiscuous = true;
-    ret = esp_eth_ioctl(handle, ETH_CMD_S_PROMISCUOUS, &promiscuous);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "W5500 MAC filter could not be disabled (%s): sACN multicast "
-                 "over Ethernet will not work", esp_err_to_name(ret));
-    }
+    eth_setup_mac(handle);
+    s_eth_mac = mac;
+    s_eth_phy = phy;
 
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
     s_eth_netif = esp_netif_new(&netif_cfg);
@@ -618,6 +714,8 @@ esp_err_t network_ethernet_connect(const ip_config_t *config)
     }
     esp_netif_set_hostname(s_eth_netif, s_hostname);
     esp_netif_attach(s_eth_netif, esp_eth_new_netif_glue(handle));
+    esp_eth_update_input_path(handle, eth_input, s_eth_netif);   /* count what arrives */
+    eth_watch_init(&s_eth_watch, s_eth_rx_frames, now_ms());
     s_eth_handle = handle;
 
     eth_apply_ip(config);
@@ -669,6 +767,7 @@ void network_get_eth_info(network_eth_info_t *info)
     info->link = s_eth_link;
     info->ready = network_ethernet_is_link_up();
     info->dhcp = s_eth_dhcp;
+    info->restarts = s_eth_restarts;
     if (s_eth_netif) {
         if (info->ready) ip_strings(s_eth_netif, info->ip, info->netmask, info->gateway);
         esp_netif_get_mac(s_eth_netif, info->mac);

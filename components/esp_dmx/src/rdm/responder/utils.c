@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "dmx/include/device.h"
 #include "dmx/include/driver.h"
 #include "dmx/include/service.h"
 #include "rdm/include/uid.h"
@@ -147,6 +148,12 @@ size_t rdm_simple_response_handler(dmx_port_t dmx_num,
         }
         if (is_unsigned && definition->max_value != 0 &&
             (value < definition->min_value || value > definition->max_value)) {
+          return rdm_write_nack_reason(dmx_num, header,
+                                       RDM_NR_DATA_OUT_OF_RANGE);
+        }
+        /* WIFIDMX: the footprint must fit, or the address resets at boot */
+        if (header->pid == RDM_PID_DMX_START_ADDRESS &&
+            !dmx_start_address_fits(dmx_num, value)) {
           return rdm_write_nack_reason(dmx_num, header,
                                        RDM_NR_DATA_OUT_OF_RANGE);
         }

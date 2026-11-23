@@ -100,6 +100,7 @@ typedef struct {
     SemaphoreHandle_t out_done;
     SemaphoreHandle_t in_done;
     SemaphoreHandle_t trigger;      /* "send the next frame now" (sync) */
+    volatile bool delta;            /* delta output (dmx_handler_set_output_delta) */
     EventGroupHandle_t disc_events;
     TaskHandle_t out_task;
     TaskHandle_t in_task;
@@ -308,6 +309,10 @@ static void output_task(void *arg)
     dmx_output_timing_t tm = effective_timing(p);
     TickType_t period = period_ticks(&tm);
     TickType_t next = xTaskGetTickCount() + period;
+    /* delta output: the last frame sent, and when */
+    uint8_t prev[DMX_CHANNEL_COUNT];
+    bool have_prev = false;
+    TickType_t last_sent = xTaskGetTickCount();
     xSemaphoreTake(p->trigger, 0);
     esp_task_wdt_add(NULL);
 
@@ -327,26 +332,46 @@ static void output_task(void *arg)
             ESP_LOGI(TAG, "Port %u: output %u Hz, break %u us, MAB %u us, %u slots",
                      p->port_num, tm.rate_hz, tm.break_us, tm.mab_us, tm.slots);
         }
+        bool send = true;
         dmx_frame_source_t src = p->source;
         if (src) {
-            src(p->port_num, &frame[1], p->source_ctx);
+            send = src(p->port_num, &frame[1], p->source_ctx);
         } else {
             xSemaphoreTake(p->data_mutex, portMAX_DELAY);
             memcpy(&frame[1], p->buffer, DMX_CHANNEL_COUNT);
             xSemaphoreGive(p->data_mutex);
         }
 
-        xSemaphoreTake(p->bus, portMAX_DELAY);
-        dmx_wait_sent(p->dmx_num, pdMS_TO_TICKS(50));
-        dmx_write(p->dmx_num, frame, (size_t)tm.slots + 1);
-        size_t sent = dmx_send_num(p->dmx_num, (size_t)tm.slots + 1);
-        xSemaphoreGive(p->bus);
-        /* An RDM request is waiting: step aside so it gets the bus before
-         * the next frame. Otherwise, when this task is catching up after a
-         * late frame, it takes the bus straight back (higher priority) and
-         * RDM can wait seconds. */
-        if (atomic_load(&p->rdm_waiting) > 0) {
-            vTaskDelay(1);
+        /* Delta output sends a frame only when the levels changed (new data,
+         * scenes, fades, test patterns), and again once the last one is
+         * DMX_DELTA_KEEPALIVE_MS old so the fixtures don't see a loss.
+         * Consoles often resend unchanged data at full rate. */
+        bool delta = p->delta;
+        if (!send) {
+            have_prev = false;          /* stopped: the next frame goes out */
+        } else if (delta && have_prev &&
+                   xTaskGetTickCount() - last_sent < pdMS_TO_TICKS(DMX_DELTA_KEEPALIVE_MS) &&
+                   memcmp(prev, &frame[1], tm.slots) == 0) {
+            send = false;
+        }
+
+        size_t sent = 0;
+        if (send) {
+            xSemaphoreTake(p->bus, portMAX_DELAY);
+            dmx_wait_sent(p->dmx_num, pdMS_TO_TICKS(50));
+            dmx_write(p->dmx_num, frame, (size_t)tm.slots + 1);
+            sent = dmx_send_num(p->dmx_num, (size_t)tm.slots + 1);
+            xSemaphoreGive(p->bus);
+            /* An RDM request is waiting: step aside so it gets the bus before
+             * the next frame. Otherwise, when this task is catching up after a
+             * late frame, it takes the bus straight back (higher priority) and
+             * RDM can wait seconds. */
+            if (atomic_load(&p->rdm_waiting) > 0) {
+                vTaskDelay(1);
+            }
+            last_sent = xTaskGetTickCount();
+            memcpy(prev, &frame[1], DMX_CHANNEL_COUNT);
+            have_prev = true;
         }
 
         if (sent) {
@@ -608,6 +633,19 @@ static void set_bias(const port_t *p, bool on)
     }
 }
 
+/*
+ * Removing the driver under a running task would crash it, and starting the
+ * port again would give the port two tasks: so wait for as long as it takes.
+ * Both tasks are on the task watchdog, which restarts the node first if one
+ * is really stuck.
+ */
+static void wait_task_stopped(const port_t *p, SemaphoreHandle_t done, const char *what)
+{
+    while (xSemaphoreTake(done, pdMS_TO_TICKS(DMX_TASK_STOP_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "Port %u: waiting for the %s task to stop", p->port_num, what);
+    }
+}
+
 /* Caller holds state_mutex */
 static void stop_port_locked(port_t *p)
 {
@@ -625,15 +663,11 @@ static void stop_port_locked(port_t *p)
 
     p->run = false;
     if (p->out_task) {
-        if (xSemaphoreTake(p->out_done, pdMS_TO_TICKS(DMX_TASK_STOP_MS)) != pdTRUE) {
-            ESP_LOGE(TAG, "Port %u: output task did not stop", p->port_num);
-        }
+        wait_task_stopped(p, p->out_done, "output");
         p->out_task = NULL;
     }
     if (p->in_task) {
-        if (xSemaphoreTake(p->in_done, pdMS_TO_TICKS(DMX_TASK_STOP_MS)) != pdTRUE) {
-            ESP_LOGE(TAG, "Port %u: input task did not stop", p->port_num);
-        }
+        wait_task_stopped(p, p->in_done, "input");
         p->in_task = NULL;
     }
 
@@ -754,6 +788,7 @@ esp_err_t dmx_handler_configure_port(uint8_t port, const port_config_t *config)
     p->mode = config->mode;
     p->universe = config->universe_primary;
     p->rdm_enabled = config->rdm_enabled;
+    p->delta = config->delta_output;
     p->is_configured = true;
     p->timing = (dmx_output_timing_t){
         .rate_hz = config->out_rate_hz, .break_us = config->break_us,
@@ -937,6 +972,18 @@ esp_err_t dmx_handler_set_frame_source(uint8_t port, dmx_frame_source_t source, 
     p->source = NULL;
     p->source_ctx = user_data;
     p->source = source;
+    return ESP_OK;
+}
+
+esp_err_t dmx_handler_set_output_delta(uint8_t port, bool delta)
+{
+    port_t *p = get_port(port);
+    if (!p) return ESP_ERR_INVALID_ARG;
+    if (p->delta != delta) {
+        p->delta = delta;
+        ESP_LOGI(TAG, "Port %u: %s output", port, delta ? "delta" : "continuous");
+        if (p->is_active) xSemaphoreGive(p->trigger);   /* the new style from now */
+    }
     return ESP_OK;
 }
 
@@ -1202,19 +1249,34 @@ static bool ack_timer_wait(const port_t *p, const rdm_ack_t *ack, uint32_t *left
     return !p->disc_abort;
 }
 
+/*
+ * Ask again? Yes if the fixture asked for time (see ack_timer_wait), or if its
+ * reply was lost or garbled and this read has tries left. Only reads (GETs)
+ * use this: asking one twice does no harm.
+ */
+#define RDM_GET_TRIES 3
+static bool ask_again(const port_t *p, const rdm_ack_t *ack, uint32_t *left, int *tries)
+{
+    if (ack->type == RDM_RESPONSE_TYPE_NONE || ack->type == RDM_RESPONSE_TYPE_INVALID) {
+        return !p->disc_abort && --*tries > 0;
+    }
+    return ack_timer_wait(p, ack, left);
+}
+
 static void read_device_info(port_t *p, rdm_device_t *dev)
 {
     rdm_ack_t ack;
     rdm_device_info_t info;
     uint32_t left = RDM_ACK_TIMER_MAX_MS;
     size_t got;
+    int tries = RDM_GET_TRIES;
 
     memset(&info, 0, sizeof(info));
     do {
         ack = ACK_INIT;
         got = RDM_LOCKED(p, rdm_send_get_device_info(p->dmx_num, &dev->uid,
                                                      RDM_SUB_DEVICE_ROOT, &info, &ack));
-    } while (ack_timer_wait(p, &ack, &left));
+    } while (ask_again(p, &ack, &left, &tries));
     if (got > 0 && ack.type == RDM_RESPONSE_TYPE_ACK) {
         p->stats.rdm_responses_rx++;
         dev->device_model = info.model_id;
@@ -1239,10 +1301,11 @@ static void read_device_info(port_t *p, rdm_device_t *dev)
             .pid = labels[i].pid,
         };
         char tmp[33] = {0};     /* 32 characters and the null */
+        tries = RDM_GET_TRIES;
         do {
             ack = ACK_INIT;
             got = RDM_LOCKED(p, rdm_send_request(p->dmx_num, &req, "a$", tmp, sizeof(tmp), &ack));
-        } while (ack_timer_wait(p, &ack, &left));
+        } while (ask_again(p, &ack, &left, &tries));
         if (got > 0 && ack.type == RDM_RESPONSE_TYPE_ACK) {
             p->stats.rdm_responses_rx++;
             memcpy(labels[i].dst, tmp, 32);
@@ -1251,11 +1314,12 @@ static void read_device_info(port_t *p, rdm_device_t *dev)
     }
 
     char sw[33] = {0};
+    tries = RDM_GET_TRIES;
     do {
         ack = ACK_INIT;
         got = RDM_LOCKED(p, rdm_send_get_software_version_label(
                                 p->dmx_num, &dev->uid, RDM_SUB_DEVICE_ROOT, sw, sizeof(sw), &ack));
-    } while (ack_timer_wait(p, &ack, &left));
+    } while (ask_again(p, &ack, &left, &tries));
     if (got > 0 && ack.type == RDM_RESPONSE_TYPE_ACK) {
         memcpy(dev->software_label, sw, 32);
         dev->software_label[32] = '\0';
@@ -1655,7 +1719,9 @@ esp_err_t dmx_handler_rdm_set(uint8_t port, const rdm_uid_t uid, uint16_t pid,
     };
     (void)RDM_LOCKED(p, rdm_send_request(p->dmx_num, &req, NULL, NULL, 0, &ack));
     bool broadcast = rdm_uid_is_broadcast(&uid);
-    if (!broadcast && ack.type != RDM_RESPONSE_TYPE_ACK) {
+    /* ACK_TIMER: the fixture took the SET and finishes it in its own time */
+    if (!broadcast && ack.type != RDM_RESPONSE_TYPE_ACK &&
+        ack.type != RDM_RESPONSE_TYPE_ACK_TIMER) {
         ESP_LOGW(TAG, "RDM SET 0x%04x to " UIDSTR " failed (type %d, err %d)",
                  pid, UID2STR(uid), ack.type, ack.err);
         return ack.type == RDM_RESPONSE_TYPE_NONE ? ESP_ERR_TIMEOUT : ESP_FAIL;
@@ -1671,14 +1737,34 @@ esp_err_t dmx_handler_rdm_set_address(uint8_t port, const rdm_uid_t uid, uint16_
     if (!dmx_handler_rdm_available(port)) return ESP_ERR_INVALID_STATE;
 
     rdm_ack_t ack = ACK_INIT;
+    uint32_t sent = p->stats.rdm_requests_sent;
     (void)RDM_LOCKED(p, rdm_send_set_dmx_start_address(p->dmx_num, &uid, RDM_SUB_DEVICE_ROOT,
                                                  address, &ack));
-    if (ack.type != RDM_RESPONSE_TYPE_ACK) {
+    if (rdm_uid_is_broadcast(&uid)) {
+        /* Nobody answers a broadcast: sent is as good as it gets */
+        if (p->stats.rdm_requests_sent == sent) return ESP_ERR_INVALID_STATE;
+    } else if (ack.type == RDM_RESPONSE_TYPE_ACK_TIMER) {
+        /* Taken, but it needs time: wait as long as it asked, then read it back */
+        uint32_t left = RDM_ACK_TIMER_MAX_MS;
+        uint16_t now = 0;
+        size_t got = 0;
+        rdm_ack_t back = ack;
+        while (ack_timer_wait(p, &back, &left)) {
+            back = ACK_INIT;
+            got = RDM_LOCKED(p, rdm_send_get_dmx_start_address(p->dmx_num, &uid,
+                                                         RDM_SUB_DEVICE_ROOT, &now, &back));
+        }
+        if (!got || back.type != RDM_RESPONSE_TYPE_ACK || now != address) {
+            ESP_LOGW(TAG, "Port %u: " UIDSTR " asked for time and didn't take address %u",
+                     p->port_num, UID2STR(uid), address);
+            return ESP_ERR_TIMEOUT;
+        }
+    } else if (ack.type != RDM_RESPONSE_TYPE_ACK) {
         return ack.type == RDM_RESPONSE_TYPE_NONE ? ESP_ERR_TIMEOUT : ESP_FAIL;
     }
     xSemaphoreTake(p->data_mutex, portMAX_DELAY);
     for (int i = 0; i < p->device_count; i++) {
-        if (rdm_uid_is_eq(&p->devices[i].uid, &uid)) {
+        if (rdm_uid_is_target(&p->devices[i].uid, &uid)) {
             p->devices[i].dmx_start_address = address;
         }
     }

@@ -18,6 +18,7 @@ int host_log_enabled;
 static int64_t T;
 static int s_core, s_deadlocks, s_blocked_holding_bus, s_create_fail;
 static void (*s_on_delay)(void);
+static void (*s_on_timeout)(void);     /* a timed wait on a semaphore ran out */
 
 int64_t esp_timer_get_time(void) { return T; }
 TickType_t xTaskGetTickCount(void) { return (TickType_t)(T / 1000); }
@@ -41,6 +42,7 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t wait)
     }
     if (wait == portMAX_DELAY) s_deadlocks++;
     else T += (int64_t)wait * 1000;
+    if (wait != portMAX_DELAY && s_on_timeout) s_on_timeout();
     return pdFALSE;
 }
 BaseType_t xSemaphoreGive(SemaphoreHandle_t s)
@@ -138,7 +140,7 @@ bool rdm_send_response(dmx_port_t n) { (void)n; return true; }
 size_t rdm_get_identify_device(dmx_port_t n, bool *i) { (void)n; *i = false; return 1; }
 
 /* the raw relay's line */
-static struct { uint8_t sent[300], reply[300]; size_t sent_len, reply_len; TickType_t wait; int sends; } raw;
+static struct { uint8_t sent[DMX_FRAME_SIZE], reply[300]; size_t sent_len, reply_len; TickType_t wait; int sends; } raw;
 
 bool dmx_wait_sent(dmx_port_t n, TickType_t w) { (void)n; (void)w; return true; }
 size_t dmx_write(dmx_port_t n, const void *s, size_t len)
@@ -184,6 +186,9 @@ static struct {
     int drop;           /* mute replies still to lose */
     int busy;           /* ACK_TIMERs still to send */
     int timer_ms;
+    int lose;           /* replies to GETs still to lose */
+    int addr;           /* the DMX start address it has */
+    bool keeps_addr;    /* ignores a new one */
 } fx[FX_MAX];
 static int s_nf, s_lookups;
 static const char LABEL32[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
@@ -238,6 +243,10 @@ static bool answer(const rdm_uid_t *u, rdm_ack_t *ack)
     int i = fixture(u);
     s_lookups++;
     if (i < 0) return false;
+    if (fx[i].lose) {
+        fx[i].lose--;
+        return false;
+    }
     ack->src_uid = *u;
     if (fx[i].busy) {
         fx[i].busy--;
@@ -283,8 +292,19 @@ size_t rdm_send_get_software_version_label(dmx_port_t n, const rdm_uid_t *u, rdm
 bool rdm_send_set_dmx_start_address(dmx_port_t n, const rdm_uid_t *u, rdm_sub_device_t s,
                                     const uint16_t a, rdm_ack_t *ack)
 {
-    (void)n; (void)s; (void)a;
-    return answer(u, ack);
+    (void)n; (void)s;
+    for (int i = 0; i < s_nf; i++) {
+        if (!fx[i].cut && !fx[i].keeps_addr && rdm_uid_is_target(&fx[i].u, u)) fx[i].addr = a;
+    }
+    return answer(u, ack);      /* a broadcast finds no one to answer */
+}
+size_t rdm_send_get_dmx_start_address(dmx_port_t n, const rdm_uid_t *u, rdm_sub_device_t s,
+                                      uint16_t *a, rdm_ack_t *ack)
+{
+    (void)n; (void)s;
+    if (!answer(u, ack)) return 0;
+    *a = (uint16_t)fx[fixture(u)].addr;
+    return 2;
 }
 
 /* ---- helpers ----------------------------------------------------------- */
@@ -314,6 +334,7 @@ static void reset(void)
     memset(fx, 0, sizeof(fx));
     s_nf = s_lookups = s_deadlocks = s_blocked_holding_bus = s_create_fail = 0;
     s_on_delay = NULL;
+    s_on_timeout = NULL;
     s_core = BOARD_CORE_NET;
     T = 1000000;
     dmx_handler_init();
@@ -525,6 +546,29 @@ static void test_discovery_ack_timer_bounded(void)
     CHECK(T - t0 <= 1100000);
 }
 
+static void test_discovery_reads_lost_replies_again(void)
+{
+    fixtures(1);
+    fx[0].lose = 2;                 /* DEVICE_INFO's first two replies */
+    full();
+    rdm_device_t d;
+    size_t n = 1;
+    dmx_handler_get_rdm_devices(1, &d, &n);
+    CHECK_EQ(n, 1);
+    CHECK_EQ(d.dmx_start_address, 101);
+    CHECK(!strcmp(d.device_label, LABEL32));
+    CHECK(!strcmp(d.software_label, LABEL32));
+}
+
+static void test_discovery_reads_give_up(void)
+{
+    fixtures(1);
+    fx[0].lose = 1000000;           /* answers discovery, never a GET */
+    full();
+    CHECK_EQ(listed(), 1);
+    CHECK(s_lookups <= 5 * RDM_GET_TRIES);
+}
+
 static void abort_now(void) { dmx_handler_rdm_abort_discovery(1); }
 
 static void test_discovery_abort_keeps_list(void)
@@ -621,6 +665,183 @@ static void test_relay_only_requests(void)
     CHECK_EQ(raw.sends, 1);
 }
 
+/* ---- stopping a port --------------------------------------------------- */
+
+static int s_slow_task_waits, s_waits_with_driver;
+static void slow_task(void)
+{
+    if (drv.installed[P1->dmx_num]) s_waits_with_driver++;
+    if (++s_slow_task_waits == 3) xSemaphoreGive(P1->out_done);   /* stops at last */
+}
+
+/* ---- output task: stop output, delta output ---------------------------- */
+
+static struct { bool send, changing; uint8_t level; int calls, change_at; int64_t end; } src;
+
+static bool test_source(uint8_t port, uint8_t *data, void *ud)
+{
+    (void)ud;
+    src.calls++;
+    if (src.changing) src.level++;      /* new levels faster than the port rate */
+    if (src.calls == src.change_at) src.level = 7;
+    memset(data, src.level, 512);
+    if (T >= src.end) P1->run = false;
+    return src.send;
+}
+
+/* Run the output task for @p ms of fake time; the frames it sent (the pass
+ * that ends the run sends one too) */
+static int run_output(int ms)
+{
+    int before = raw.sends;
+    src.end = T + (int64_t)ms * 1000;
+    P1->run = true;
+    output_task(P1);
+    return raw.sends - before;
+}
+
+static int start_output(void)
+{
+    configure(DMX_MODE_OUTPUT);
+    dmx_handler_start_port(1);
+    dmx_handler_set_frame_source(1, test_source, NULL);
+    memset(&src, 0, sizeof(src));
+    src.send = true;
+    dmx_output_timing_t tm = effective_timing(P1);
+    return (int)period_ticks(&tm);    /* ms per frame */
+}
+
+static void test_output_stopped(void)
+{
+    int period = start_output();
+    CHECK(P1->is_active);
+    src.send = false;                   /* "stop output" while every source is lost */
+    CHECK_EQ(run_output(1000), 0);
+    CHECK_EQ(P1->stats.frames_sent, 0);
+    CHECK(src.calls >= 1000 / period - 1);   /* still asked at the port's rate */
+    src.send = true;                    /* a source is back */
+    int n = run_output(1000);
+    CHECK(n >= 1000 / period && n <= 1000 / period + 2);
+}
+
+static void test_output_delta(void)
+{
+    int period = start_output();
+    CHECK_EQ(dmx_handler_set_output_delta(1, true), ESP_OK);
+    src.change_at = 1100 / period;      /* a scene, a fade or a test pattern changes it */
+    /* the first frame, the same again 800 ms later, the change, and the
+     * changed frame again 800 ms after that: nothing in between */
+    CHECK_EQ(run_output(2500), 4);
+    CHECK_EQ(raw.sent[1], 7);
+    CHECK(src.calls >= 2500 / period);  /* it still looked at the port's rate */
+
+    src.change_at = 0;
+    src.changing = true;                /* new levels faster than the port rate */
+    int n = run_output(1000);
+    CHECK(n >= 1000 / period && n <= 1000 / period + 2);   /* never faster */
+
+    src.changing = false;
+    CHECK_EQ(dmx_handler_set_output_delta(1, false), ESP_OK);
+    n = run_output(1000);               /* continuous again */
+    CHECK(n >= 1000 / period && n <= 1000 / period + 2);
+    CHECK_EQ(dmx_handler_set_output_delta(9, true), ESP_ERR_INVALID_ARG);
+}
+
+static void test_stop_waits_for_a_slow_task(void)
+{
+    int64_t t0 = T;
+    s_on_timeout = slow_task;
+    CHECK_EQ(dmx_handler_stop_port(1), ESP_OK);
+    CHECK_EQ(s_slow_task_waits, 3);
+    CHECK_EQ(s_waits_with_driver, 3);           /* the driver stayed until then */
+    CHECK(!drv.installed[P1->dmx_num]);
+    CHECK(T - t0 >= 3 * 1500000);
+    CHECK_EQ(dmx_handler_start_port(1), ESP_OK);
+}
+
+/* ---- SETs from the web UI ---------------------------------------------- */
+
+static uint16_t listed_address(int i)
+{
+    rdm_device_t d[FX_MAX];
+    size_t n = FX_MAX;
+    dmx_handler_get_rdm_devices(1, d, &n);
+    for (size_t k = 0; k < n; k++) {
+        if (U(d[k].uid) == U(fx[i].u)) return d[k].dmx_start_address;
+    }
+    return 0;
+}
+
+static void test_set_address(void)
+{
+    fixtures(1);
+    full();
+    CHECK_EQ(dmx_handler_rdm_set_address(1, fx[0].u, 33), ESP_OK);
+    CHECK_EQ(fx[0].addr, 33);
+    CHECK_EQ(listed_address(0), 33);
+}
+
+static void test_set_address_ack_timer(void)
+{
+    fixtures(1);
+    full();
+    fx[0].busy = 1;
+    fx[0].timer_ms = 200;
+    int64_t t0 = T;
+    CHECK_EQ(dmx_handler_rdm_set_address(1, fx[0].u, 40), ESP_OK);
+    CHECK(T - t0 >= 200000);                   /* waited before reading it back */
+    CHECK_EQ(listed_address(0), 40);
+    CHECK_EQ(s_blocked_holding_bus, 0);
+}
+
+static void test_set_address_ack_timer_not_taken(void)
+{
+    fixtures(1);
+    full();
+    fx[0].busy = 1;
+    fx[0].timer_ms = 100;
+    fx[0].keeps_addr = true;
+    CHECK_EQ(dmx_handler_rdm_set_address(1, fx[0].u, 40), ESP_ERR_TIMEOUT);
+    CHECK_EQ(listed_address(0), 101);          /* from DEVICE_INFO, unchanged */
+}
+
+static void test_set_address_ack_timer_bounded(void)
+{
+    fixtures(1);
+    full();
+    fx[0].busy = 1000000;
+    fx[0].timer_ms = 0;
+    int64_t t0 = T;
+    CHECK_EQ(dmx_handler_rdm_set_address(1, fx[0].u, 40), ESP_ERR_TIMEOUT);
+    CHECK(T - t0 <= 1100000);
+}
+
+static void test_set_address_broadcast(void)
+{
+    fixtures(3);
+    full();
+    CHECK_EQ(dmx_handler_rdm_set_address(1, RDM_UID_BROADCAST_ALL, 7), ESP_OK);
+    for (int i = 0; i < 3; i++) {
+        CHECK_EQ(fx[i].addr, 7);
+        CHECK_EQ(listed_address(i), 7);
+    }
+    rdm_uid_t maker = {0x4C44, 0xFFFFFFFF};    /* every fixture of one maker */
+    CHECK_EQ(dmx_handler_rdm_set_address(1, maker, 9), ESP_OK);
+    CHECK_EQ(listed_address(2), 9);
+}
+
+static void test_set_ack_timer_is_taken(void)
+{
+    fixtures(1);
+    full();
+    fx[0].busy = 1;
+    uint8_t on = 1;
+    CHECK_EQ(dmx_handler_rdm_set(1, fx[0].u, 0x1000, &on, 1), ESP_OK);
+    fixtures(1);
+    fx[0].cut = true;
+    CHECK_EQ(dmx_handler_rdm_set(1, fx[0].u, 0x1000, &on, 1), ESP_ERR_TIMEOUT);
+}
+
 /* ---- driver installs and saving ---------------------------------------- */
 
 static void test_install_on_dmx_core(void)
@@ -700,6 +921,17 @@ int main(void)
     RUN(test_discovery_labels_whole);
     RUN(test_discovery_ack_timer);
     RUN(test_discovery_ack_timer_bounded);
+    RUN(test_discovery_reads_lost_replies_again);
+    RUN(test_discovery_reads_give_up);
+    RUN(test_stop_waits_for_a_slow_task);
+    RUN(test_output_stopped);
+    RUN(test_output_delta);
+    RUN(test_set_address);
+    RUN(test_set_address_ack_timer);
+    RUN(test_set_address_ack_timer_not_taken);
+    RUN(test_set_address_ack_timer_bounded);
+    RUN(test_set_address_broadcast);
+    RUN(test_set_ack_timer_is_taken);
     RUN(test_discovery_abort_keeps_list);
     RUN(test_relay_takes_the_answer);
     RUN(test_relay_refuses_others);
