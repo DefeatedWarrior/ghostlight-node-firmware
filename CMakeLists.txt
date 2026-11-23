@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.5)
 # checkout, where the folder doesn't exist yet).
 
 # Firmware version (shown in the web UI, ArtPollReply and the OTA image)
-set(PROJECT_VER "1.2.0")
+set(PROJECT_VER "1.2.1")
 
 # Board: tools/build.sh <board> passes SDKCONFIG_DEFAULTS for the board it
 # builds. Plain `idf.py build` (no SDKCONFIG_DEFAULTS given) builds the

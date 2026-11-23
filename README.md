@@ -155,7 +155,7 @@ file) picked at build time with `tools/build.sh <board>`:
 |---|---|---|---|
 | `esp-node-2rdm` | ESP32-S3 dev board (N16R8) + W5500 + 2 RS485 transceivers | 16 MB / 8 MB | the prototype; runs |
 | `ghostlight-rev1` | [Ghostlight Node](https://github.com/DefeatedWarrior/ghostlight-node) rev1 PCB (ESP32-S3-WROOM-1-N8) | 8 MB / none | builds; not run on a board yet |
-| `esp32-devkitc` | ESP32 DevKitC (WROOM-32) + W5500 + 2 RS485 transceivers | 4 MB / none | builds; never run on hardware |
+| `esp32-devkitc` | ESP32 DevKitC (WROOM-32) + W5500 + 2 RS485 transceivers | 4 MB / none | runs (1.2.0 on a DevKitC); DMX ports not checked yet |
 | `esp32s3-devkitc` | ESP32-S3 DevKitC-1 + 2 RS485 transceivers (Wi-Fi only, no W5500) | 8 MB / none | builds; never run on hardware |
 
 **Your own board** needs:

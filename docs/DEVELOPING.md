@@ -54,7 +54,7 @@ link (ESP-IDF's own `__DATE__` only changes on a clean build).
 |---|---|---|---|---|---|
 | `esp-node-2rdm` | ESP32-S3 | 16 MB / 8 MB octal | `partitions_16mb.csv` | `boards/esp_node_2rdm.h` | prototype, in use |
 | `ghostlight-rev1` | ESP32-S3 (WROOM-1-N8) | 8 MB / none | `partitions_8mb.csv` | `boards/ghostlight_rev1.h` | PCB in [ghostlight-node](https://github.com/DefeatedWarrior/ghostlight-node), not run yet |
-| `esp32-devkitc` | ESP32 (WROOM-32) | 4 MB / none | `partitions_4mb.csv` | `boards/esp32_devkitc.h` | builds, **never run on hardware** |
+| `esp32-devkitc` | ESP32 (WROOM-32) | 4 MB / none | `partitions_4mb.csv` | `boards/esp32_devkitc.h` | runs: the 1.2.0 release on a DevKitC boots and answers Art-Net; DMX ports not checked |
 | `esp32s3-devkitc` | ESP32-S3 (DevKitC-1) | 8 MB / none | `partitions_8mb.csv` | `boards/esp32s3_devkitc.h` | Wi-Fi only (no W5500), builds, **never run on hardware** |
 
 Pin headers live in `components/board/include/`. Settings files live in
@@ -598,7 +598,7 @@ with a lost address or admin password back. One command per line, JSON after
 
 ```
 #GL {"id":1,"cmd":"info"}
-#GL> {"ok":true,"firmware_version":"1.2.0","board":"Ghostlight Node rev1",...,"id":1}
+#GL> {"ok":true,"firmware_version":"1.2.1","board":"Ghostlight Node rev1",...,"id":1}
 #GL {"id":2,"cmd":"set","config":{"node_info":{"short_name":"Stage Left"}}}
 #GL> {"ok":true,"restart_needed":false,"id":2}
 ```
